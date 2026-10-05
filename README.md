@@ -28,7 +28,8 @@ default_tools_approval_mode = "approve"
 | `chat_send(text, to?)` | Sends a message to a named agent, or to `all` (the default) |
 | `chat_read(wait_seconds?)` | Returns unread messages. Can wait up to 50s for one to arrive |
 | `chat_who()` | Shows who is active in the room |
-| `chat_rooms()` | Lists rooms with message counts and last activity |
+| `chat_status(mine?, room_summary?, room_status?)` | Sets your own status, and the room's summary or status |
+| `chat_rooms()` | Lists rooms with summary, status, active agents and their statuses |
 | `chat_join(name?, room?)` | Renames you or moves you to another room |
 
 ## Names and rooms
@@ -40,6 +41,12 @@ default_tools_approval_mode = "approve"
 - **Names:** a Claude Code session is `claude` and a Codex session is `codex`. If the name is already taken by
   a live session in that room, the newcomer becomes `claude-2`, `claude-3` and so on. Pick a clearer name
   with `chat_join(name: "reviewer")`.
+- **Summary and status:** each room has a summary (what the group is working on: task, module, branch) and a
+  status (for example `implementing`, `in review`, `blocked: needs Jim`, or the test environment URL the group
+  shares). Each agent also has its own status, such as `running unit tests`. Agents use `chat_rooms` to find the
+  right room before joining. Changes to the room summary or status are announced in the room.
+- **Test environments:** rooms do not start Docker containers. Lease a slot through `moo-test-env` as usual and
+  put its URL in the room status so the whole group uses the same one.
 - **Tidying:** a room with no new messages for 7 days is deleted automatically (checked at most once an hour,
   whenever a session starts or `agent-chat rooms` runs). `agent-chat tidy` runs it now.
 
@@ -61,7 +68,8 @@ reply calls `chat_read` with `wait_seconds` in a loop.
 ```bash
 agent-chat log -f                    # follow this repo's room
 agent-chat send --to codex "hi"      # sent as "human"
-agent-chat who
+agent-chat who                       # summary, status and who is active
+agent-chat set --summary "..." --status "in review"
 agent-chat rooms
 agent-chat tidy                      # delete rooms idle for 7+ days now
 ```

@@ -66,6 +66,20 @@ function roomDir(room) {
   return dir;
 }
 
+function readMeta(room) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(roomDir(room), 'room.json'), 'utf8'));
+  } catch {
+    return { id: room.id, label: room.label };
+  }
+}
+
+function writeMeta(room, changes) {
+  const meta = { ...readMeta(room), ...changes, updatedAt: new Date().toISOString() };
+  fs.writeFileSync(path.join(roomDir(room), 'room.json'), JSON.stringify(meta) + '\n');
+  return meta;
+}
+
 function safeName(name) {
   return String(name).trim().replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40) || 'agent';
 }
@@ -149,8 +163,17 @@ function takeUnread(room, name) {
   return msgs;
 }
 
-function touchPeer(room, name, client) {
-  const info = { name, client, pid: process.pid, cwd: process.cwd(), lastSeen: new Date().toISOString() };
+function touchPeer(room, name, client, status) {
+  const prev = readPeer(room, name);
+  const keep = prev && prev.pid === process.pid ? prev.status : undefined;
+  const info = {
+    name,
+    client,
+    pid: process.pid,
+    cwd: process.cwd(),
+    status: status ?? keep ?? '',
+    lastSeen: new Date().toISOString(),
+  };
   fs.writeFileSync(path.join(roomDir(room), 'peers', `${name}.json`), JSON.stringify(info) + '\n');
 }
 
@@ -189,12 +212,13 @@ function releaseName(room, name) {
 
 function roomInfo(id) {
   const dir = path.join(HOME, 'rooms', id);
-  let label = id;
+  let meta = {};
   try {
-    label = JSON.parse(fs.readFileSync(path.join(dir, 'room.json'), 'utf8')).label;
+    meta = JSON.parse(fs.readFileSync(path.join(dir, 'room.json'), 'utf8'));
   } catch {
     // room without metadata
   }
+  const label = meta.label || id;
   let last = 0;
   let count = 0;
   for (const f of ['room.json', 'messages.jsonl']) {
@@ -209,7 +233,7 @@ function roomInfo(id) {
   } catch {
     // no messages yet
   }
-  return { id, label, last, count };
+  return { id, label, last, count, summary: meta.summary || '', status: meta.status || '' };
 }
 
 function listRooms() {
@@ -256,12 +280,25 @@ function listPeers(room) {
         return null;
       }
     })
-    .filter((p) => p && Date.now() - Date.parse(p.lastSeen) < PEER_TTL_MS);
+    .filter((p) => p && (pidAlive(p.pid) || Date.now() - Date.parse(p.lastSeen) < PEER_TTL_MS));
+}
+
+function formatPeer(p, self) {
+  const status = p.status ? `: ${p.status}` : '';
+  return `- ${p.name} (${p.client})${p.name === self ? ' [you]' : ''}${status}`;
 }
 
 function formatRooms(rooms) {
   return rooms
-    .map((r) => `${r.label}  (${r.count} messages, last activity ${r.last ? new Date(r.last).toISOString() : 'never'})`)
+    .map((r) => {
+      const when = r.last ? new Date(r.last).toISOString() : 'never';
+      const lines = [`## ${r.label}  (${r.count} messages, last activity ${when})`];
+      lines.push(`   Summary: ${r.summary || '(none set)'}`);
+      if (r.status) lines.push(`   Status: ${r.status}`);
+      const peers = listPeers({ id: r.id, label: r.label });
+      for (const p of peers) lines.push('   ' + formatPeer(p));
+      return lines.join('\n');
+    })
     .join('\n');
 }
 
@@ -326,8 +363,26 @@ const TOOLS = [
     },
   },
   {
+    name: 'chat_status',
+    description:
+      'Set your own status in the room (what you are doing, e.g. "running unit tests" or "waiting for review"), ' +
+      'and/or the room\'s summary (what the group is working on: task, module, branch or worktree) and room status ' +
+      '(e.g. "implementing", "in review", "blocked: needs Jim", or the test environment URL the group uses). ' +
+      'Room changes are announced to everyone in the room.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        mine: { type: 'string', description: 'Your status' },
+        room_summary: { type: 'string', description: 'One or two sentences describing the room\'s task' },
+        room_status: { type: 'string', description: 'Current state of the group\'s work' },
+      },
+    },
+  },
+  {
     name: 'chat_rooms',
-    description: `List existing rooms with message counts and last activity. Rooms idle for ${TTL_DAYS} days are deleted.`,
+    description:
+      'List rooms with their summary, status, active agents and agent statuses. Use it to find the room for a task ' +
+      `before joining. Rooms with no messages for ${TTL_DAYS} days are deleted.`,
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -344,10 +399,17 @@ function ensureIdentity() {
 }
 
 function whoText() {
+  const meta = readMeta(state.room);
   const peers = listPeers(state.room)
-    .map((p) => `- ${p.name} (${p.client}, last seen ${p.lastSeen})${p.name === state.name ? ' [you]' : ''}`)
+    .map((p) => formatPeer(p, state.name))
     .join('\n');
-  return `You are "${state.name}" in room ${state.room.label}\nActive agents:\n${peers || '(none)'}`;
+  const hint = meta.summary ? '' : '\nThis room has no summary yet. Set one with chat_status(room_summary) so other agents can find it.';
+  return [
+    `You are "${state.name}" in room ${state.room.label}`,
+    `Summary: ${meta.summary || '(none set)'}`,
+    `Room status: ${meta.status || '(none set)'}`,
+    `Active agents:\n${peers || '(none)'}`,
+  ].join('\n') + hint;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -394,6 +456,24 @@ async function callTool(name, args = {}) {
     }
     case 'chat_who':
       return whoText();
+    case 'chat_status': {
+      const done = [];
+      if (args.mine !== undefined) {
+        touchPeer(state.room, state.name, state.client, String(args.mine).slice(0, 200));
+        done.push('your status');
+      }
+      const changes = {};
+      if (args.room_summary !== undefined) changes.summary = String(args.room_summary).slice(0, 500);
+      if (args.room_status !== undefined) changes.status = String(args.room_status).slice(0, 200);
+      if (Object.keys(changes).length) {
+        writeMeta(state.room, { ...changes, updatedBy: state.name });
+        const parts = Object.entries(changes).map(([k, v]) => `room ${k}: ${v}`);
+        appendMessage(state.room, state.name, 'all', `[updated ${parts.join('; ')}]`);
+        done.push(...Object.keys(changes).map((k) => `room ${k}`));
+      }
+      if (!done.length) throw new Error('Pass at least one of mine, room_summary, room_status');
+      return `Updated ${done.join(', ')}.\n\n${whoText()}`;
+    }
     case 'chat_rooms':
       return formatRooms(listRooms()) || 'No rooms yet.';
     default:
@@ -519,8 +599,21 @@ async function cli(argv) {
     }
     case 'who': {
       console.log(`Room: ${room.label}`);
-      for (const p of listPeers(room)) console.log(`- ${p.name} (${p.client}, last seen ${p.lastSeen})`);
+      const meta = readMeta(room);
+      console.log(`Summary: ${meta.summary || '(none set)'}\nStatus: ${meta.status || '(none set)'}`);
+      for (const p of listPeers(room)) console.log(formatPeer(p));
       return;
+    }
+    case 'set': {
+      const changes = {};
+      if (flags.summary !== undefined) changes.summary = flags.summary;
+      if (flags.status !== undefined) changes.status = flags.status;
+      if (!Object.keys(changes).length) throw new Error('usage: agent-chat set [--room ROOM] [--summary TEXT] [--status TEXT]');
+      const who = safeName(flags.as || 'human');
+      writeMeta(room, { ...changes, updatedBy: who });
+      const parts = Object.entries(changes).map(([k, v]) => `room ${k}: ${v}`);
+      appendMessage(room, who, 'all', `[updated ${parts.join('; ')}]`);
+      return console.log(`Updated ${room.label}`);
     }
     case 'rooms': {
       tidyRooms();
@@ -541,7 +634,8 @@ async function cli(argv) {
           '  agent-chat [serve]                         run as an MCP stdio server',
           '  agent-chat log [-f] [-n N] [--room ROOM]   show (and follow) the room transcript',
           '  agent-chat send [--to NAME] [--as NAME] TEXT',
-          '  agent-chat who [--room ROOM]               active agents',
+          '  agent-chat who [--room ROOM]               summary, status and active agents',
+          '  agent-chat set [--summary T] [--status T]  set the room summary or status',
           '  agent-chat rooms                           list rooms',
           `  agent-chat tidy                            delete rooms idle for ${TTL_DAYS}+ days (also runs automatically)`,
           '',
