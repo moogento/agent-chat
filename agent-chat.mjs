@@ -12,7 +12,9 @@ const HOME = process.env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat
 const MAX_WAIT = Number(process.env.AGENT_CHAT_MAX_WAIT || 50);
 const FIRST_READ_LIMIT = 20;
 const PEER_TTL_MS = 30 * 60 * 1000;
-const VERSION = '0.1.0';
+const TTL_DAYS = Number(process.env.AGENT_CHAT_TTL_DAYS || 7);
+const TIDY_EVERY_MS = 60 * 60 * 1000;
+const VERSION = '0.2.0';
 
 function log(...args) {
   const line = `[${new Date().toISOString()}] [${process.pid}] ${args.join(' ')}\n`;
@@ -152,6 +154,96 @@ function touchPeer(room, name, client) {
   fs.writeFileSync(path.join(roomDir(room), 'peers', `${name}.json`), JSON.stringify(info) + '\n');
 }
 
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === 'EPERM';
+  }
+}
+
+function readPeer(room, name) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(roomDir(room), 'peers', `${name}.json`), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+// Names are per room and owned by a live process, so two sessions never share a read cursor.
+function claimName(room, base) {
+  for (let i = 1; ; i++) {
+    const name = i === 1 ? base : `${base}-${i}`;
+    const peer = readPeer(room, name);
+    if (!peer || peer.pid === process.pid || !pidAlive(peer.pid)) return name;
+  }
+}
+
+function releaseName(room, name) {
+  const peer = room && name ? readPeer(room, name) : null;
+  if (peer && peer.pid === process.pid) {
+    fs.rmSync(path.join(roomDir(room), 'peers', `${name}.json`), { force: true });
+  }
+}
+
+function roomInfo(id) {
+  const dir = path.join(HOME, 'rooms', id);
+  let label = id;
+  try {
+    label = JSON.parse(fs.readFileSync(path.join(dir, 'room.json'), 'utf8')).label;
+  } catch {
+    // room without metadata
+  }
+  let last = 0;
+  let count = 0;
+  for (const f of ['room.json', 'messages.jsonl']) {
+    try {
+      last = Math.max(last, fs.statSync(path.join(dir, f)).mtimeMs);
+    } catch {
+      // missing file
+    }
+  }
+  try {
+    count = fs.readFileSync(path.join(dir, 'messages.jsonl'), 'utf8').split('\n').filter(Boolean).length;
+  } catch {
+    // no messages yet
+  }
+  return { id, label, last, count };
+}
+
+function listRooms() {
+  const dir = path.join(HOME, 'rooms');
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir)
+    .filter((id) => fs.statSync(path.join(dir, id)).isDirectory())
+    .map(roomInfo)
+    .sort((a, b) => b.last - a.last);
+}
+
+// Deletes rooms with no new message (or join) for TTL_DAYS. Runs at most once an hour across all processes.
+function tidyRooms(force = false) {
+  const stamp = path.join(HOME, '.last-tidy');
+  try {
+    if (!force && Date.now() - fs.statSync(stamp).mtimeMs < TIDY_EVERY_MS) return [];
+  } catch {
+    // never tidied
+  }
+  fs.mkdirSync(HOME, { recursive: true });
+  fs.writeFileSync(stamp, new Date().toISOString() + '\n');
+  const cutoff = Date.now() - TTL_DAYS * 24 * 60 * 60 * 1000;
+  const removed = [];
+  for (const r of listRooms()) {
+    if (r.last && r.last < cutoff) {
+      fs.rmSync(path.join(HOME, 'rooms', r.id), { recursive: true, force: true });
+      removed.push(r.label);
+    }
+  }
+  if (removed.length) log(`tidied ${removed.length} idle room(s): ${removed.join(', ')}`);
+  return removed;
+}
+
 function listPeers(room) {
   const dir = path.join(roomDir(room), 'peers');
   return fs
@@ -165,6 +257,12 @@ function listPeers(room) {
       }
     })
     .filter((p) => p && Date.now() - Date.parse(p.lastSeen) < PEER_TTL_MS);
+}
+
+function formatRooms(rooms) {
+  return rooms
+    .map((r) => `${r.label}  (${r.count} messages, last activity ${r.last ? new Date(r.last).toISOString() : 'never'})`)
+    .join('\n');
 }
 
 function formatMessages(msgs) {
@@ -186,8 +284,9 @@ const TOOLS = [
   {
     name: 'chat_join',
     description:
-      'Set your name and/or room for agent-chat. Optional: by default you are "claude" or "codex" in a ' +
-      'room tied to the current git repo. Use a distinct name when several sessions of the same kind share a room.',
+      'Join a room and/or pick your name. By default you are "claude" or "codex" in a room tied to the current ' +
+      'git repo. To work as a group on one task, every agent joins the same plain room name (e.g. "checkout-refactor"). ' +
+      'A taken name gets a numeric suffix. On joining you will see the last messages in the room on your next chat_read.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -227,6 +326,11 @@ const TOOLS = [
     },
   },
   {
+    name: 'chat_rooms',
+    description: `List existing rooms with message counts and last activity. Rooms idle for ${TTL_DAYS} days are deleted.`,
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'chat_who',
     description: 'List agents active in your room in the last 30 minutes, and show your own name and room.',
     inputSchema: { type: 'object', properties: {} },
@@ -235,7 +339,7 @@ const TOOLS = [
 
 function ensureIdentity() {
   if (!state.room) state.room = resolveRoom(process.env.AGENT_CHAT_ROOM);
-  if (!state.name) state.name = safeName(process.env.AGENT_CHAT_NAME || defaultName(state.client));
+  if (!state.name) state.name = claimName(state.room, safeName(process.env.AGENT_CHAT_NAME || defaultName(state.client)));
   touchPeer(state.room, state.name, state.client);
 }
 
@@ -248,15 +352,24 @@ function whoText() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+function join(args) {
+  const room = args.room ? resolveRoom(args.room) : state.room || resolveRoom(process.env.AGENT_CHAT_ROOM);
+  const base = args.name
+    ? safeName(args.name)
+    : state.name
+      ? state.name.replace(/-\d+$/, '')
+      : safeName(process.env.AGENT_CHAT_NAME || defaultName(state.client));
+  releaseName(state.room, state.name);
+  state.room = room;
+  state.name = claimName(room, base);
+  touchPeer(state.room, state.name, state.client);
+  return whoText();
+}
+
 async function callTool(name, args = {}) {
+  if (name === 'chat_join') return join(args);
   ensureIdentity();
   switch (name) {
-    case 'chat_join': {
-      if (args.room) state.room = resolveRoom(args.room);
-      if (args.name) state.name = safeName(args.name);
-      touchPeer(state.room, state.name, state.client);
-      return whoText();
-    }
     case 'chat_send': {
       if (!args.text || !String(args.text).trim()) throw new Error('text is required');
       const to = args.to ? safeName(args.to) : 'all';
@@ -281,6 +394,8 @@ async function callTool(name, args = {}) {
     }
     case 'chat_who':
       return whoText();
+    case 'chat_rooms':
+      return formatRooms(listRooms()) || 'No rooms yet.';
     default:
       throw Object.assign(new Error(`Unknown tool: ${name}`), { code: -32602 });
   }
@@ -349,7 +464,14 @@ function serve() {
       handle(req);
     }
   });
-  process.stdin.on('end', () => process.exit(0));
+  const bye = () => {
+    releaseName(state.room, state.name);
+    process.exit(0);
+  };
+  process.stdin.on('end', bye);
+  process.on('SIGTERM', bye);
+  process.on('SIGINT', bye);
+  tidyRooms();
 }
 
 // ---------------------------------------------------------------- CLI
@@ -401,17 +523,14 @@ async function cli(argv) {
       return;
     }
     case 'rooms': {
-      const dir = path.join(HOME, 'rooms');
-      if (!fs.existsSync(dir)) return;
-      for (const id of fs.readdirSync(dir)) {
-        let label = id;
-        try {
-          label = JSON.parse(fs.readFileSync(path.join(dir, id, 'room.json'), 'utf8')).label;
-        } catch {
-          // older room without metadata
-        }
-        console.log(label);
-      }
+      tidyRooms();
+      const out = formatRooms(listRooms());
+      if (out) console.log(out);
+      return;
+    }
+    case 'tidy': {
+      const removed = tidyRooms(true);
+      console.log(removed.length ? `Removed: ${removed.join(', ')}` : `Nothing idle for ${TTL_DAYS} days`);
       return;
     }
     default:
@@ -424,6 +543,7 @@ async function cli(argv) {
           '  agent-chat send [--to NAME] [--as NAME] TEXT',
           '  agent-chat who [--room ROOM]               active agents',
           '  agent-chat rooms                           list rooms',
+          `  agent-chat tidy                            delete rooms idle for ${TTL_DAYS}+ days (also runs automatically)`,
           '',
           'ROOM is a plain name or a directory (its git repo). Default: the current git repo.',
         ].join('\n'),
