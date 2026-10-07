@@ -8,8 +8,13 @@ import { createMailbox, safeName, safeSessionId, pidAlive, LIMITS } from './lib/
 import { CHAT_LABEL } from './lib/presentation.mjs';
 
 export const VERSION = '0.3.0';
+function envValue(name) {
+  const value = process.env[name];
+  return value === undefined || !value.trim() ? undefined : value;
+}
 function envNumber(name, fallback, min, max) {
-  const value = process.env[name] === undefined ? fallback : Number(process.env[name]);
+  const configured = envValue(name);
+  const value = configured === undefined ? fallback : Number(configured);
   if (!Number.isFinite(value) || value < min || value > max) throw new Error(`${name} must be between ${min} and ${max}`);
   return value;
 }
@@ -25,12 +30,13 @@ function capMaxWait(value, source) {
   return 50;
 }
 function configuredMaxWait() {
-  return capMaxWait(process.env.AGENT_CHAT_MAX_WAIT === undefined ? 50 : Number(process.env.AGENT_CHAT_MAX_WAIT), 'AGENT_CHAT_MAX_WAIT');
+  const configured = envValue('AGENT_CHAT_MAX_WAIT');
+  return capMaxWait(configured === undefined ? 50 : Number(configured), 'AGENT_CHAT_MAX_WAIT');
 }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const protocolError = (message, code = -32602) => Object.assign(new Error(message), { code });
-export function createServer({ mailbox = createMailbox(), output = (obj) => process.stdout.write(JSON.stringify(obj) + '\n'), maxWait = configuredMaxWait(), waitBudget = envNumber('AGENT_CHAT_WAIT_BUDGET', 300, 0, 3600), ttlDays = envNumber('AGENT_CHAT_TTL_DAYS', 7, 0, 36500), sessionId = process.env.AGENT_CHAT_SESSION || process.env.AGENT_CHAT_SESSION_ID || crypto.randomUUID(), roomSpec = process.env.AGENT_CHAT_ROOM, nameSpec = process.env.AGENT_CHAT_NAME, identityExtras = () => ({}) } = {}) {
+export function createServer({ mailbox = createMailbox(), output = (obj) => process.stdout.write(JSON.stringify(obj) + '\n'), maxWait = configuredMaxWait(), waitBudget = envNumber('AGENT_CHAT_WAIT_BUDGET', 300, 0, 3600), ttlDays = envNumber('AGENT_CHAT_TTL_DAYS', 7, 0, 36500), sessionId = process.env.AGENT_CHAT_SESSION || process.env.AGENT_CHAT_SESSION_ID || crypto.randomUUID(), roomSpec = envValue('AGENT_CHAT_ROOM'), nameSpec = process.env.AGENT_CHAT_NAME, identityExtras = () => ({}) } = {}) {
   maxWait = capMaxWait(maxWait, 'maxWait');
   sessionId = safeSessionId(sessionId);
   const activeRequests = new Map();
@@ -245,7 +251,7 @@ export async function cli(argv) {
   if (['--help', '-h', 'help'].includes(cmd)) return console.log('agent-chat 0.3.0\n\nagent-chat [serve]\nagent-chat broker --token-file PATH [--host HOST] [--port PORT] [--home PATH]\nagent-chat proxy  (requires broker URL, token file, and explicit room)\nagent-chat log [-f] [-n N] [--room ROOM]\nagent-chat send [--to NAME] [--as NAME] [--room ROOM] TEXT\nagent-chat who [--room ROOM]\nagent-chat set [--summary TEXT] [--status TEXT] [--room ROOM]\nagent-chat rooms\nagent-chat tidy\nagent-chat install --clients codex,claude,opencode [--hooks] [--project PATH] [--dry-run]\nagent-chat update [--project PATH] [--dry-run]\nagent-chat uninstall [--project PATH] [--dry-run]\nagent-chat doctor [--project PATH] [--json]\n\nROOM is a task name or directory. Default: current git repo.');
   const { flags, rest } = parseFlags(more);
   const mailbox = createMailbox();
-  const room = mailbox.resolveRoom(flags.room || process.env.AGENT_CHAT_ROOM);
+  const room = mailbox.resolveRoom(flags.room ?? envValue('AGENT_CHAT_ROOM'));
   switch (cmd) {
     case 'log': {
       const n = flags.n === undefined ? 50 : Number(flags.n);

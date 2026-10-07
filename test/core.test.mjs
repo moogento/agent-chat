@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { createMailbox, LIMITS } from '../lib/mailbox.mjs';
@@ -196,16 +196,15 @@ test('explicit server wait limits are capped and warn once without extending bro
   } finally { process.stderr.write = write; }
 });
 
-async function mcpWaitSetting(t, value) {
-  const { home } = fixture(t);
-  const env = { ...process.env, AGENT_CHAT_HOME: home, AGENT_CHAT_MAX_WAIT: value };
+async function mcpWaitSetting(t, value, { home = fixture(t).home, env: overrides = {} } = {}) {
+  const env = { ...process.env, AGENT_CHAT_HOME: home, AGENT_CHAT_MAX_WAIT: value, ...overrides };
   for (const key of ['AGENT_CHAT_BROKER_URL', 'AGENT_CHAT_BROKER_TOKEN_FILE', 'AGENT_CHAT_BROKER_SESSION_FILE', 'AGENT_CHAT_SESSION', 'AGENT_CHAT_SESSION_ID']) delete env[key];
   const child = spawn(process.execPath, [fileURLToPath(new URL('../agent-chat.mjs', import.meta.url))], { env, stdio: ['pipe', 'pipe', 'pipe'] });
   t.after(() => { if (child.exitCode === null) child.kill(); });
   let stdout = ''; let stderr = ''; const responses = [];
   child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { stdout += chunk; let newline; while ((newline = stdout.indexOf('\n')) >= 0) { responses.push(JSON.parse(stdout.slice(0, newline))); stdout = stdout.slice(newline + 1); } });
   child.stderr.setEncoding('utf8'); child.stderr.on('data', chunk => { stderr += chunk; });
-  return { child, responses, stderr: () => stderr, remainder: () => stdout };
+  return { child, env, responses, stderr: () => stderr, remainder: () => stdout };
 }
 
 test('legacy AGENT_CHAT_MAX_WAIT initializes MCP with a capped schema and stderr-only notice', async (t) => {
@@ -231,6 +230,69 @@ test('negative and nonnumeric AGENT_CHAT_MAX_WAIT still reject MCP startup clear
     const [code] = await once(client.child, 'close');
     assert.equal(code, 1); assert.match(client.stderr(), /AGENT_CHAT_MAX_WAIT must be a finite nonnegative number/);
     assert.deepEqual(client.responses, []); assert.equal(client.remainder(), '');
+  }
+});
+
+async function mcpResponses(client, requests) {
+  for (const request of requests) client.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', ...request }) + '\n');
+  const deadline = Date.now() + 10000;
+  while (client.responses.length < requests.length && client.child.exitCode === null && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(client.responses.length, requests.length, client.stderr());
+  return client.responses;
+}
+function agedTranscript(mailbox) {
+  const room = mailbox.resolveRoom('aged-history'); mailbox.appendMessage(room, 'sender', 'all', 'keep recent inactive history');
+  const transcript = path.join(mailbox.roomPath(room), 'messages.jsonl');
+  const yesterday = new Date(Date.now() - 86400000);
+  for (const file of [transcript, path.join(mailbox.roomPath(room), 'room.json')]) fs.utimesSync(file, yesterday, yesterday);
+  return transcript;
+}
+
+test('empty and whitespace local environment settings retain default startup history, waits and worktree room', async (t) => {
+  for (const blank of ['', ' \t ']) {
+    const { home, mailbox } = fixture(t); const transcript = agedTranscript(mailbox); const history = fs.readFileSync(transcript, 'utf8');
+    const room = mailbox.resolveRoom();
+    const client = await mcpWaitSetting(t, blank, { home, env: { AGENT_CHAT_WAIT_BUDGET: blank, AGENT_CHAT_TTL_DAYS: blank, AGENT_CHAT_ROOM: blank } });
+    const responses = await mcpResponses(client, [
+      { id: 1, method: 'initialize', params: { clientInfo: { name: 'test' } } },
+      { id: 2, method: 'tools/list' },
+      { id: 3, method: 'tools/call', params: { name: 'chat_who' } },
+      { id: 4, method: 'tools/call', params: { name: 'chat_join', arguments: { room: '' } } },
+      { id: 5, method: 'tools/call', params: { name: 'chat_join', arguments: { room: ' \t ' } } },
+    ]);
+    const read = responses.find(response => response.id === 2).result.tools.find(tool => tool.name === 'chat_read');
+    assert.equal(read.inputSchema.properties.wait_seconds.maximum, 50); assert.match(read.description, /within 300s session budget/);
+    assert.equal(responses.find(response => response.id === 3).result.structuredContent.agentChatIdentity.room, room.id);
+    for (const id of [4, 5]) { const rejected = responses.find(response => response.id === id).result; assert.equal(rejected.isError, true); assert.match(rejected.content[0].text, /Room must be a nonempty string/); }
+    assert.equal(fs.readFileSync(transcript, 'utf8'), history); assert.equal(client.stderr(), '');
+    const cli = fileURLToPath(new URL('../agent-chat.mjs', import.meta.url));
+    for (const args of [['who'], ['tidy']]) {
+      const result = spawnSync(process.execPath, [cli, ...args], { env: client.env, encoding: 'utf8', timeout: 10000 });
+      assert.equal(result.status, 0, result.stderr || result.error?.message); assert.equal(result.stderr, '');
+      if (args[0] === 'who') assert.ok(result.stdout.includes(`Room: ${room.label}`));
+      assert.equal(fs.readFileSync(transcript, 'utf8'), history);
+    }
+    const invalidRoom = spawnSync(process.execPath, [cli, 'who', '--room', ''], { env: client.env, encoding: 'utf8', timeout: 10000 });
+    assert.equal(invalidRoom.status, 1); assert.match(invalidRoom.stderr, /Room must be a nonempty string/);
+    client.child.stdin.end(); const [code] = await once(client.child, 'close'); assert.equal(code, 0);
+  }
+});
+
+test('explicit zero numeric environment values keep zero waits, budget and intentional retention', async (t) => {
+  const { home, mailbox } = fixture(t); const transcript = agedTranscript(mailbox);
+  const client = await mcpWaitSetting(t, '0', { home, env: { AGENT_CHAT_WAIT_BUDGET: '0', AGENT_CHAT_TTL_DAYS: '0' } });
+  const responses = await mcpResponses(client, [{ id: 1, method: 'tools/list' }]);
+  const read = responses[0].result.tools.find(tool => tool.name === 'chat_read');
+  assert.equal(read.inputSchema.properties.wait_seconds.maximum, 0); assert.match(read.description, /within 0s session budget/);
+  assert.ok(!fs.existsSync(transcript)); assert.equal(client.stderr(), '');
+  client.child.stdin.end(); const [code] = await once(client.child, 'close'); assert.equal(code, 0);
+});
+
+test('invalid nonblank budget and retention environment settings still reject startup', async (t) => {
+  for (const name of ['AGENT_CHAT_WAIT_BUDGET', 'AGENT_CHAT_TTL_DAYS']) for (const value of ['-1', 'NaN']) {
+    const client = await mcpWaitSetting(t, '50', { env: { [name]: value } });
+    const [code] = await once(client.child, 'close'); assert.equal(code, 1);
+    assert.ok(client.stderr().includes(`${name} must be between 0 and`)); assert.deepEqual(client.responses, []); assert.equal(client.remainder(), '');
   }
 });
 

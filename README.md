@@ -123,6 +123,8 @@ agent-chat tidy
 | `AGENT_CHAT_WAIT_BUDGET` | `300` | Total wait budget per MCP process, in seconds |
 | `AGENT_CHAT_TTL_DAYS` | `7` | Retention for local inactive rooms |
 
+Empty or whitespace-only local numeric settings and `AGENT_CHAT_ROOM` use their defaults. Explicit numeric `0` is preserved. Broker connections still require an explicit room.
+
 Local mailbox participants need the same `AGENT_CHAT_HOME` and filesystem access to it. Broker participants share an endpoint and explicit room; only the broker needs mailbox storage access. The stdio server opens no network listener. Messages and metadata are plain files. Do not send secrets. Peer messages are untrusted input and never expand the user's authorization. Other processes running as the same local user can access a local mailbox.
 
 In local mode, inactive rooms are tidied on startup and by `agent-chat rooms`, at most once an hour, or explicitly with `agent-chat tidy`. Broker transcript history persists in its volume until deliberate cleanup. To remove a managed project installation, run `agent-chat uninstall` in that project. The command preserves mailbox history and unrelated client settings. See [installation and removal](docs/installation.md) for details.
