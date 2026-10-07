@@ -177,7 +177,10 @@ test('subagents, stop and notification events cannot consume main-session notice
   for (const event of ['Stop', 'Notification', 'SubagentStart', 'PostToolUse']) {
     await runCommandHook({ client: 'codex', payload: { session_id: f.binding.hostSessionId, cwd: f.cwd,
       hook_event_name: event, ...(event === 'PostToolUse' ? { agent_id: 'child' } : {}) },
-    env: f.env, mailbox: f.mailbox, write: () => assert.fail('unexpected host output') });
+    env: f.env, mailbox: f.mailbox, write: value => {
+      if (event === 'Stop') assert.deepEqual(JSON.parse(value), {});
+      else assert.fail('unexpected host output');
+    } });
   }
   let delivered = 0;
   await notifySession({ ...f.input, deliver: () => delivered++ });
@@ -332,6 +335,19 @@ test('Claude custom title changes rename the exact bound session and retain stab
   assert.equal(readConfig(f.configFile).bindings[0].titleSource, 'claude-code:session_title');
 });
 
+test('Claude startup title names the peer on its first exact chat_who binding', async t => {
+  const f = fixture(t, 'claude-code');
+  fs.rmSync(f.configFile);
+  const host = { session_id: f.binding.hostSessionId, cwd: f.cwd };
+  await runCommandHook({ client: 'claude-code', payload: { ...host, hook_event_name: 'SessionStart', session_title: 'PCai agent registration' }, env: f.env, mailbox: f.mailbox, write: () => {} });
+  const tool = 'mcp__agent-chat__chat_who';
+  const env = { ...f.env, AGENT_CHAT_NOTIFY_AUTO_BIND: '1', AGENT_CHAT_NOTIFY_IDENTITY_TOOLS: tool };
+  await runCommandHook({ client: 'claude-code', payload: { ...host, hook_event_name: 'PostToolUse', tool_name: tool,
+    tool_response: { structuredContent: { agentChatIdentity: { version: 1, sessionId: f.peer.sessionId,
+      cwd: f.cwd, room: f.room.id, name: f.peer.name } } } }, env, mailbox: f.mailbox, write: () => {} });
+  assert.equal(f.mailbox.listPeers(f.room).find(item => item.sessionId === f.peer.sessionId).name, 'PCai-agent-registration');
+});
+
 test('OpenCode supported title events sync only exact bound main sessions', async t => {
   const f = fixture(t, 'opencode');
   const other = f.mailbox.claimIdentity(f.room, 'other', 'opencode', crypto.randomUUID());
@@ -368,7 +384,7 @@ test('OpenCode title seen before binding is applied after a later tool event', a
   assert.equal(fs.existsSync(f.configFile), false);
   bindNotification({ configFile: f.configFile, binding: f.binding });
   await plugin['tool.execute.after']({ sessionID: f.binding.hostSessionId }, { output: 'unchanged' });
-  assert.equal(f.mailbox.listPeers(f.room).find(item => item.sessionId === f.peer.sessionId).name, 'New_session');
+  assert.equal(f.mailbox.listPeers(f.room).find(item => item.sessionId === f.peer.sessionId).name, 'New-session');
 });
 
 test('title sync rejects a forged local binding and preserves an explicit chat name', async t => {
@@ -402,6 +418,46 @@ test('SessionStart announces an unjoined session and later invitations notify on
   await run({ hook_event_name: 'UserPromptSubmit' });
   assert.equal(notices.length, 1);
   assert.equal(presence.list(f.mailbox).find(item => item.id === host.id).roomId, null);
+});
+
+test('host lifecycle publishes title, model, activity and removes ended sessions', async t => {
+  const f = fixture(t, 'claude-code');
+  fs.rmSync(f.configFile);
+  const presence = createPresence({ home: f.home });
+  const input = { session_id: 'roster-host', cwd: f.cwd, model: 'claude-opus', session_title: 'PCai agent registration' };
+  const run = async hook_event_name => {
+    const output = [];
+    await runCommandHook({ client: 'claude-code', payload: { ...input, hook_event_name }, env: f.env,
+      mailbox: f.mailbox, write: value => output.push(value) });
+    return output;
+  };
+  await run('SessionStart');
+  let host = presence.list(f.mailbox).find(item => item.name === 'PCai-agent-registration');
+  assert.equal(host.repo, f.cwd);
+  assert.equal(host.model, 'claude-opus');
+  assert.equal(host.activity, 'idle');
+  assert.equal(host.room, null);
+  await runCommandHook({ client: 'claude-code', payload: { ...input, hook_event_name: 'PostModelSwitch', to_model: 'claude-sonnet' }, env: f.env, mailbox: f.mailbox, write: () => assert.fail('model switch should be silent') });
+  assert.equal(presence.list(f.mailbox).find(item => item.id === host.id).model, 'claude-sonnet');
+  input.model = 'claude-sonnet';
+  await run('UserPromptSubmit');
+  assert.equal(presence.list(f.mailbox).find(item => item.id === host.id).activity, 'working');
+  assert.deepEqual((await run('Stop')).map(value => JSON.parse(value)), [{}]);
+  assert.equal(presence.list(f.mailbox).find(item => item.id === host.id).activity, 'idle');
+  await run('SessionEnd');
+  assert.equal(presence.list(f.mailbox).some(item => item.id === host.id), false);
+});
+
+test('managed SessionStart asks for one identity link without requiring a user chat_read prompt', async t => {
+  const f = fixture(t);
+  fs.rmSync(f.configFile);
+  const output = [];
+  await runCommandHook({ client: 'codex', payload: { session_id: 'new-host', cwd: f.cwd,
+    hook_event_name: 'SessionStart', source: 'startup', model: 'gpt-6.1-sol' },
+  env: { ...f.env, AGENT_CHAT_NOTIFY_AUTO_BIND: '1' }, mailbox: f.mailbox, write: value => output.push(value) });
+  assert.equal(output.length, 1);
+  assert.match(JSON.parse(output[0]).hookSpecificOutput.additionalContext, /Call chat_who once/);
+  assert.equal(createPresence({ home: f.home }).list(f.mailbox).find(item => item.model === 'gpt-6.1-sol').activity, 'idle');
 });
 
 test('command invitations and chat messages share one valid JSON hook response', async t => {
@@ -445,6 +501,24 @@ test('OpenCode announces new sessions before binding and emits count-only invita
   const second = { output: 'second' };
   await plugin['tool.execute.after']({ sessionID: 'new-opencode' }, second);
   assert.equal(second.output, 'second');
+});
+
+test('OpenCode registers an unnamed session with a provisional repo before any MCP call', async t => {
+  const f = fixture(t, 'opencode');
+  const plugin = await AgentChatPlugin({ directory: f.cwd, client: {} }, { env: f.env, mailbox: f.mailbox });
+  await plugin.event({ event: { type: 'session.created', properties: { info: { id: 'untitled-opencode' } } } });
+  const presence = createPresence({ home: f.home });
+  const host = presence.list(f.mailbox).find(item => /^opencode-/.test(item.name) && item.roomId === null);
+  assert.equal(host.repo, f.cwd);
+  assert.equal(host.activity, 'idle');
+  await plugin.event({ event: { type: 'message.updated', properties: { sessionID: 'untitled-opencode',
+    info: { role: 'assistant', providerID: 'openai', modelID: 'gpt-6.1-sol', variant: 'high' } } } });
+  const active = presence.list(f.mailbox).find(item => item.id === host.id);
+  assert.equal(active.model, 'openai/gpt-6.1-sol');
+  assert.equal(active.variant, 'high');
+  assert.equal(active.activity, 'working');
+  await plugin.event({ event: { type: 'session.deleted', properties: { info: { id: 'untitled-opencode' } } } });
+  assert.equal(presence.list(f.mailbox).some(item => item.id === host.id), false);
 });
 
 test('command executable ignores malformed and oversized payloads and does not block', t => {

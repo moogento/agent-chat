@@ -122,7 +122,7 @@ test('bound title sync validates room, session, client and cwd while preserving 
   assert.equal(mailbox.syncSessionTitle({ room, sessionId: peer.sessionId, title: 'new', client: peer.client, cwd: path.join(peer.cwd, 'other') }), null);
   assert.equal(mailbox.syncSessionTitle({ room, sessionId: 'other-session', title: 'new', client: peer.client, cwd: peer.cwd }), null);
   const renamed = mailbox.syncSessionTitle({ room, sessionId: peer.sessionId, title: 'New title', client: peer.client, cwd: peer.cwd, titleSource: 'opencode:session.updated' });
-  assert.equal(renamed.name, 'New_title');
+  assert.equal(renamed.name, 'New-title');
   assert.equal(renamed.pid, peer.pid);
   assert.equal(renamed.titleSource, 'opencode:session.updated');
   assert.equal(mailbox.resolveRecipient(room, 'old').sessionId, peer.sessionId);

@@ -7,7 +7,7 @@ The project installer sets up the shared MCP server and coordination skill for t
 Requires Node.js 22 or newer. Install the npm tarball, then open your project:
 
 ```sh
-npm install --global /absolute/path/to/agent-chat-0.4.1.tgz
+npm install --global /absolute/path/to/agent-chat-0.5.0.tgz
 cd /absolute/path/to/your-project
 agent-chat install --clients codex,claude,opencode --hooks
 agent-chat doctor
@@ -25,7 +25,7 @@ agent-chat update --local --room m2-moo
 
 The named room becomes that project's default for the selected clients and their notification adapters. Updates and project moves preserve it. A newly added client inherits the existing local named default when all installed local clients agree on one. If you omit `--room` on a new local installation, the default is derived from the project path. A literal room named `m2-moo` and a room derived from `/absolute/path/to/m2-moo` have different room IDs, so agents in those rooms cannot see each other. Use `chat_who` to compare Room id in each client. Changing the default does not move existing history or a running session; restart affected clients and join the shared room.
 
-If you prefer not to install a global executable, extract `agent-chat-plugin-0.4.1.tgz` and run its CLI directly:
+If you prefer not to install a global executable, extract `agent-chat-plugin-0.5.0.tgz` and run its CLI directly:
 
 ```sh
 node /absolute/path/to/agent-chat/agent-chat.mjs install --project /absolute/path/to/project --clients codex,claude,opencode --hooks
@@ -96,7 +96,7 @@ After restarting, ask each agent to use `chat_join` for the same room and `chat_
 Install the new trusted tarball first, then apply that executable’s version to the project:
 
 ```sh
-npm install --global /absolute/path/to/new/agent-chat-0.4.1.tgz
+npm install --global /absolute/path/to/new/agent-chat-0.5.0.tgz
 cd /absolute/path/to/your-project
 agent-chat update --dry-run
 agent-chat update
@@ -161,13 +161,13 @@ Use these when you deliberately want to manage client configuration yourself. Th
 For MCP-only Codex:
 
 ```sh
-codex mcp add agent-chat --env AGENT_CHAT_NAME=codex -- node /absolute/path/to/agent-chat/agent-chat.mjs
+codex mcp add agent-chat -- node /absolute/path/to/agent-chat/agent-chat.mjs
 ```
 
 For MCP-only Claude Code:
 
 ```sh
-claude mcp add --scope user agent-chat --env AGENT_CHAT_NAME=claude -- node /absolute/path/to/agent-chat/agent-chat.mjs
+claude mcp add --scope user agent-chat -- node /absolute/path/to/agent-chat/agent-chat.mjs
 ```
 
 For OpenCode, merge an entry into `opencode.json`:
@@ -179,7 +179,7 @@ For OpenCode, merge an entry into `opencode.json`:
     "agent-chat": {
       "type": "local",
       "command": ["node", "/absolute/path/to/agent-chat/agent-chat.mjs"],
-      "environment": { "AGENT_CHAT_NAME": "opencode" },
+      "environment": {},
       "enabled": true,
       "timeout": 60000
     }
@@ -187,6 +187,8 @@ For OpenCode, merge an entry into `opencode.json`:
 }
 ```
 
-Claude Code can load the full plugin with `claude --plugin-dir /absolute/path/to/agent-chat`. For a persistent marketplace install, extract `agent-chat-marketplace-0.4.1.tgz`, register its `agent-chat-marketplace/` folder with `claude plugin marketplace add PATH` or `codex plugin marketplace add PATH`, then install `agent-chat@agent-chat-local` with the respective client's plugin command. Codex plugin lifecycle hooks currently have narrower surface support than project hooks; see [distribution details](distribution.md).
+Omitting `AGENT_CHAT_NAME` gives each MCP session a unique provisional handle. Set it only when you want to pin a fixed handle, and use `chat_join(name: "...")` to match a named host conversation later.
+
+Claude Code can load the full plugin with `claude --plugin-dir /absolute/path/to/agent-chat`. For a persistent marketplace install, extract `agent-chat-marketplace-0.5.0.tgz`, register its `agent-chat-marketplace/` folder with `claude plugin marketplace add PATH` or `codex plugin marketplace add PATH`, then install `agent-chat@agent-chat-local` with the respective client's plugin command. Codex plugin lifecycle hooks currently have narrower surface support than project hooks; see [distribution details](distribution.md).
 
 Official references: [Codex MCP](https://developers.openai.com/codex/mcp/), [Codex hooks](https://learn.chatgpt.com/docs/hooks), [Claude Code plugins](https://code.claude.com/docs/en/plugins), and [OpenCode MCP](https://opencode.ai/docs/mcp-servers/).

@@ -23,6 +23,30 @@ function serverFor(t, mailbox, options = {}) {
   return { server, responses };
 }
 
+test('MCP initialization joins the repo with a unique handle and reports routing profile', async t => {
+  const { mailbox } = fixture(t);
+  const first = serverFor(t, mailbox, { sessionId: 'first-auto-session' });
+  const second = serverFor(t, mailbox, { sessionId: 'second-auto-session' });
+  for (const item of [first, second]) await item.server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'codex-mcp-client' } } });
+  const one = first.server.state.identity;
+  const two = second.server.state.identity;
+  assert.ok(one && two);
+  assert.notEqual(one.name, two.name);
+  assert.match(one.name, /^codex-[A-Za-z0-9._-]+-[a-f0-9]{6}$/);
+  assert.equal(one.room.id, mailbox.resolveRoom().id);
+  await first.server.callTool('chat_status', { task: 'Review gateway', availability: 'busy', model: 'gpt-6-astra', effort: 'high', context_remaining_percent: 42 });
+  const roster = await second.server.callTool('chat_presence');
+  assert.match(roster, /task: Review gateway/);
+  assert.match(roster, /model: gpt-6-astra, effort: high, context left: 42%/);
+  await first.server.callTool('chat_status', { task: '', availability: 'available' });
+  assert.match(await second.server.callTool('chat_presence'), /available/);
+  await first.server.callTool('chat_join', { room: 'shared-work' });
+  assert.equal(first.server.state.identity.task, '');
+  assert.equal(first.server.state.identity.availability, 'available');
+  await assert.rejects(first.server.callTool('chat_status', { availability: 'ready' }), /availability must be/);
+  await assert.rejects(first.server.callTool('chat_status', { task: 'bad\nstatus' }), /control characters/);
+});
+
 test('rejects traversal and mailbox symlink escapes', (t) => {
   const { home, mailbox } = fixture(t);
   assert.throws(() => mailbox.resolveRoom('.'), /cannot be/);
@@ -231,7 +255,7 @@ test('legacy AGENT_CHAT_MAX_WAIT initializes MCP with a capped schema and stderr
   const deadline = Date.now() + 10000;
   while (client.responses.length < 3 && client.child.exitCode === null && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(client.responses.length, 3, client.stderr());
-  assert.equal(client.responses.find(response => response.id === 1).result.serverInfo.version, '0.4.1');
+  assert.equal(client.responses.find(response => response.id === 1).result.serverInfo.version, '0.5.0');
   const read = client.responses.find(response => response.id === 2).result.tools.find(tool => tool.name === 'chat_read');
   assert.equal(read.inputSchema.properties.wait_seconds.maximum, 50); assert.match(read.description, /up to 50s/);
   assert.equal(client.responses.find(response => response.id === 3).error.code, -32602);
@@ -281,7 +305,7 @@ test('empty and whitespace local environment settings retain default startup his
     const read = responses.find(response => response.id === 2).result.tools.find(tool => tool.name === 'chat_read');
     assert.equal(read.inputSchema.properties.wait_seconds.maximum, 50); assert.match(read.description, /within 300s session budget/);
     assert.equal(responses.find(response => response.id === 3).result.structuredContent.agentChatIdentity.room, room.id);
-    assert.equal(responses.find(response => response.id === 3).result.structuredContent.agentChatIdentity.name, 'test');
+    assert.match(responses.find(response => response.id === 3).result.structuredContent.agentChatIdentity.name, /^agent-[A-Za-z0-9._-]+-[a-f0-9]{6}$/);
     for (const id of [4, 5]) { const rejected = responses.find(response => response.id === id).result; assert.equal(rejected.isError, true); assert.match(rejected.content[0].text, /Room must be a nonempty string/); }
     for (const id of [6, 7]) { const rejected = responses.find(response => response.id === id).result; assert.equal(rejected.isError, true); assert.match(rejected.content[0].text, /Name must be a nonempty string/); }
     assert.equal(fs.readFileSync(transcript, 'utf8'), history); assert.equal(client.stderr(), '');
@@ -541,7 +565,7 @@ test('CLI works through an installed symlink', async (t) => {
   const child = spawn(process.execPath, [link, '--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
   let output = ''; child.stdout.on('data', (chunk) => { output += chunk; });
   const [code] = await once(child, 'exit');
-  assert.equal(code, 0); assert.equal(output.trim(), '0.4.1');
+  assert.equal(code, 0); assert.equal(output.trim(), '0.5.0');
 });
 
 test('waiting stops immediately when only a crashed peer remains', async (t) => {

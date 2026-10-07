@@ -1,3 +1,5 @@
+import os from 'node:os';
+import path from 'node:path';
 import { notifySession, supportedSessionTitle, syncBoundSessionTitle, registerHostPresence, notifyHostInvitations } from '../../hooks/notifications.mjs';
 import { CHAT_LABEL } from '../../lib/presentation.mjs';
 
@@ -23,12 +25,24 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
   return {
     'tool.execute.after': async (input, output) => {
       if (typeof input?.sessionID !== 'string' || childSessions.has(input.sessionID) || typeof output?.output !== 'string') return;
+      await registerHostPresence({ client: 'opencode', hostSessionId: input.sessionID, cwd: directory,
+        activity: 'working', env, mailbox });
       await safely(() => syncTitle(input.sessionID));
       await safely(() => notifyHostInvitations({ client: 'opencode', hostSessionId: input.sessionID,
         cwd: directory, env, mailbox, deliver: async notice => { output.output += `\n\n[${notice}]`; } }));
       await safely(() => notify(input.sessionID, async notice => { output.output += `\n\n[${notice}]`; }));
     },
     event: async ({ event } = {}) => {
+      if (event?.type === 'message.updated') {
+        const info = event.properties?.info;
+        const sessionID = event.properties?.sessionID || info?.sessionID;
+        if (typeof sessionID === 'string' && !childSessions.has(sessionID) && info?.role === 'assistant'
+          && typeof info.providerID === 'string' && typeof info.modelID === 'string') {
+          await registerHostPresence({ client: 'opencode', hostSessionId: sessionID, cwd: directory,
+            model: `${info.providerID}/${info.modelID}`, variant: info.variant, activity: 'working', env, mailbox });
+        }
+        return;
+      }
       // OpenCode documents these events as properties.info: Session (id, title).
       // Keep a bounded cache so a title seen before manual binding can sync on the next tool.
       if (['session.created', 'session.updated'].includes(event?.type)) {
@@ -43,16 +57,24 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
         }
         if (childSessions.has(info.id)) return;
         const title = supportedSessionTitle(info?.title);
-        if (!title) return;
-        titles.delete(info.id);
-        titles.set(info.id, { sessionTitle: title, titleSource: `opencode:${event.type}` });
-        if (titles.size > 100) titles.delete(titles.keys().next().value);
-        await safely(() => syncTitle(info.id));
+        if (title) {
+          titles.delete(info.id);
+          titles.set(info.id, { sessionTitle: title, titleSource: `opencode:${event.type}` });
+          if (titles.size > 100) titles.delete(titles.keys().next().value);
+          await safely(() => syncTitle(info.id));
+        }
         await registerHostPresence({ client: 'opencode', hostSessionId: info.id, cwd: directory, title,
-          env, mailbox });
+          activity: 'idle', env, mailbox });
+        return;
+      }
+      if (event?.type === 'session.deleted' && typeof event.properties?.info?.id === 'string') {
+        const { createPresence } = await import('../../lib/presence.mjs');
+        if (env.AGENT_CHAT_NOTIFY_CONFIG) createPresence({ home: mailbox?.home || env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat') }).endHost({ client: 'opencode', hostSessionId: event.properties.info.id });
         return;
       }
       if (event?.type !== 'session.idle' || typeof event.properties?.sessionID !== 'string' || childSessions.has(event.properties.sessionID)) return;
+      await registerHostPresence({ client: 'opencode', hostSessionId: event.properties.sessionID, cwd: directory,
+        activity: 'idle', env, mailbox });
       if (env.AGENT_CHAT_NOTIFY_DEBUG === '1') console.error(`agent-chat hook identity: ${JSON.stringify({ client: 'opencode', hostSessionId: event.properties.sessionID, cwd: directory })}`);
       const deliver = async notice => {
         if (typeof client?.tui?.showToast !== 'function') throw new Error('OpenCode TUI toast API unavailable');
