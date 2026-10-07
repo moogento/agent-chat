@@ -136,7 +136,7 @@ test('broker invitations instruct reconnection without changing a pinned room', 
   assert.match(await broker.callTool('chat_invitations'), new RegExp(invitationId));
 });
 
-test('a uniquely matched unjoined host reads an invite on its first MCP tool call', async t => {
+test('an unlinked host invitation waits for an exact host-to-peer binding', async t => {
   const { mailbox, presence } = fixture(t);
   const host = presence.registerHost({ client: 'claude-code', hostSessionId: 'host-first', cwd: process.cwd(), title: 'reviewer' });
   const sender = createServer({ mailbox, sessionId: 'sender-first', roomSpec: 'review-room' });
@@ -146,6 +146,9 @@ test('a uniquely matched unjoined host reads an invite on its first MCP tool cal
   await sender.callTool('chat_join', { name: 'sender' });
   const invitationId = (await sender.callTool('chat_invite', { to_id: host.id })).match(/Invitation ([a-f0-9-]{36})/)?.[1];
   assert.ok(invitationId);
+  assert.equal(await receiver.callTool('chat_invitations'), 'No pending invitations.');
+  presence.linkHost({ client: 'claude-code', hostSessionId: 'host-first', sessionId: receiver.state.identity.sessionId,
+    room: receiver.state.identity.room, name: receiver.state.identity.name });
   assert.match(await receiver.callTool('chat_invitations'), new RegExp(invitationId));
   assert.match(await receiver.callTool('chat_accept_invite', { id: invitationId }), /room review-room/);
 });

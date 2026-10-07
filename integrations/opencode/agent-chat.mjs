@@ -28,9 +28,10 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
     const identityText = response.startsWith('You are "') ? response
       : /^Accepted invitation [a-f0-9-]{36}\.\nYou are "/.test(response) ? response.slice(response.indexOf('\n') + 1) : null;
     if (!identityText) return;
-    const peerName = identityText.match(/^You are "([A-Za-z0-9._-]+)" in room /)?.[1];
-    const sessionId = identityText.match(/^Session: ([A-Za-z0-9._-]+)$/m)?.[1];
-    const roomId = identityText.match(/^Room id: ([A-Za-z0-9._-]+)$/m)?.[1];
+    const [identityLine, sessionLine, roomLine] = identityText.split('\n', 3);
+    const peerName = identityLine.match(/^You are "([A-Za-z0-9._-]+)" in room /)?.[1];
+    const sessionId = sessionLine?.match(/^Session: ([A-Za-z0-9._-]+)$/)?.[1];
+    const roomId = roomLine?.match(/^Room id: ([A-Za-z0-9._-]+)$/)?.[1];
     if (!peerName || !sessionId || !roomId) return;
     const store = mailbox || createMailbox({ home: env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat'), cwd: directory });
     const room = { id: roomId, label: roomId };

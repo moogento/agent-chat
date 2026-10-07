@@ -209,13 +209,11 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
         return `Invited ${args.to_id} to ${me.room.label}. Invitation ${entry.id} expires in 24 hours. The session must accept explicitly.`;
       }
       case 'chat_invitations': {
-        if (state.client !== 'unknown') presence.linkUniqueHost({ mailbox, client: state.client, cwd: me.cwd, sessionId: me.sessionId, room: me.room, name: me.name });
         const ids = [presence.peerId(me.room.id, me.sessionId), ...presence.linkedHostIds(me.room, me.sessionId)];
         const entries = presence.invitations(ids);
         return entries.length ? entries.map(entry => `- ${entry.id}: ${entry.from} invites you to ${entry.room.label}${entry.note ? `: ${entry.note}` : ''}`).join('\n') : 'No pending invitations.';
       }
       case 'chat_accept_invite': {
-        if (state.client !== 'unknown') presence.linkUniqueHost({ mailbox, client: state.client, cwd: me.cwd, sessionId: me.sessionId, room: me.room, name: me.name });
         const ids = [presence.peerId(me.room.id, me.sessionId), ...presence.linkedHostIds(me.room, me.sessionId)];
         const entry = presence.invitations(ids).find(item => item.id === args.id);
         if (!entry) throw new Error('Invitation not found for this session');

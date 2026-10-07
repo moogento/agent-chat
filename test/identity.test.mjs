@@ -167,3 +167,37 @@ test('identity and handle storage reject directory symlinks', t => {
     fs.renameSync(moved, original);
   }
 });
+
+test('tidy prunes released identity scans but retains handle tombstones and active aliases', t => {
+  const { mailbox, room } = fixture(t);
+  const active = mailbox.claimIdentity(room, 'active', 'codex', 'active-session');
+  const released = mailbox.claimIdentity(room, 'reused', 'codex', 'released-session');
+  const alias = mailbox.claimIdentity(room, 'old-name', 'codex', 'alias-session');
+  const renamed = mailbox.claimIdentity(room, 'new-name', 'codex', alias.sessionId);
+  mailbox.releaseIdentity(released);
+  mailbox.releaseIdentity(renamed);
+  const directory = mailbox.roomPath(room);
+  const old = new Date(Date.now() - IDENTITY_LIMITS.aliasTtlMs - 1000);
+  for (const session of [active.sessionId, released.sessionId, renamed.sessionId]) {
+    fs.utimesSync(path.join(directory, 'identities', `${session}.json`), old, old);
+  }
+  mailbox.tidyRooms({ force: true });
+  assert.equal(fs.existsSync(path.join(directory, 'identities', `${released.sessionId}.json`)), false);
+  assert.equal(fs.existsSync(path.join(directory, 'identities', `${active.sessionId}.json`)), true);
+  assert.equal(fs.existsSync(path.join(directory, 'identities', `${renamed.sessionId}.json`)), true);
+  assert.equal(fs.existsSync(path.join(directory, 'handles', 'reused.json')), true);
+  assert.equal(mailbox.resolveRecipient(room, 'reused'), null);
+  const newcomer = mailbox.claimIdentity(room, 'reused', 'claude', 'new-session');
+  const record = JSON.parse(fs.readFileSync(path.join(directory, 'identities', `${newcomer.sessionId}.json`), 'utf8'));
+  assert.equal(record.firstClaim, false);
+});
+
+test('broker-style identity pruning retains idle room history', t => {
+  const { mailbox } = fixture(t);
+  const room = mailbox.resolveRoom('resumable-history');
+  const directory = mailbox.roomDir(room);
+  const old = new Date(Date.now() - 10 * 86400000);
+  fs.utimesSync(path.join(directory, 'room.json'), old, old);
+  assert.deepEqual(mailbox.tidyRooms({ force: true, ttlDays: 0, pruneOnly: true }), []);
+  assert.equal(fs.existsSync(directory), true);
+});
