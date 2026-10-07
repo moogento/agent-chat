@@ -72,15 +72,21 @@ test('read cursor commits only after response acknowledgement', async t => {
 });
 
 test('leases expire independently despite a shared live broker PID', async t => {
-  const f = await fixture(t, { leaseMs: 350 }); const alice = await f.make('same', 'shared', { resumable: true }); const bob = await f.make('same');
-  await new Promise(resolve => setTimeout(resolve, 230)); await heartbeatRemoteSession(bob);
-  await new Promise(resolve => setTimeout(resolve, 180));
-  await assert.rejects(call(alice, 'chat_who'), error => error.status === 410);
-  const next = await f.make('same'); assert.match((await call(next, 'chat_who')).text, /"same"/);
-  assert.match((await call(bob, 'chat_who')).text, /same-2/);
-  assert.equal(f.broker.stats().activeSessions, 2);
-  const inspect = { url: f.broker.url, tokenFile: f.tokenFile, room: 'shared', sessionId: alice.sessionId, sessionDir: f.creds };
-  await assert.rejects(inspectRemoteNotifications(inspect), error => error.status === 410);
+  const realNow = Date.now;
+  let now = realNow();
+  // Freeze only the lease clock. HTTP scheduling and request timeouts remain real.
+  Date.now = () => now;
+  try {
+    const f = await fixture(t, { leaseMs: 1000 }); const alice = await f.make('same', 'shared', { resumable: true }); const bob = await f.make('same');
+    now += 750; await heartbeatRemoteSession(bob);
+    now += 500;
+    await assert.rejects(call(alice, 'chat_who'), error => error.status === 410);
+    const next = await f.make('same'); assert.match((await call(next, 'chat_who')).text, /"same"/);
+    assert.match((await call(bob, 'chat_who')).text, /same-2/);
+    assert.equal(f.broker.stats().activeSessions, 2);
+    const inspect = { url: f.broker.url, tokenFile: f.tokenFile, room: 'shared', sessionId: alice.sessionId, sessionDir: f.creds };
+    await assert.rejects(inspectRemoteNotifications(inspect), error => error.status === 410);
+  } finally { Date.now = realNow; }
 });
 
 test('broker restart resumes only a proven session and preserves unread cursor', async t => {

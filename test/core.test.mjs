@@ -218,6 +218,41 @@ test('simultaneous processes claim unique handles atomically', async (t) => {
   for (const msg of all) assert.match(msg.text, /🦉$/);
 });
 
+test('Windows exclusive lock opens retry transient deletion errors without stealing ownership', (t) => {
+  const { home } = fixture(t); const mailbox = createMailbox({ home, lockTimeoutMs: 100 });
+  const room = mailbox.resolveRoom('windows-open'); const file = path.join(home, 'locks', 'windows-open.lock');
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform'); const open = fs.openSync;
+  let attempts = 0;
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  fs.openSync = function(target, flags, ...args) {
+    if (target === file && flags === 'wx' && ++attempts <= 2) throw Object.assign(new Error('pending deletion'), { code: attempts === 1 ? 'EPERM' : 'EACCES' });
+    return open.call(this, target, flags, ...args);
+  };
+  try {
+    const identity = mailbox.claimIdentity(room, 'reader');
+    assert.equal(identity.name, 'reader'); assert.equal(attempts, 3);
+    assert.ok(!fs.existsSync(file));
+  } finally { fs.openSync = open; Object.defineProperty(process, 'platform', platform); }
+});
+
+test('Windows persistent lock permission failures stop at the configured deadline', (t) => {
+  const { home } = fixture(t); const mailbox = createMailbox({ home, lockTimeoutMs: 30 });
+  const room = mailbox.resolveRoom('windows-denied'); const file = path.join(home, 'locks', 'windows-denied.lock');
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform'); const open = fs.openSync;
+  let attempts = 0;
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  fs.openSync = function(target, flags, ...args) {
+    if (target === file && flags === 'wx') { attempts++; throw Object.assign(new Error('permission denied'), { code: 'EACCES' }); }
+    return open.call(this, target, flags, ...args);
+  };
+  const started = Date.now();
+  try {
+    assert.throws(() => mailbox.claimIdentity(room, 'reader'), error => error.code === 'EACCES');
+    assert.ok(attempts > 1); assert.ok(Date.now() - started < 500);
+    assert.ok(!fs.existsSync(file));
+  } finally { fs.openSync = open; Object.defineProperty(process, 'platform', platform); }
+});
+
 test('abandoned reclaim lock fails within a bounded timeout', (t) => {
   const { home } = fixture(t);
   const mailbox = createMailbox({ home, lockTimeoutMs: 30 });
