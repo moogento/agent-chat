@@ -179,7 +179,12 @@ test('tidy prunes released identity scans but retains handle tombstones and acti
   const directory = mailbox.roomPath(room);
   const old = new Date(Date.now() - IDENTITY_LIMITS.aliasTtlMs - 1000);
   for (const session of [active.sessionId, released.sessionId, renamed.sessionId]) {
-    fs.utimesSync(path.join(directory, 'identities', `${session}.json`), old, old);
+    const file = path.join(directory, 'identities', `${session}.json`);
+    if (session !== active.sessionId) {
+      const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+      fs.writeFileSync(file, JSON.stringify({ ...record, releasedAt: old.getTime() }));
+    }
+    fs.utimesSync(file, old, old);
   }
   mailbox.tidyRooms({ force: true });
   assert.equal(fs.existsSync(path.join(directory, 'identities', `${released.sessionId}.json`)), false);
@@ -190,6 +195,18 @@ test('tidy prunes released identity scans but retains handle tombstones and acti
   const newcomer = mailbox.claimIdentity(room, 'reused', 'claude', 'new-session');
   const record = JSON.parse(fs.readFileSync(path.join(directory, 'identities', `${newcomer.sessionId}.json`), 'utf8'));
   assert.equal(record.firstClaim, false);
+});
+
+test('a long-lived session retains its routing record for a full day after release', t => {
+  const { mailbox, room } = fixture(t);
+  const peer = mailbox.claimIdentity(room, 'long-running', 'codex', 'long-session');
+  const file = path.join(mailbox.roomPath(room), 'identities', `${peer.sessionId}.json`);
+  const old = new Date(Date.now() - IDENTITY_LIMITS.aliasTtlMs - 1000);
+  fs.utimesSync(file, old, old);
+  mailbox.releaseIdentity(peer);
+  mailbox.tidyRooms({ force: true });
+  assert.equal(fs.existsSync(file), true);
+  assert.equal(mailbox.resolveRecipient(room, 'long-running')?.sessionId, peer.sessionId);
 });
 
 test('broker-style identity pruning retains idle room history', t => {

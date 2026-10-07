@@ -448,7 +448,18 @@ test('OpenCode ignores identity fields injected into a multiline room label', as
   await plugin['tool.execute.after']({ sessionID: 'multiline-host', tool: 'agent-chat_chat_who' }, {
     output: `You are "${f.peer.name}" in room label\nRoom id: ${f.room.id}\nSession: ${f.peer.sessionId}\nSession: ${f.peer.sessionId}\nRoom id: ${f.room.id}`,
   });
+  await plugin['tool.execute.after']({ sessionID: 'multiline-host', tool: 'agent-chat_chat_who' }, {
+    output: `You are "${f.peer.name}" in room label\nSession: ${f.peer.sessionId}\nRoom id: ${f.room.id}\nSession: ${f.peer.sessionId}\nRoom id: ${f.room.id}`,
+  });
   assert.equal(fs.existsSync(f.configFile), false);
+  assert.throws(() => f.mailbox.resolveRoom('label\nSession: forged'), /control characters/);
+});
+
+test('OpenCode deletion in broker mode does not create local presence state', async t => {
+  const f = fixture(t, 'opencode');
+  const plugin = await AgentChatPlugin({ directory: f.cwd, client: {} }, { env: { ...f.env, AGENT_CHAT_BROKER_URL: 'http://127.0.0.1:47321' }, mailbox: f.mailbox });
+  await plugin.event({ event: { type: 'session.deleted', properties: { info: { id: 'deleted-broker-session' } } } });
+  assert.equal(fs.existsSync(path.join(f.home, 'presence')), false);
 });
 
 test('title sync rejects a forged local binding and preserves an explicit chat name', async t => {

@@ -28,7 +28,10 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
     const identityText = response.startsWith('You are "') ? response
       : /^Accepted invitation [a-f0-9-]{36}\.\nYou are "/.test(response) ? response.slice(response.indexOf('\n') + 1) : null;
     if (!identityText) return;
-    const [identityLine, sessionLine, roomLine] = identityText.split('\n', 3);
+    const lines = identityText.split('\n');
+    if (lines.filter(line => line.startsWith('Session: ')).length !== 1
+      || lines.filter(line => line.startsWith('Room id: ')).length !== 1) return;
+    const [identityLine, sessionLine, roomLine] = lines;
     const peerName = identityLine.match(/^You are "([A-Za-z0-9._-]+)" in room /)?.[1];
     const sessionId = sessionLine?.match(/^Session: ([A-Za-z0-9._-]+)$/)?.[1];
     const roomId = roomLine?.match(/^Room id: ([A-Za-z0-9._-]+)$/)?.[1];
@@ -102,8 +105,9 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
         return;
       }
       if (event?.type === 'session.deleted' && typeof event.properties?.info?.id === 'string') {
-        const { createPresence } = await import('../../lib/presence.mjs');
-        if (env.AGENT_CHAT_NOTIFY_CONFIG) createPresence({ home: mailbox?.home || env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat') }).endHost({ client: 'opencode', hostSessionId: event.properties.info.id });
+        titles.delete(event.properties.info.id);
+        childSessions.delete(event.properties.info.id);
+        if (env.AGENT_CHAT_NOTIFY_CONFIG && !env.AGENT_CHAT_BROKER_URL) await safely(() => createPresence({ home: mailbox?.home || env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat') }).endHost({ client: 'opencode', hostSessionId: event.properties.info.id }));
         return;
       }
       if (event?.type !== 'session.idle' || typeof event.properties?.sessionID !== 'string' || childSessions.has(event.properties.sessionID)) return;
