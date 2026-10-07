@@ -178,7 +178,7 @@ export async function syncBoundSessionTitle({ client, hostSessionId, cwd, sessio
     // MCP clientInfo.name is client-defined (for example, claude-ai), while the
     // binding records the host family. Pass the verified peer's exact client name.
     if (typeof mailbox.syncSessionTitle !== 'function') return { synced: false, reason: 'title-api-unavailable' };
-    peer = mailbox.syncSessionTitle({ room, sessionId: binding.mailboxSessionId, title: sessionTitle,
+    if (peer.sessionTitle !== sessionTitle || peer.titleSource !== titleSource) peer = mailbox.syncSessionTitle({ room, sessionId: binding.mailboxSessionId, title: sessionTitle,
       client: peer.client, cwd: binding.cwd, titleSource });
     if (!peer) return { synced: false, reason: 'wrong-local-identity' };
   }
@@ -233,7 +233,7 @@ export async function notifyHostInvitations({ client, hostSessionId, cwd, title,
     if (!fresh.length) return { delivered: false };
     await deliver(`${CHAT_LABEL}: ${fresh.length} new room invitation${fresh.length === 1 ? '' : 's'}. `
       + (channel === 'toast'
-        ? 'Ask your agent to check Agent Chat invitations when you continue.'
+        ? 'Ask your agent to call chat_who, then check Agent Chat invitations when you continue.'
         : 'Use chat_invitations to inspect. If none appear, bind this session with chat_who and retry. Invitations do not move your session or authorize work.'));
     const temporary = `${file}.${process.pid}.tmp`;
     try {

@@ -29,6 +29,49 @@ test('host sessions appear before joining and receive scoped invitations without
   assert.equal(presence.pendingForHost({ client: 'claude', hostSessionId: 'host-123' }).length, 0);
 });
 
+test('a filesystem-root working directory still gets a usable provisional handle', async t => {
+  const { home, presence } = fixture(t);
+  const root = path.parse(process.cwd()).root;
+  const mailbox = createMailbox({ home, cwd: root });
+  const host = presence.registerHost({ client: 'codex', hostSessionId: 'root-host', cwd: root });
+  assert.match(host.name, /^codex-root-[a-f0-9]{6}$/);
+  const server = createServer({ mailbox, sessionId: 'root-mcp' });
+  t.after(() => server.stop());
+  await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'codex' } } });
+  assert.match(server.state.identity.name, /^codex-root-[a-f0-9]{6}$/);
+});
+
+test('a failed eager claim does not break MCP initialization', async t => {
+  const { mailbox } = fixture(t);
+  const failing = { ...mailbox, claimIdentity: () => { throw new Error('identity busy'); } };
+  const responses = [];
+  const server = createServer({ mailbox: failing, output: item => responses.push(item) });
+  t.after(() => server.stop());
+  const stderr = process.stderr.write;
+  process.stderr.write = () => true;
+  try { await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'codex' } } }); }
+  finally { process.stderr.write = stderr; }
+  assert.equal(responses[0].result.serverInfo.name, 'agent-chat');
+  await assert.rejects(server.callTool('chat_who'), /identity busy/);
+});
+
+test('same-repo unlinked MCP peers are grouped without guessing host identity', async t => {
+  const { mailbox, presence } = fixture(t);
+  presence.registerHost({ client: 'codex', hostSessionId: 'first', cwd: process.cwd(), title: 'first task' });
+  presence.registerHost({ client: 'codex', hostSessionId: 'second', cwd: process.cwd(), title: 'second task' });
+  const first = createServer({ mailbox, sessionId: 'peer-first', roomSpec: 'room-a' });
+  const second = createServer({ mailbox, sessionId: 'peer-second', roomSpec: 'room-b' });
+  t.after(() => { first.stop(); second.stop(); });
+  first.state.client = 'codex-mcp-client'; second.state.client = 'codex-mcp-client';
+  await first.callTool('chat_who'); await second.callTool('chat_who');
+  const output = await first.callTool('chat_presence');
+  assert.match(output, /first-task.*host not linked/);
+  assert.match(output, /second-task.*host not linked/);
+  assert.equal((output.match(/Unlinked MCP connections/g) || []).length, 1);
+  assert.match(output, /peer-first|peer-second|codex-agent-chat/);
+  assert.equal(presence.linkedHostIds(first.state.identity.room, first.state.identity.sessionId).length, 0);
+});
+
 test('joined sessions can invite across rooms and accept explicitly', async t => {
   const { mailbox } = fixture(t);
   const alice = createServer({ mailbox, sessionId: 'alice-session', roomSpec: 'alpha' });

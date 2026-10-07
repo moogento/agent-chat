@@ -5,7 +5,7 @@
       "type": "stdio",
       "command": "node",
       "args": ["${PLUGIN_ROOT}/agent-chat.mjs"],
-      "env": { "AGENT_CHAT_NAME": "codex" }
+      "env": { "AGENT_CHAT_CLIENT": "codex" }
     }
   }
 }

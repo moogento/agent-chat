@@ -387,6 +387,30 @@ test('OpenCode title seen before binding is applied after a later tool event', a
   assert.equal(f.mailbox.listPeers(f.room).find(item => item.sessionId === f.peer.sessionId).name, 'New-session');
 });
 
+test('OpenCode chat_who links exact same-repo sessions and syncs their own titles', async t => {
+  const f = fixture(t, 'opencode');
+  fs.rmSync(f.configFile);
+  const other = f.mailbox.claimIdentity(f.room, 'other', 'opencode', crypto.randomUUID());
+  const plugin = await AgentChatPlugin({ directory: f.cwd, client: {} }, { env: f.env, mailbox: f.mailbox });
+  const hosts = [{ host: 'host-one', peer: f.peer, title: 'First session' },
+    { host: 'host-two', peer: other, title: 'Second session' }];
+  for (const item of hosts) await plugin.event({ event: { type: 'session.created', properties: { info: { id: item.host, title: item.title } } } });
+  for (const item of hosts) {
+    const result = { output: `You are "${item.peer.name}" in room ${f.room.label}\nSession: ${item.peer.sessionId}\nRoom id: ${f.room.id}` };
+    await plugin['tool.execute.after']({ sessionID: item.host, tool: 'agent-chat_chat_who' }, result);
+  }
+  const bindings = readConfig(f.configFile).bindings;
+  assert.equal(bindings.length, 2);
+  for (const item of hosts) {
+    assert.equal(bindings.find(binding => binding.hostSessionId === item.host).mailboxSessionId, item.peer.sessionId);
+    assert.equal(f.mailbox.listPeers(f.room).find(peer => peer.sessionId === item.peer.sessionId).name, item.title.replace(' ', '-'));
+  }
+  await plugin.event({ event: { type: 'message.updated', properties: { sessionID: 'host-one',
+    info: { role: 'assistant', providerID: 'openai', modelID: 'gpt-6.1-sol' } } } });
+  await plugin.event({ event: { type: 'session.updated', properties: { info: { id: 'host-one', title: 'First session' } } } });
+  assert.equal(createPresence({ home: f.home }).getHost({ client: 'opencode', hostSessionId: 'host-one' }).activity, 'working');
+});
+
 test('title sync rejects a forged local binding and preserves an explicit chat name', async t => {
   const f = fixture(t, 'opencode');
   const explicit = f.mailbox.claimIdentity(f.room, 'chosen-name', 'opencode', f.peer.sessionId, { nameSource: 'explicit' });
@@ -492,7 +516,7 @@ test('OpenCode announces new sessions before binding and emits count-only invita
   await plugin.event({ event: { type: 'session.idle', properties: { sessionID: 'new-opencode' } } });
   assert.equal(toasts.length, 1);
   assert.match(toasts[0].body.message, /1 new room invitation/);
-  assert.match(toasts[0].body.message, /Ask your agent to check Agent Chat invitations/);
+  assert.match(toasts[0].body.message, /Ask your agent to call chat_who, then check Agent Chat invitations/);
   assert.doesNotMatch(toasts[0].body.message, /Use chat_invitations/);
   const output = { output: 'original' };
   await plugin['tool.execute.after']({ sessionID: 'new-opencode' }, output);
