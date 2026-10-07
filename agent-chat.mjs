@@ -36,7 +36,7 @@ function configuredMaxWait() {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const protocolError = (message, code = -32602) => Object.assign(new Error(message), { code });
-export function createServer({ mailbox = createMailbox(), output = (obj) => process.stdout.write(JSON.stringify(obj) + '\n'), maxWait = configuredMaxWait(), waitBudget = envNumber('AGENT_CHAT_WAIT_BUDGET', 300, 0, 3600), ttlDays = envNumber('AGENT_CHAT_TTL_DAYS', 7, 0, 36500), sessionId = process.env.AGENT_CHAT_SESSION || process.env.AGENT_CHAT_SESSION_ID || crypto.randomUUID(), roomSpec = envValue('AGENT_CHAT_ROOM'), nameSpec = process.env.AGENT_CHAT_NAME, identityExtras = () => ({}) } = {}) {
+export function createServer({ mailbox = createMailbox(), output = (obj) => process.stdout.write(JSON.stringify(obj) + '\n'), maxWait = configuredMaxWait(), waitBudget = envNumber('AGENT_CHAT_WAIT_BUDGET', 300, 0, 3600), ttlDays = envNumber('AGENT_CHAT_TTL_DAYS', 7, 0, 36500), sessionId = process.env.AGENT_CHAT_SESSION || process.env.AGENT_CHAT_SESSION_ID || crypto.randomUUID(), roomSpec = envValue('AGENT_CHAT_ROOM'), nameSpec = envValue('AGENT_CHAT_NAME'), identityExtras = () => ({}) } = {}) {
   maxWait = capMaxWait(maxWait, 'maxWait');
   sessionId = safeSessionId(sessionId);
   const activeRequests = new Map();

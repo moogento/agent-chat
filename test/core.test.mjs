@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync, execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { createMailbox, LIMITS } from '../lib/mailbox.mjs';
@@ -32,6 +33,21 @@ test('rejects traversal and mailbox symlink escapes', (t) => {
   fs.symlinkSync(outside, path.join(home, 'rooms', 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
   assert.throws(() => mailbox.roomDir({ id: 'escape' }), /Unsafe/);
   assert.deepEqual(fs.readdirSync(outside), []);
+});
+
+test('default Git worktree rooms preserve the version 0.2 native-path hash and existing history', (t) => {
+  const { mailbox } = fixture(t);
+  let gitTop;
+  try { gitTop = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
+  catch { return t.skip('Requires a Git worktree'); }
+  const nativeTop = path.resolve(gitTop);
+  const legacyId = `${path.basename(nativeTop).replace(/[^A-Za-z0-9._-]/g, '_') || 'root'}-${crypto.createHash('sha1').update(nativeTop).digest('hex').slice(0, 6)}`;
+  const room = mailbox.resolveRoom(); assert.equal(room.id, legacyId); assert.equal(room.label, nativeTop);
+  assert.deepEqual(mailbox.resolveRoom(gitTop), room);
+  const legacyRoom = { id: legacyId, label: gitTop };
+  const message = mailbox.appendMessage(legacyRoom, 'sender', 'reader', 'history from version 0.2');
+  const reader = mailbox.claimIdentity(room, 'reader');
+  assert.deepEqual(mailbox.takeUnread(reader).messages.map(item => item.id), [message.id]);
 });
 
 test('new identities use fresh cursors; long handles preserve suffix ownership', (t) => {
@@ -252,18 +268,22 @@ test('empty and whitespace local environment settings retain default startup his
   for (const blank of ['', ' \t ']) {
     const { home, mailbox } = fixture(t); const transcript = agedTranscript(mailbox); const history = fs.readFileSync(transcript, 'utf8');
     const room = mailbox.resolveRoom();
-    const client = await mcpWaitSetting(t, blank, { home, env: { AGENT_CHAT_WAIT_BUDGET: blank, AGENT_CHAT_TTL_DAYS: blank, AGENT_CHAT_ROOM: blank } });
+    const client = await mcpWaitSetting(t, blank, { home, env: { AGENT_CHAT_WAIT_BUDGET: blank, AGENT_CHAT_TTL_DAYS: blank, AGENT_CHAT_ROOM: blank, AGENT_CHAT_NAME: blank } });
     const responses = await mcpResponses(client, [
       { id: 1, method: 'initialize', params: { clientInfo: { name: 'test' } } },
       { id: 2, method: 'tools/list' },
       { id: 3, method: 'tools/call', params: { name: 'chat_who' } },
       { id: 4, method: 'tools/call', params: { name: 'chat_join', arguments: { room: '' } } },
       { id: 5, method: 'tools/call', params: { name: 'chat_join', arguments: { room: ' \t ' } } },
+      { id: 6, method: 'tools/call', params: { name: 'chat_join', arguments: { name: '' } } },
+      { id: 7, method: 'tools/call', params: { name: 'chat_join', arguments: { name: ' \t ' } } },
     ]);
     const read = responses.find(response => response.id === 2).result.tools.find(tool => tool.name === 'chat_read');
     assert.equal(read.inputSchema.properties.wait_seconds.maximum, 50); assert.match(read.description, /within 300s session budget/);
     assert.equal(responses.find(response => response.id === 3).result.structuredContent.agentChatIdentity.room, room.id);
+    assert.equal(responses.find(response => response.id === 3).result.structuredContent.agentChatIdentity.name, 'test');
     for (const id of [4, 5]) { const rejected = responses.find(response => response.id === id).result; assert.equal(rejected.isError, true); assert.match(rejected.content[0].text, /Room must be a nonempty string/); }
+    for (const id of [6, 7]) { const rejected = responses.find(response => response.id === id).result; assert.equal(rejected.isError, true); assert.match(rejected.content[0].text, /Name must be a nonempty string/); }
     assert.equal(fs.readFileSync(transcript, 'utf8'), history); assert.equal(client.stderr(), '');
     const cli = fileURLToPath(new URL('../agent-chat.mjs', import.meta.url));
     for (const args of [['who'], ['tidy']]) {

@@ -137,6 +137,33 @@ test('doctor diagnoses optional hooks and pending binding as warnings without cl
   assert.ok(check(await doctorProject({ project }), 'claude.hooks').some(value => value.status === 'error'));
 });
 
+test('doctor prints managed binding commands with exact project paths and broker options', async t => {
+  for (const client of ['codex', 'claude', 'opencode']) {
+    for (const broker of [false, true]) {
+      const { project, paths } = fixture(t, { install: false });
+      const tokenFile = path.join(project, 'broker-token');
+      if (broker) fs.writeFileSync(tokenFile, 'a'.repeat(64));
+      installProject({ project, clients: [client], hooks: true, ...(broker ? {
+        brokerUrl: 'http://127.0.0.1:1', brokerTokenFile: tokenFile, room: 'configured-room',
+      } : {}) });
+      const before = snapshot(project);
+      const result = await doctorProject({ project });
+      const command = result.hints.find(hint => hint.startsWith(`Manual binding for ${client} `));
+      assert.ok(command, `${client}: ${broker ? 'broker' : 'local'}`);
+      assert.ok(command.includes(`'${process.execPath}'`));
+      assert.ok(command.includes(`'${path.join(paths.runtime, 'hooks/bind.mjs')}'`));
+      assert.ok(command.includes(`--config '${paths.notificationConfig}'`));
+      assert.ok(command.includes(`--client '${client === 'claude' ? 'claude-code' : client}'`));
+      assert.ok(command.includes(`--cwd '${project}'`));
+      assert.match(command, /--host-session 'HOST_CONVERSATION_ID'.*--session 'MAILBOX_SESSION_FROM_CHAT_WHO'/);
+      if (broker) assert.match(command, /--room 'configured-room'.*--broker-url 'http:\/\/127\.0\.0\.1:1'/);
+      else { assert.match(command, /--room 'ROOM_ID_FROM_CHAT_WHO'/); assert.doesNotMatch(command, /--broker-url/); }
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.deepEqual(snapshot(project), before, 'Binding guidance is read-only.');
+    }
+  }
+});
+
 test('doctor distinguishes missing lifecycle hooks from edited or duplicated launcher references', async t => {
   for (const client of ['codex', 'claude']) {
     const { project } = fixture(t, { clients: [client], hooks: true });

@@ -41,6 +41,54 @@ test('unconfigured hooks are silent and do not initialize a mailbox', async t =>
   assert.equal(fs.existsSync(home), false);
 });
 
+test('empty mailbox home uses the server default and whitespace home stays explicit', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-hook-home-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const moduleUrl = relative => pathToFileURL(path.resolve(relative)).href;
+  const source = `
+    import assert from 'node:assert/strict';
+    import fs from 'node:fs';
+    import os from 'node:os';
+    import path from 'node:path';
+    import { createMailbox } from ${JSON.stringify(moduleUrl('lib/mailbox.mjs'))};
+    import { bindNotification } from ${JSON.stringify(moduleUrl('hooks/bind.mjs'))};
+    import { notifySession, runCommandHook, readConfig } from ${JSON.stringify(moduleUrl('hooks/notifications.mjs'))};
+    assert.equal(fs.realpathSync(os.homedir()), fs.realpathSync(process.env.TEST_ISOLATED_HOME));
+    const cwd = process.cwd(); const mailbox = createMailbox();
+    const expected = path.resolve(process.env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat'));
+    assert.equal(mailbox.home, expected);
+    const room = mailbox.resolveRoom('home-test');
+    const peer = mailbox.claimIdentity(room, 'recipient', 'codex', 'home-session');
+    const configFile = path.join(cwd, 'notifications.json');
+    const env = { ...process.env, AGENT_CHAT_NOTIFY_CONFIG: configFile };
+    const binding = { client: 'codex', hostSessionId: 'host', cwd, room: room.id, mailboxSessionId: peer.sessionId };
+    bindNotification({ configFile, binding });
+    mailbox.appendMessage(room, 'sender', peer.name, 'first', 'sender-session');
+    let delivered = 0;
+    await notifySession({ client: 'codex', hostSessionId: 'host', cwd, env, deliver: () => delivered++ });
+    assert.equal(delivered, 1);
+    fs.unlinkSync(configFile);
+    mailbox.appendMessage(room, 'sender', peer.name, 'second', 'sender-session');
+    const tool = 'mcp__agent_chat__chat_who';
+    await runCommandHook({ client: 'codex', env: { ...env, AGENT_CHAT_NOTIFY_AUTO_BIND: '1', AGENT_CHAT_NOTIFY_IDENTITY_TOOLS: tool },
+      payload: { session_id: 'host', cwd, hook_event_name: 'PostToolUse', tool_name: tool,
+        tool_response: { structuredContent: { agentChatIdentity: { version: 1, sessionId: peer.sessionId, cwd, room: room.id, name: peer.name } } } },
+      write: () => delivered++ });
+    assert.equal(delivered, 2);
+    assert.equal(readConfig(configFile).bindings[0].mailboxSessionId, peer.sessionId);
+    for (const directory of ['rooms', 'locks', 'notifications']) assert.equal(fs.existsSync(path.join(cwd, directory)), false);
+    assert.equal(fs.existsSync(path.join(expected, 'notifications')), true);
+  `;
+  for (const [index, homeValue] of ['', ' '].entries()) {
+    const cwd = path.join(root, `worktree-${index}`); const isolatedHome = path.join(root, `home-${index}`);
+    fs.mkdirSync(cwd); fs.mkdirSync(isolatedHome);
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', source], { cwd, encoding: 'utf8',
+      env: { ...process.env, HOME: isolatedHome, USERPROFILE: isolatedHome, TEST_ISOLATED_HOME: isolatedHome,
+        AGENT_CHAT_HOME: homeValue, AGENT_CHAT_BROKER_URL: '', AGENT_CHAT_BROKER_TOKEN_FILE: '' } });
+    assert.equal(result.status, 0, result.stderr);
+  }
+});
+
 for (const client of ['codex', 'claude-code']) {
   for (const event of ['SessionStart', 'UserPromptSubmit', 'PostToolUse']) {
     test(`${client} ${event} returns the documented context payload without peer text`, async t => {

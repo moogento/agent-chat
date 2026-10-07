@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { createMailbox, safeSessionId } from '../lib/mailbox.mjs';
@@ -181,7 +182,7 @@ export async function notifySession({ client, hostSessionId, cwd, env = process.
   const room = { id: binding.room, label: binding.room };
   let peer;
   if (!remote) {
-    mailbox ??= createMailbox({ home: env.AGENT_CHAT_HOME, cwd });
+    mailbox ??= createMailbox({ home: env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat'), cwd });
     mailbox.roomPath(room);
     const peers = mailbox.listPeers(room).filter(item => item.sessionId === binding.mailboxSessionId);
     if (peers.length !== 1) return { delivered: false, reason: 'no-peer' };
@@ -259,7 +260,7 @@ export async function autoBindCommand({ client, payload, env = process.env, mail
     const result = await inspectRemote(binding, env, undefined, remoteInspector);
     if (!result || result.peer.name !== metadata.name) return false;
   } else {
-    mailbox ??= createMailbox({ home: env.AGENT_CHAT_HOME, cwd: identity.cwd });
+    mailbox ??= createMailbox({ home: env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat'), cwd: identity.cwd });
     const room = { id: binding.room, label: binding.room };
     mailbox.roomPath(room);
     const matches = mailbox.listPeers(room).filter(peer => peer.sessionId === binding.mailboxSessionId

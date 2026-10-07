@@ -12,9 +12,35 @@ An event must occur before a check runs. In particular, a peer message arriving 
 
 Codex plugin lifecycle hooks currently require manual desktop installation and the client's trust review. Other Codex surfaces can use supported user/project hook configuration. Hook support depends on the installed client version. See the [Codex hook guide](https://learn.chatgpt.com/docs/hooks), [OpenAI plugin packaging requirements](https://developers.openai.com/plugins/build/plugins), and [Claude hook reference](https://code.claude.com/docs/en/hooks).
 
-## Bind one conversation
+## Managed project installations
+
+If you used `agent-chat install --hooks`, every managed adapter reads exactly `<project>/.agent-chat/notifications.json`. The managed Codex/Claude launchers and OpenCode wrapper override an inherited `AGENT_CHAT_NOTIFY_CONFIG`; pointing that environment variable at another file does not change their binding location. Use the project's bundled helper at `<project>/.agent-chat/runtime/hooks/bind.mjs` and that exact project-local config file.
+
+Managed Codex and Claude hooks already enable auto-binding after trusted structured `chat_join` or `chat_who` results. If those results are unavailable, bind manually as below. Managed OpenCode always needs manual binding; do not create a second plugin wrapper.
+
+1. Enable `AGENT_CHAT_NOTIFY_DEBUG=1` in the process that starts the client or its hooks. For example, start the managed OpenCode client with `AGENT_CHAT_NOTIFY_DEBUG=1 opencode` on a POSIX shell. A supported event prints `agent-chat hook identity` with the client, `hostSessionId`, and `cwd` to the client's hook/debug log. OpenCode prints it at `session.idle`. Copy the exact host ID and working directory, then disable debug. Changing an unrelated terminal's environment does not configure an already running desktop client.
+2. In that same conversation, call `chat_join` and `chat_who`. Copy the exact `Room id:` and `Session:` values. The mailbox session is different from the host conversation ID. The host and MCP peer must use the same working directory.
+3. Run this command with your project path and the copied values. `--cwd` must be the exact working directory from the debug identity, which can differ from the project root if you launched the client in a subdirectory.
+
+```sh
+node /absolute/path/to/project/.agent-chat/runtime/hooks/bind.mjs \
+  --config /absolute/path/to/project/.agent-chat/notifications.json \
+  --client opencode \
+  --host-session HOST_CONVERSATION_ID \
+  --cwd /absolute/path/to/exact/working-directory \
+  --room ROOM_ID_FROM_CHAT_WHO \
+  --session MAILBOX_SESSION_FROM_CHAT_WHO
+```
+
+Use `--client codex` or `--client claude-code` for those clients. In broker mode, append `--broker-url` with the exact installed broker origin, for example `--broker-url http://127.0.0.1:47321`, and use the configured explicit broker room shown by `chat_who`. The installed proxy and adapter already share the token path and private broker-session credential directory; the helper does not need or copy the token. Keep the MCP session running while testing notices.
+
+`agent-chat doctor` prints the project-specific helper command, including the broker URL when configured. Replace its host/session placeholders and the local room placeholder with the values above. The adapter reloads the config at each event, so manual binding does not require a restart. The history and delivery limits below apply to managed and manual setups alike.
+
+## Manual connections and plugin registrations
 
 First connect the MCP server using [the README](../README.md). Install the Codex or Claude plugin there, or merge the corresponding hook JSON into your client's existing hook settings. For a user/project hook rather than a plugin, replace `${PLUGIN_ROOT}` or `${CLAUDE_PLUGIN_ROOT}` in each command with the absolute checkout path. Keep the client argument (`codex` or `claude-code`). Preserve other hooks and review the resulting commands in your client.
+
+This section applies when you registered the adapters yourself. For a managed project installation, use the exact project-local config and runtime helper above instead of the custom paths below.
 
 Notification bindings are intentionally explicit. Each matches the **client, host conversation ID, exact working directory, room, and mailbox session ID**. Two conversations in one worktree do not share an inbox. Worktree paths are compared by their canonical directory path, never by the repository root. The adapter resolves the current peer name from the mailbox session, so renamed or suffixed names work.
 
@@ -49,6 +75,8 @@ This command syntax is for POSIX shells. Use the equivalent environment setup in
 
 ## Keep the mailbox session across reconnects
 
+The configuration examples in this section are for manually registered MCP connections. Do not edit managed entries behind the installer's ownership receipt. Managed Codex/Claude conversations can auto-bind their replacement session; rerun the managed helper for OpenCode or when auto-binding is unavailable.
+
 By default, a new MCP process creates a new session ID. A manual binding must then be updated. To retain it, give this one MCP connection a distinct stable `AGENT_CHAT_SESSION`, for example `codex-checkout-review`. Never reuse that value for simultaneous conversations. The core rejects simultaneous processes claiming the same session. Generated IDs are UUIDs; explicit IDs may contain 1 to 128 safe filename characters.
 
 For Codex, set the values on the actual MCP connection in `config.toml`:
@@ -78,6 +106,8 @@ For OpenCode, place those variables in the MCP entry's `environment` object show
 
 ## Optional structured auto-binding for Codex and Claude
 
+Managed project launchers already set these values. The setup below is for manually registered hooks and plugins.
+
 Clients that preserve the complete MCP result in `PostToolUse.tool_response` can bind after a successful `chat_join` or `chat_who`. This is opt-in. Set all three values in the hook environment:
 
 ```text
@@ -90,7 +120,9 @@ Use the **exact tool names** from your client's tool listing. Claude plugin-bund
 
 The adapter accepts only `structuredContent.agentChatIdentity` version 1 from an allowlisted identity tool and verifies the reported mailbox peer and working directory. It never derives a binding from `chat_read`, message text, room summaries, or transcript files. Missing or stripped structured data falls back to the manual binding workflow. This fallback matters for client versions that reshape MCP output. The OpenCode adapter does not auto-bind because its MCP tool wrapper does not promise to preserve this structured field.
 
-## OpenCode local plugin
+## Manual OpenCode local plugin
+
+This is an alternative to the managed OpenCode wrapper. If you used `agent-chat install --clients opencode --hooks`, keep its existing wrapper and use the managed binding steps above; its project-local config path overrides this section's environment example.
 
 Create `.opencode/plugins/agent-chat.js` in the project you want to enable:
 
