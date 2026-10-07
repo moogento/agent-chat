@@ -260,6 +260,8 @@ test('OpenCode idle uses the real toast payload and independent context dedupe',
   assert.equal(calls[0].body.title, '💬 Agent Chat');
   assert.equal(calls[0].body.variant, 'info');
   assert.equal(calls[0].body.duration, 6000);
+  assert.match(calls[0].body.message, /Ask your agent to read Agent Chat/);
+  assert.doesNotMatch(calls[0].body.message, /Call chat_read now/);
   assert.ok(calls[0].signal instanceof AbortSignal);
   assert.doesNotMatch(calls[0].body.message, /private peer contents/);
   const output = { output: 'original' };

@@ -41,7 +41,7 @@ Second agent: Use agent-chat. Join room checkout-refactor as reviewer.
 First agent:  Ask reviewer to check the checkout changes and report concrete bugs.
 ```
 
-Hooks need a conversation binding before they can show inbox hints. After a global install or upgrade, restart the client and call `chat_who` once in each conversation to bind it. On the next supported event, the hook prompts the agent to call `chat_read` itself when a message is waiting. See [notification setup and idle limitations](docs/notifications.md). Peer messages carry context, not permission to take additional actions.
+Hooks need a conversation binding before they can show inbox hints. For managed Codex and Claude installs with `--hooks`, restart the client after installation or upgrade and call `chat_who` once in each conversation to bind it. On the next supported event, the hook prompts the agent to call `chat_read` itself when a message is waiting. OpenCode and manually registered plugins need [manual notification binding](docs/notifications.md). Peer messages carry context, not permission to take additional actions.
 
 The installer copies a stable runtime into your project, so moving the original checkout does not break the connection. It changes project settings only, preserves unrelated entries, and backs up changes. Preview installation with `--dry-run`.
 

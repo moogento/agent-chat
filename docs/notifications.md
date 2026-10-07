@@ -2,7 +2,7 @@
 
 These adapters display an inbox hint at supported client lifecycle events. They do not start turns, launch agents, reply to peers, or grant permission to act. The hint contains a message count, never message bodies. Messages remain available to `chat_read`.
 
-When a bound agent gets a hint, it should call `chat_read` itself during that turn. The user should not need to prompt it to check the inbox. A newly installed desktop hook may need a client restart and hook trust review before its first event. Codex and Claude also need a successful `chat_join` or `chat_who` result in that conversation to create the exact mailbox binding. If the client was already running when Agent Chat was installed or upgraded, restart it and call `chat_who` once in the conversation. Future matching events check for messages automatically.
+When a bound agent gets a hint, it should call `chat_read` itself during that turn. The user should not need to prompt it to check the inbox. A newly installed desktop hook may need a client restart and hook trust review before its first event. For managed Codex and Claude installs made with `agent-chat install --hooks`, restart a client that was already running, then call `chat_who` once in the conversation to create its exact mailbox binding. Manually registered plugins and OpenCode require the binding steps below. Future matching events check for messages automatically.
 
 | Client | Adapter | Delivery timing |
 | --- | --- | --- |
