@@ -120,6 +120,7 @@ test('deduplicates repeated and concurrent hook events, then reports later messa
   await Promise.all([notifySession({ ...f.input, deliver }), notifySession({ ...f.input, deliver })]);
   await notifySession({ ...f.input, deliver });
   assert.equal(notices.length, 1);
+  assert.match(notices[0], /Call chat_read now to receive them/);
   f.send('later');
   await notifySession({ ...f.input, deliver });
   assert.equal(notices.length, 2);
@@ -259,6 +260,8 @@ test('OpenCode idle uses the real toast payload and independent context dedupe',
   assert.equal(calls[0].body.title, '💬 Agent Chat');
   assert.equal(calls[0].body.variant, 'info');
   assert.equal(calls[0].body.duration, 6000);
+  assert.match(calls[0].body.message, /Ask your agent to read Agent Chat/);
+  assert.doesNotMatch(calls[0].body.message, /Call chat_read now/);
   assert.ok(calls[0].signal instanceof AbortSignal);
   assert.doesNotMatch(calls[0].body.message, /private peer contents/);
   const output = { output: 'original' };
@@ -433,6 +436,8 @@ test('OpenCode announces new sessions before binding and emits count-only invita
   await plugin.event({ event: { type: 'session.idle', properties: { sessionID: 'new-opencode' } } });
   assert.equal(toasts.length, 1);
   assert.match(toasts[0].body.message, /1 new room invitation/);
+  assert.match(toasts[0].body.message, /Ask your agent to check Agent Chat invitations/);
+  assert.doesNotMatch(toasts[0].body.message, /Use chat_invitations/);
   const output = { output: 'original' };
   await plugin['tool.execute.after']({ sessionID: 'new-opencode' }, output);
   assert.match(output.output, /1 new room invitation/);

@@ -508,7 +508,7 @@ test('installs all clients, preserves unrelated settings and provides a self-con
   for (const entry of inspection.receipt.entries) assert.equal(inspectManagedEntry({ project: f.project, entry }).status, 'present');
   for (const relative of RUNTIME_FILES) assert.ok(fs.existsSync(path.join(f.project, '.agent-chat/runtime', relative)), relative);
   const run = spawnSync(process.execPath, [path.join(f.project, '.agent-chat/runtime/agent-chat.mjs'), '--version'], { encoding: 'utf8' });
-  assert.equal(run.status, 0, run.stderr); assert.equal(run.stdout.trim(), '0.4.0');
+  assert.equal(run.status, 0, run.stderr); assert.equal(run.stdout.trim(), '0.4.1');
   const diagnostic = spawnSync(process.execPath, [path.join(f.project, '.agent-chat/runtime/agent-chat.mjs'), 'doctor', '--project', f.project, '--json'], { encoding: 'utf8' });
   assert.equal(diagnostic.status, 0, diagnostic.stderr + diagnostic.stdout);
   assert.equal(JSON.parse(diagnostic.stdout).ok, true);
