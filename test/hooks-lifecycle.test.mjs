@@ -6,7 +6,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { createMailbox } from '../lib/mailbox.mjs';
 import { bindNotification } from '../hooks/bind.mjs';
-import { findBinding, readConfig, runCommandHook, NOTIFICATION_LIMITS } from '../hooks/notifications.mjs';
+import { findBinding, readConfig, runCommandHook, notifySession, sameBindingCwd, NOTIFICATION_LIMITS } from '../hooks/notifications.mjs';
 
 function fixture(t) {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-binding-lifecycle-'));
@@ -16,7 +16,7 @@ function fixture(t) {
   const binding = { client: 'codex', hostSessionId: 'host', cwd, room: 'room', mailboxSessionId: 'session' };
   const lookup = (env = {}, extra = {}) => findBinding({ client: binding.client, hostSessionId: binding.hostSessionId, cwd,
     env: { AGENT_CHAT_NOTIFY_CONFIG: configFile, ...env }, ...extra });
-  return { cwd, configFile, binding, lookup };
+  return { temporary, cwd, configFile, binding, lookup };
 }
 
 test('deleted stored worktrees are inert and do not block healthy lookups or new bindings', t => {
@@ -42,10 +42,12 @@ test('stored worktree paths never follow a replacement symlink into another work
   fs.mkdirSync(original); fs.mkdirSync(other);
   bindNotification({ configFile: f.configFile, binding: { ...f.binding, cwd: original } });
   fs.rmSync(original, { recursive: true });
-  try { fs.symlinkSync(other, original, 'dir'); }
+  try { fs.symlinkSync(other, original, process.platform === 'win32' ? 'junction' : 'dir'); }
   catch (error) { if (process.platform === 'win32' && error.code === 'EPERM') { t.skip('symlink privilege unavailable'); return; } throw error; }
   assert.equal(f.lookup({}, { cwd: original }), null);
   assert.equal(f.lookup({}, { cwd: other }), null);
+  assert.equal(sameBindingCwd(original, other), false);
+  assert.equal(sameBindingCwd(other, original), false);
   assert.equal(readConfig(f.configFile).bindings[0].cwd, original);
 });
 
@@ -124,4 +126,36 @@ test('Windows path case variants share one native canonical binding', { skip: pr
   bindNotification({ configFile: f.configFile, binding: { ...f.binding, cwd: f.cwd.toUpperCase() } });
   assert.equal(readConfig(f.configFile).bindings.length, 1);
   assert.equal(readConfig(f.configFile).bindings[0].cwd, fs.realpathSync.native(f.cwd));
+});
+
+test('Windows legacy temporary short-name aliases support lookup, peer matching and rebind deduplication', { skip: process.platform !== 'win32' }, async t => {
+  const f = fixture(t);
+  // CI TEMP commonly includes RUNNER~1; the old resolver retains that alias.
+  const legacy = fs.realpathSync(f.temporary); const native = fs.realpathSync.native(f.temporary);
+  assert.equal(sameBindingCwd(legacy, native), true);
+  assert.equal(sameBindingCwd(native, legacy), true);
+  const mailbox = createMailbox({ home: path.join(native, 'mailbox'), cwd: native });
+  const room = mailbox.resolveRoom('room'); const peer = mailbox.claimIdentity(room, 'recipient', 'codex', crypto.randomUUID());
+  fs.writeFileSync(f.configFile, JSON.stringify({ version: 1, bindings: [{ ...f.binding, cwd: legacy, mailboxSessionId: peer.sessionId }] }));
+  assert.equal(f.lookup({}, { cwd: native }).mailboxSessionId, peer.sessionId);
+  mailbox.appendMessage(room, 'sender', peer.name, 'legacy path message', crypto.randomUUID());
+  let notices = 0;
+  await notifySession({ client: 'codex', hostSessionId: 'host', cwd: native, env: { AGENT_CHAT_NOTIFY_CONFIG: f.configFile },
+    mailbox, deliver: () => notices++ });
+  assert.equal(notices, 1);
+  bindNotification({ configFile: f.configFile, binding: { ...f.binding, cwd: legacy.toLowerCase(), mailboxSessionId: peer.sessionId } });
+  const retained = readConfig(f.configFile).bindings;
+  assert.equal(retained.length, 1);
+  assert.equal(retained[0].cwd, native);
+});
+
+test('Windows ancestor junction replacement cannot remap a stored child worktree', { skip: process.platform !== 'win32' }, t => {
+  const f = fixture(t);
+  const original = path.join(f.cwd, 'original'); const other = path.join(f.cwd, 'other');
+  fs.mkdirSync(path.join(original, 'child'), { recursive: true }); fs.mkdirSync(path.join(other, 'child'), { recursive: true });
+  bindNotification({ configFile: f.configFile, binding: { ...f.binding, cwd: path.join(original, 'child') } });
+  fs.rmSync(original, { recursive: true }); fs.symlinkSync(other, original, 'junction');
+  assert.equal(sameBindingCwd(path.join(original, 'child'), path.join(other, 'child')), false);
+  assert.equal(sameBindingCwd(path.join(other, 'child'), path.join(original, 'child')), false);
+  assert.equal(f.lookup({}, { cwd: path.join(other, 'child') }), null);
 });

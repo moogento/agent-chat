@@ -33,8 +33,23 @@ function canonicalCwd(cwd) {
 export function sameBindingCwd(left, right) {
   if (typeof left !== 'string' || typeof right !== 'string') return false;
   if (left === right) return true;
-  if (process.platform !== 'win32' || path.normalize(left).toLowerCase() !== path.normalize(right).toLowerCase()) return false;
-  // Support legacy case variants without following a stored path into a different worktree.
+  if (process.platform !== 'win32') return false;
+  // Old canonical paths may retain Windows 8.3 aliases. Reject replacement links
+  // on either side before resolving aliases into the same native directory.
+  const linkFree = cwd => {
+    if (!path.isAbsolute(cwd)) return false;
+    const normalized = path.normalize(cwd); const root = path.parse(normalized).root;
+    let current = root;
+    try {
+      if (fs.lstatSync(current).isSymbolicLink()) return false;
+      for (const part of normalized.slice(root.length).split(path.sep).filter(Boolean)) {
+        current = path.join(current, part);
+        if (fs.lstatSync(current).isSymbolicLink()) return false;
+      }
+      return true;
+    } catch { return false; }
+  };
+  if (!linkFree(left) || !linkFree(right)) return false;
   const canonicalLeft = canonicalCwd(left); const canonicalRight = canonicalCwd(right);
   return canonicalLeft !== null && canonicalLeft === canonicalRight;
 }

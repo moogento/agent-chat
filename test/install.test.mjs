@@ -121,7 +121,7 @@ test('Codex TOML handles CRLF conversion on update and uninstall with literal do
   }
 });
 
-test('Windows project drive casing and legacy receipt casing resolve to one installation', { skip: process.platform !== 'win32' }, t => {
+test('Windows project drive casing and legacy short-name receipt aliases resolve to one installation', { skip: process.platform !== 'win32' }, t => {
   const f = fixture(t, 'Project Mixed Case');
   const expected = fs.realpathSync.native(f.project);
   const lowerDrive = f.project.replace(/^([A-Za-z]):/, (_, drive) => `${drive.toLowerCase()}:`);
@@ -134,6 +134,7 @@ test('Windows project drive casing and legacy receipt casing resolve to one inst
   receipt.project = lowerDrive;
   write(f.project, '.agent-chat/install.json', receipt);
   assert.equal(inspectInstallation({ project: upperDrive }).receipt.project, expected);
+  assert.equal(inspectInstallation({ project: upperDrive }).relocated, null);
   updateProject({ ...f, project: upperDrive });
   assert.equal(readJson(f.project, '.agent-chat/install.json').project, expected);
   assert.deepEqual(uninstallProject({ ...f, project: lowerDrive }).retainedClients, []);
