@@ -33,6 +33,57 @@ function snapshot(directory) {
 
 const check = (report, id) => report.checks.filter(value => value.id === id);
 
+test('doctor explains named defaults and detects path/literal split using only room metadata', async t => {
+  const { project } = fixture(t, { install: false });
+  installProject({ project, clients: 'claude', room: 'm2-moo' });
+  const home = path.join(project, 'mailbox');
+  const priorHome = process.env.AGENT_CHAT_HOME;
+  process.env.AGENT_CHAT_HOME = home;
+  t.after(() => { if (priorHome === undefined) delete process.env.AGENT_CHAT_HOME; else process.env.AGENT_CHAT_HOME = priorHome; });
+  const initial = await doctorProject({ project });
+  assert.match(check(initial, 'claude.room')[0].message, /explicit named room "m2-moo"/);
+  assert.equal(fs.existsSync(home), false);
+  for (const room of [{ id: 'm2-moo', label: 'm2-moo' }, { id: 'm2-moo-123456', label: project }]) {
+    const directory = path.join(home, 'rooms', room.id);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'room.json'), JSON.stringify(room));
+    fs.mkdirSync(path.join(directory, 'messages.jsonl'));
+    fs.writeFileSync(path.join(directory, 'private-body'), 'do-not-print-message');
+  }
+  const before = snapshot(project);
+  const result = await doctorProject({ project });
+  assert.equal(check(result, 'claude.room-mismatch')[0].status, 'warning');
+  assert.match(check(result, 'claude.room-mismatch')[0].message, /m2-moo-123456/);
+  assert.doesNotMatch(JSON.stringify(result), /do-not-print-message/);
+  assert.deepEqual(snapshot(project), before);
+});
+
+test('doctor detects a basename split for path defaults and ignores unsafe room metadata', async t => {
+  const { project } = fixture(t, { clients: 'claude' });
+  const home = path.join(project, 'mailbox');
+  const priorHome = process.env.AGENT_CHAT_HOME;
+  process.env.AGENT_CHAT_HOME = home;
+  t.after(() => { if (priorHome === undefined) delete process.env.AGENT_CHAT_HOME; else process.env.AGENT_CHAT_HOME = priorHome; });
+  const name = path.basename(project);
+  for (const room of [{ id: name, label: name }, { id: `${name}-123456`, label: project }]) {
+    const directory = path.join(home, 'rooms', room.id);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'room.json'), JSON.stringify(room));
+  }
+  const result = await doctorProject({ project });
+  assert.match(check(result, 'claude.room')[0].message, /derived from the project path/);
+  assert.equal(check(result, 'claude.room-mismatch').length, 1);
+  fs.writeFileSync(path.join(home, 'rooms', name, 'room.json'), JSON.stringify({ id: '../bad', label: name }));
+  assert.equal(check(await doctorProject({ project }), 'claude.room-mismatch').length, 0);
+});
+test('doctor warns when installed local clients have different configured defaults', async t => {
+  const { project } = fixture(t, { clients: 'codex,claude' });
+  updateProject({ project, clients: 'claude', room: 'm2-moo' });
+  assert.equal(check(await doctorProject({ project }), 'rooms.defaults')[0].status, 'warning');
+  updateProject({ project, room: 'm2-moo' });
+  assert.equal(check(await doctorProject({ project }), 'rooms.defaults').length, 0);
+});
+
 test('doctor checks broker credential availability without exposing credentials or connecting', async t => {
   const { project } = fixture(t, { install: false });
   const tokenFile = path.join(project, 'broker-token');

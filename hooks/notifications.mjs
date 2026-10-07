@@ -11,6 +11,19 @@ export const NOTIFICATION_LIMITS = Object.freeze({ bindings: 100, configBytes: 6
   warningBindings: 90, warningBytes: Math.floor(64 * 1024 * 0.9), refreshMs: 60 * 60 * 1000 });
 const SCAN_BYTES = 64 * 1024;
 const RECENT_IDS = 128;
+const TITLE_SOURCES = new Set(['claude-code:session_title', 'opencode:session.created', 'opencode:session.updated']);
+
+export function supportedSessionTitle(value) {
+  return typeof value === 'string' && value.trim() && value.length <= 256 && !/[\x00-\x1f\x7f]/.test(value)
+    ? value.trim() : null;
+}
+
+// Only documented host fields count as titles. Prompts, transcripts and tool output do not.
+export function commandSessionTitle(client, payload) {
+  if (client !== 'claude-code' || !['SessionStart', 'UserPromptSubmit'].includes(payload?.hook_event_name)) return null;
+  const title = supportedSessionTitle(payload.session_title);
+  return title ? { sessionTitle: title, titleSource: 'claude-code:session_title' } : null;
+}
 
 function readJson(file, maxBytes) {
   const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
@@ -75,9 +88,13 @@ function validateStoredBinding(binding) {
     || ['.', '..'].includes(binding.room) || binding.room.length > 128) throw new Error('room must be the exact Room id from chat_who');
   safeSessionId(binding.mailboxSessionId);
   if (binding.boundAt !== undefined && (!Number.isSafeInteger(binding.boundAt) || binding.boundAt < 0)) throw new Error('boundAt must be a nonnegative integer timestamp');
+  if (binding.sessionTitle !== undefined && supportedSessionTitle(binding.sessionTitle) !== binding.sessionTitle) throw new Error('sessionTitle must be a bounded nonempty title without control characters');
+  if (binding.titleSource !== undefined && !TITLE_SOURCES.has(binding.titleSource)) throw new Error('unsupported session title source');
+  if ((binding.sessionTitle === undefined) !== (binding.titleSource === undefined)) throw new Error('sessionTitle and titleSource must be provided together');
   return { client: binding.client, hostSessionId: binding.hostSessionId, cwd: path.normalize(binding.cwd),
     room: binding.room, mailboxSessionId: binding.mailboxSessionId,
     ...(binding.brokerUrl === undefined ? {} : { brokerUrl: brokerUrl(binding.brokerUrl) }),
+    ...(binding.sessionTitle === undefined ? {} : { sessionTitle: binding.sessionTitle, titleSource: binding.titleSource }),
     ...(binding.boundAt === undefined ? {} : { boundAt: binding.boundAt }) };
 }
 
@@ -136,6 +153,93 @@ export function findBinding({ client, hostSessionId, cwd, env = process.env }) {
   // Duplicate or conflicting bindings never fan out to several rooms.
   if (matches.length !== 1) return null;
   return matches[0];
+}
+
+/** Host title events may update only an exact, verified binding. */
+export async function syncBoundSessionTitle({ client, hostSessionId, cwd, sessionTitle, titleSource,
+  env = process.env, mailbox, remoteInspector }) {
+  if (!supportedSessionTitle(sessionTitle) || !TITLE_SOURCES.has(titleSource)
+    || !titleSource.startsWith(`${client}:`)) return { synced: false, reason: 'unsupported-title' };
+  const binding = findBinding({ client, hostSessionId, cwd, env });
+  if (!binding) return { synced: false, reason: 'unbound' };
+  const remote = remoteMode(binding, env);
+  if (remote === null) return { synced: false, reason: 'broker-mismatch' };
+  const room = { id: binding.room, label: binding.room };
+  let peer;
+  if (remote) {
+    peer = (await inspectRemote(binding, env, undefined, remoteInspector))?.peer;
+    if (!peer) return { synced: false, reason: 'wrong-remote-identity' };
+  } else {
+    mailbox ??= createMailbox({ home: env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat'), cwd });
+    const matches = mailbox.listPeers(room).filter(item => item.sessionId === binding.mailboxSessionId
+      && sameBindingCwd(canonicalCwd(item.cwd), binding.cwd));
+    if (matches.length !== 1) return { synced: false, reason: 'wrong-local-identity' };
+    peer = matches[0];
+    // MCP clientInfo.name is client-defined (for example, claude-ai), while the
+    // binding records the host family. Pass the verified peer's exact client name.
+    if (typeof mailbox.syncSessionTitle !== 'function') return { synced: false, reason: 'title-api-unavailable' };
+    peer = mailbox.syncSessionTitle({ room, sessionId: binding.mailboxSessionId, title: sessionTitle,
+      client: peer.client, cwd: binding.cwd, titleSource });
+    if (!peer) return { synced: false, reason: 'wrong-local-identity' };
+  }
+  if (binding.sessionTitle !== sessionTitle || binding.titleSource !== titleSource) {
+    const { bindNotification } = await import('./bind.mjs');
+    bindNotification({ configFile: env.AGENT_CHAT_NOTIFY_CONFIG,
+      binding: { ...binding, sessionTitle: sessionTitle.trim(), titleSource } });
+  }
+  // Remote title metadata is retained for discovery; changing a broker peer requires its authenticated API.
+  return { synced: !remote, reason: remote ? 'remote-title-retained' : 'synced', peer };
+}
+
+/** Discovery is optional and shares the local mailbox boundary. */
+export async function registerHostPresence({ client, hostSessionId, cwd, title, env = process.env, mailbox }) {
+  if (!env.AGENT_CHAT_NOTIFY_CONFIG || env.AGENT_CHAT_BROKER_URL || env.AGENT_CHAT_BROKER_TOKEN_FILE) return null;
+  try {
+    const { createPresence } = await import('../lib/presence.mjs');
+    const presence = createPresence({ home: mailbox?.home || env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat') });
+    const host = presence.registerHost({ client, hostSessionId, cwd, ...(supportedSessionTitle(title) ? { title: title.trim() } : {}) });
+    const binding = findBinding({ client, hostSessionId, cwd, env });
+    if (binding && !binding.brokerUrl) {
+      mailbox ??= createMailbox({ home: env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat'), cwd });
+      const room = { id: binding.room, label: binding.room };
+      const peers = mailbox.listPeers(room).filter(peer => peer.sessionId === binding.mailboxSessionId
+        && sameBindingCwd(canonicalCwd(peer.cwd), binding.cwd));
+      if (peers.length === 1) presence.linkHost({ client, hostSessionId, sessionId: peers[0].sessionId,
+        room, name: peers[0].name });
+    }
+    return { host, invitations: presence.pendingForHost({ client, hostSessionId }) };
+  } catch (error) {
+    if (env.AGENT_CHAT_NOTIFY_DEBUG === '1') console.error(`agent-chat presence hook: ${error.message}`);
+    return null;
+  }
+}
+
+export async function notifyHostInvitations({ client, hostSessionId, cwd, title, env = process.env, mailbox, deliver,
+  channel = 'context' }) {
+  const result = await registerHostPresence({ client, hostSessionId, cwd, title, env, mailbox });
+  const ids = result?.invitations?.map(invitation => invitation.id).filter(id => typeof id === 'string').slice(0, 100) ?? [];
+  if (!ids.length) return { delivered: false };
+  const dir = path.join(mailbox?.home || env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat'), 'notifications');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (fs.lstatSync(dir).isSymbolicLink() || !fs.lstatSync(dir).isDirectory()) throw new Error('Unsafe notification directory');
+  const key = crypto.createHash('sha256').update(JSON.stringify([client, hostSessionId, canonicalCwd(cwd), channel])).digest('hex');
+  const file = path.join(dir, `invitations-${key}.json`);
+  const lock = `${file}.lock`;
+  if (!acquireLock(lock)) return { delivered: false };
+  try {
+    let previous = [];
+    try { previous = readJson(file, 32 * 1024).ids ?? []; } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    const fresh = ids.filter(id => !previous.includes(id));
+    if (!fresh.length) return { delivered: false };
+    await deliver(`${CHAT_LABEL}: ${fresh.length} new room invitation${fresh.length === 1 ? '' : 's'}. `
+      + 'Use chat_invitations to inspect. Invitations do not move your session or authorize work.');
+    const temporary = `${file}.${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(temporary, JSON.stringify({ ids: [...new Set([...previous, ...fresh])].slice(-RECENT_IDS) }) + '\n', { flag: 'wx', mode: 0o600 });
+      fs.renameSync(temporary, file);
+    } finally { fs.rmSync(temporary, { force: true }); }
+    return { delivered: true, count: fresh.length };
+  } finally { fs.rmSync(lock, { force: true }); }
 }
 
 export function acquireLock(file) {
@@ -272,7 +376,8 @@ export async function autoBindCommand({ client, payload, env = process.env, mail
     && existing.brokerUrl === binding.brokerUrl && existing.boundAt !== undefined
     && existing.boundAt <= Date.now() && Date.now() - existing.boundAt < NOTIFICATION_LIMITS.refreshMs) return true;
   const { bindNotification } = await import('./bind.mjs');
-  bindNotification({ configFile: env.AGENT_CHAT_NOTIFY_CONFIG, binding });
+  bindNotification({ configFile: env.AGENT_CHAT_NOTIFY_CONFIG, binding: { ...binding,
+    ...(existing?.sessionTitle ? { sessionTitle: existing.sessionTitle, titleSource: existing.titleSource } : {}) } });
   return true;
 }
 
@@ -280,7 +385,22 @@ export async function runCommandHook({ client, payload, env = process.env, mailb
   const identity = commandIdentity(client, payload);
   if (!identity) return { delivered: false, reason: 'unsupported-event' };
   await autoBindCommand({ client, payload, env, mailbox, remoteInspector });
-  return notifySession({ ...identity, env, mailbox, remoteInspector, deliver: async notice => {
+  const title = commandSessionTitle(client, payload);
+  if (title) await syncBoundSessionTitle({ ...identity, ...title, env, mailbox, remoteInspector });
+  const deliver = async notice => {
     await write(JSON.stringify({ hookSpecificOutput: { hookEventName: payload.hook_event_name, additionalContext: notice } }) + '\n');
-  } });
+  };
+  let invitationMessageResult;
+  try {
+    const invitations = await notifyHostInvitations({ ...identity, title: title?.sessionTitle, env, mailbox,
+      deliver: async invitationNotice => {
+        let combined = false;
+        invitationMessageResult = await notifySession({ ...identity, env, mailbox, remoteInspector,
+          deliver: async messageNotice => { await deliver(`${invitationNotice}\n${messageNotice}`); combined = true; } });
+        if (!combined) await deliver(invitationNotice);
+      } });
+    if (invitations.delivered) return { ...invitationMessageResult, delivered: true, invitationCount: invitations.count };
+  }
+  catch (error) { if (env.AGENT_CHAT_NOTIFY_DEBUG === '1') console.error(`agent-chat invitation hook: ${error.message}`); }
+  return notifySession({ ...identity, env, mailbox, remoteInspector, deliver });
 }

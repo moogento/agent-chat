@@ -76,3 +76,16 @@ test('management CLI forwards broker settings and can explicitly restore local t
   assert.equal(result.status, 0, result.stderr);
   assert.equal(config().AGENT_CHAT_BROKER_URL, '');
 });
+test('management CLI accepts a named local default and preserves it on update', t => {
+  const project = fixture(t);
+  let result = run(['install', '--project', project, '--clients', 'claude', '--room', 'm2-moo', '--json']);
+  assert.equal(result.status, 0, result.stderr);
+  const config = () => JSON.parse(fs.readFileSync(path.join(project, '.mcp.json'), 'utf8')).mcpServers['agent-chat'].env;
+  assert.equal(config().AGENT_CHAT_ROOM, 'm2-moo');
+  result = run(['update', '--project', project, '--json']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(config().AGENT_CHAT_ROOM, 'm2-moo');
+  result = run(['update', '--project', project, '--local', '--room', 'other-room', '--json']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(config().AGENT_CHAT_ROOM, 'other-room');
+});
