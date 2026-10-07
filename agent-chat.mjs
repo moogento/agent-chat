@@ -13,10 +13,25 @@ function envNumber(name, fallback, min, max) {
   if (!Number.isFinite(value) || value < min || value > max) throw new Error(`${name} must be between ${min} and ${max}`);
   return value;
 }
+const warnedWaitSettings = new Set();
+function capMaxWait(value, source) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) throw new Error(`${source} must be a finite nonnegative number`);
+  if (value <= 50) return value;
+  const key = `${source}:${value}`;
+  if (!warnedWaitSettings.has(key)) {
+    warnedWaitSettings.add(key);
+    process.stderr.write(`agent-chat: ${source}=${value} exceeds the 50-second wait limit; using 50 seconds.\n`);
+  }
+  return 50;
+}
+function configuredMaxWait() {
+  return capMaxWait(process.env.AGENT_CHAT_MAX_WAIT === undefined ? 50 : Number(process.env.AGENT_CHAT_MAX_WAIT), 'AGENT_CHAT_MAX_WAIT');
+}
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const protocolError = (message, code = -32602) => Object.assign(new Error(message), { code });
-export function createServer({ mailbox = createMailbox(), output = (obj) => process.stdout.write(JSON.stringify(obj) + '\n'), maxWait = envNumber('AGENT_CHAT_MAX_WAIT', 50, 0, 50), waitBudget = envNumber('AGENT_CHAT_WAIT_BUDGET', 300, 0, 3600), ttlDays = envNumber('AGENT_CHAT_TTL_DAYS', 7, 0, 36500), sessionId = process.env.AGENT_CHAT_SESSION || process.env.AGENT_CHAT_SESSION_ID || crypto.randomUUID(), roomSpec = process.env.AGENT_CHAT_ROOM, nameSpec = process.env.AGENT_CHAT_NAME, identityExtras = () => ({}) } = {}) {
+export function createServer({ mailbox = createMailbox(), output = (obj) => process.stdout.write(JSON.stringify(obj) + '\n'), maxWait = configuredMaxWait(), waitBudget = envNumber('AGENT_CHAT_WAIT_BUDGET', 300, 0, 3600), ttlDays = envNumber('AGENT_CHAT_TTL_DAYS', 7, 0, 36500), sessionId = process.env.AGENT_CHAT_SESSION || process.env.AGENT_CHAT_SESSION_ID || crypto.randomUUID(), roomSpec = process.env.AGENT_CHAT_ROOM, nameSpec = process.env.AGENT_CHAT_NAME, identityExtras = () => ({}) } = {}) {
+  maxWait = capMaxWait(maxWait, 'maxWait');
   sessionId = safeSessionId(sessionId);
   const activeRequests = new Map();
   const protocols = ['2024-11-05', '2025-03-26', '2025-06-18'];

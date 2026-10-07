@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { doctorProject } from '../lib/doctor.mjs';
-import { installProject, inspectInstallation, installationPaths } from '../lib/install.mjs';
+import { installProject, updateProject, inspectInstallation, installationPaths } from '../lib/install.mjs';
 import { bindNotification } from '../hooks/bind.mjs';
 import { NOTIFICATION_LIMITS } from '../hooks/notifications.mjs';
 
@@ -235,6 +235,45 @@ test('doctor accepts alternate Windows drive casing and a legacy receipt path', 
     assert.equal(result.project, fs.realpathSync.native(project));
   }
   assert.deepEqual(snapshot(project), before);
+});
+
+test('doctor diagnoses a moved installation and recommends relocation without editing either location', async t => {
+  const { project } = fixture(t, { clients: ['codex', 'claude', 'opencode'], hooks: true });
+  const moved = `${project}-moved`;
+  fs.renameSync(project, moved);
+  t.after(() => fs.rmSync(moved, { recursive: true, force: true }));
+  fs.mkdirSync(project);
+  fs.writeFileSync(path.join(project, 'untouched.txt'), 'unrelated old location\n');
+  const before = snapshot(moved); const oldBefore = snapshot(project);
+  const result = await doctorProject({ project: moved });
+  assert.equal(result.ok, false);
+  assert.match(check(result, 'installation.location')[0].message, /Project moved.*update --dry-run.*agent-chat update/);
+  assert.equal(check(result, 'installation')[0].status, 'ok');
+  assert.doesNotMatch(JSON.stringify(result), /metadata is malformed/);
+  assert.deepEqual(snapshot(moved), before);
+  assert.deepEqual(snapshot(project), oldBefore);
+  updateProject({ project: moved });
+  const repaired = await doctorProject({ project: moved });
+  assert.equal(repaired.ok, true, JSON.stringify(repaired));
+  assert.equal(check(repaired, 'installation.location').length, 0);
+  assert.deepEqual(snapshot(project), oldBefore);
+});
+
+test('doctor recognizes live legacy Windows binding case variants without rewriting records', { skip: process.platform !== 'win32' }, async t => {
+  const { project, paths } = fixture(t, { clients: ['codex'], hooks: true });
+  const cwd = project.replace(/^([A-Za-z]):/, (_, drive) => `${drive.toLowerCase()}:`);
+  fs.writeFileSync(paths.notificationConfig, JSON.stringify({ version: 1, bindings: [{ client: 'codex', hostSessionId: 'private-host',
+    cwd, room: 'private-room', mailboxSessionId: 'private-mailbox' }] }));
+  const before = snapshot(project);
+  const result = await doctorProject({ project });
+  assert.equal(check(result, 'codex.notifications')[0].status, 'ok');
+  assert.deepEqual(snapshot(project), before);
+  const config = JSON.parse(fs.readFileSync(paths.notificationConfig, 'utf8'));
+  config.bindings.push({ ...config.bindings[0], cwd: project.replace(/^([A-Za-z]):/, (_, drive) => `${drive.toUpperCase()}:`) });
+  fs.writeFileSync(paths.notificationConfig, JSON.stringify(config));
+  const duplicateBefore = snapshot(project);
+  assert.equal(check(await doctorProject({ project }), 'codex.notifications')[0].status, 'error');
+  assert.deepEqual(snapshot(project), duplicateBefore);
 });
 
 test('doctor diagnoses duplicate or malformed bindings without writing to them', async t => {

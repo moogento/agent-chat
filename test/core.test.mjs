@@ -184,6 +184,56 @@ test('MCP validates malformed requests and arguments and remains usable', async 
   await server.handle({ jsonrpc: '2.0', id: 4, method: 'ping' }); assert.deepEqual(responses.at(-1).result, {});
 });
 
+test('explicit server wait limits are capped and warn once without extending broker waits', (t) => {
+  const { mailbox } = fixture(t); const write = process.stderr.write; const notices = [];
+  process.stderr.write = chunk => { notices.push(String(chunk)); return true; };
+  try {
+    const first = serverFor(t, mailbox, { maxWait: 90 }).server;
+    const second = serverFor(t, mailbox, { maxWait: 90 }).server;
+    for (const server of [first, second]) assert.equal(server.tools.find(tool => tool.name === 'chat_read').inputSchema.properties.wait_seconds.maximum, 50);
+    assert.equal(notices.length, 1); assert.match(notices[0], /maxWait=90.*using 50 seconds/);
+    for (const maxWait of [-1, NaN, Infinity, '90']) assert.throws(() => createServer({ mailbox, maxWait }), /finite nonnegative number/);
+  } finally { process.stderr.write = write; }
+});
+
+async function mcpWaitSetting(t, value) {
+  const { home } = fixture(t);
+  const env = { ...process.env, AGENT_CHAT_HOME: home, AGENT_CHAT_MAX_WAIT: value };
+  for (const key of ['AGENT_CHAT_BROKER_URL', 'AGENT_CHAT_BROKER_TOKEN_FILE', 'AGENT_CHAT_BROKER_SESSION_FILE', 'AGENT_CHAT_SESSION', 'AGENT_CHAT_SESSION_ID']) delete env[key];
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../agent-chat.mjs', import.meta.url))], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+  t.after(() => { if (child.exitCode === null) child.kill(); });
+  let stdout = ''; let stderr = ''; const responses = [];
+  child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { stdout += chunk; let newline; while ((newline = stdout.indexOf('\n')) >= 0) { responses.push(JSON.parse(stdout.slice(0, newline))); stdout = stdout.slice(newline + 1); } });
+  child.stderr.setEncoding('utf8'); child.stderr.on('data', chunk => { stderr += chunk; });
+  return { child, responses, stderr: () => stderr, remainder: () => stdout };
+}
+
+test('legacy AGENT_CHAT_MAX_WAIT initializes MCP with a capped schema and stderr-only notice', async (t) => {
+  const client = await mcpWaitSetting(t, '90');
+  client.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', clientInfo: { name: 'test' } } }) + '\n');
+  client.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }) + '\n');
+  client.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'chat_read', arguments: { wait_seconds: 90 } } }) + '\n');
+  const deadline = Date.now() + 10000;
+  while (client.responses.length < 3 && client.child.exitCode === null && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(client.responses.length, 3, client.stderr());
+  assert.equal(client.responses.find(response => response.id === 1).result.serverInfo.version, '0.3.0');
+  const read = client.responses.find(response => response.id === 2).result.tools.find(tool => tool.name === 'chat_read');
+  assert.equal(read.inputSchema.properties.wait_seconds.maximum, 50); assert.match(read.description, /up to 50s/);
+  assert.equal(client.responses.find(response => response.id === 3).error.code, -32602);
+  assert.match(client.stderr(), /AGENT_CHAT_MAX_WAIT=90.*using 50 seconds/);
+  assert.equal(client.stderr().match(/AGENT_CHAT_MAX_WAIT=90/g)?.length, 1); assert.equal(client.remainder(), '');
+  client.child.stdin.end(); const [code] = await once(client.child, 'close'); assert.equal(code, 0);
+});
+
+test('negative and nonnumeric AGENT_CHAT_MAX_WAIT still reject MCP startup clearly', async (t) => {
+  for (const value of ['-1', 'NaN']) {
+    const client = await mcpWaitSetting(t, value);
+    const [code] = await once(client.child, 'close');
+    assert.equal(code, 1); assert.match(client.stderr(), /AGENT_CHAT_MAX_WAIT must be a finite nonnegative number/);
+    assert.deepEqual(client.responses, []); assert.equal(client.remainder(), '');
+  }
+});
+
 test('unchanged status is quiet and response is concise', async (t) => {
   const { mailbox } = fixture(t); const { server } = serverFor(t, mailbox);
   await server.callTool('chat_status', { mine: 'testing', room_summary: 'task' });

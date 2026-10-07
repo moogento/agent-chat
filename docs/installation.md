@@ -48,6 +48,8 @@ Installation writes only inside the selected project: a stable MCP/hooks runtime
 
 The installer adds a marked `/.agent-chat/` block to the project's `.gitignore`, preserving existing rules, and keeps an internal ignore guard for private local data. This directory contains local runtime paths, conversation bindings, and transaction backups of configuration files, which can include private settings. Backups under `.agent-chat/backups/` remain available after updates and removal; inspect them if an interrupted transaction needs recovery, and confirm no installer is running before removing a leftover install lock.
 
+If the outer ignore block is completely absent, install or update restores it. Partial, edited, or duplicate markers require manual resolution. The internal private-data ignore guard remains in place. Managed ignore and Codex TOML blocks accept LF or CRLF line endings and preserve unrelated file text.
+
 | Client | MCP configuration | Skill | Optional hooks |
 | --- | --- | --- | --- |
 | Codex | `.codex/config.toml` | `.agents/skills/agent-chat/` | `.codex/hooks.json` |
@@ -95,6 +97,20 @@ Restart affected clients after updating, and review hook trust if prompted. You 
 
 OpenCode automatically discovers `.js` and `.ts` plugins. Updating an older managed OpenCode installation migrates its unmodified `.opencode/plugins/agent-chat.mjs` wrapper to `agent-chat.js`; edited wrappers or an existing unmanaged destination require manual resolution. The shared runtime implementation remains an `.mjs` module. See [OpenCode's loader](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/config/plugin.ts) for the discovery pattern.
 
+## After moving or renaming a project
+
+The receipt and client configuration contain the project's original absolute paths. From the new directory, check and repair the installation:
+
+```sh
+node .agent-chat/runtime/agent-chat.mjs doctor
+node .agent-chat/runtime/agent-chat.mjs update --dry-run
+node .agent-chat/runtime/agent-chat.mjs update
+```
+
+You can also use the trusted executable from your installed release. Doctor reports the move without changing files. Update verifies recorded ownership in the current project before rewriting the MCP connections, hook launchers, and OpenCode adapter for all installed clients. Missing owned resources can be restored; edited resources or conflicting managed entries require resolution first. A partial `--clients` update is refused until all installed clients have been relocated. The command does not write to the old project location.
+
+Project-local broker token paths move with the project unless you explicitly provide `--broker-token-file`; external token paths remain unchanged. Restart all installed clients and establish fresh notification bindings after the move. Stored bindings for the old path do not apply to the new directory and can remain safely in bounded history. You can uninstall directly from the new location using the recorded ownership without first updating.
+
 ## Remove the managed installation
 
 ```sh
@@ -103,6 +119,8 @@ agent-chat uninstall
 ```
 
 Add `--project /absolute/path/to/project` to select another project, or `--clients codex` to remove only one client. The command removes entries it owns and files that still match the recorded installation. It preserves unrelated settings, message history, and changed files or entries it cannot safely remove. When preserved entries still reference the runtime, it keeps their dependencies and reports what needs attention.
+
+An edited skill or other file is preserved without keeping its client installed. If no remaining client owns that edited file, uninstall releases its ownership and reports the preserved file; a later update does not restore the removed client. Edited client settings that still reference the runtime retain their dependencies until you resolve them.
 
 Removal retains the ignore block because transaction backups and optional notification or mailbox data remain under `.agent-chat/`. Remove that block only after reviewing or removing the remaining local data.
 

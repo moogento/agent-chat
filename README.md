@@ -119,7 +119,7 @@ agent-chat tidy
 | `AGENT_CHAT_NAME` | Detected client name or `agent` | Preferred peer name |
 | `AGENT_CHAT_SESSION` | New random identity | Stable MCP session and cursor identity |
 | `AGENT_CHAT_SESSION_ID` | Unset | Alias for `AGENT_CHAT_SESSION` |
-| `AGENT_CHAT_MAX_WAIT` | `50` | Maximum wait per read, in seconds |
+| `AGENT_CHAT_MAX_WAIT` | `50` | Maximum wait per read, in seconds; older values above `50` are capped at `50` with a stderr notice |
 | `AGENT_CHAT_WAIT_BUDGET` | `300` | Total wait budget per MCP process, in seconds |
 | `AGENT_CHAT_TTL_DAYS` | `7` | Retention for local inactive rooms |
 

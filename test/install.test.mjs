@@ -140,6 +140,148 @@ test('Windows project drive casing and legacy receipt casing resolve to one inst
   assert.equal(inspectInstallation({ project: upperDrive }).exists, false);
 });
 
+function moveInstalledProject(f) {
+  const oldProject = canonical(f.project);
+  const moved = path.join(f.base, 'moved project $$ $&');
+  fs.renameSync(f.project, moved);
+  // An unrelated project may later occupy the old location. Never change it.
+  fs.mkdirSync(oldProject);
+  write(oldProject, 'untouched.txt', 'old location belongs to someone else\n');
+  return { ...f, project: moved, oldProject };
+}
+
+test('a moved all-client installation previews and updates owned paths only in its new location', t => {
+  const f = fixture(t);
+  const otherHook = { hooks: [{ type: 'command', command: 'keep-hook' }] };
+  write(f.project, '.mcp.json', { mcpServers: { other: { command: 'keep-server' } } });
+  write(f.project, '.claude/settings.local.json', { hooks: { PostToolUse: [otherHook] }, permissions: { allow: ['Read'] } });
+  installProject({ ...f, clients: ['codex', 'claude', 'opencode'], hooks: true });
+  const moved = moveInstalledProject(f);
+  const before = snapshot(moved.project);
+  const oldBefore = snapshot(moved.oldProject);
+  assert.deepEqual(inspectInstallation(moved).relocated, { from: moved.oldProject, to: canonical(moved.project) });
+  const preview = updateProject({ ...moved, dryRun: true });
+  assert.ok(preview.changes.some(change => change.path === '.mcp.json'));
+  assert.ok(preview.changes.some(change => change.path === '.opencode/plugins/agent-chat.js'));
+  assert.deepEqual(snapshot(moved.project), before);
+  const runtimePreview = spawnSync(process.execPath, [path.join(moved.project, '.agent-chat/runtime/agent-chat.mjs'), 'update', '--dry-run'], { cwd: moved.project, encoding: 'utf8' });
+  assert.equal(runtimePreview.status, 0, runtimePreview.stderr + runtimePreview.stdout);
+  assert.deepEqual(snapshot(moved.project), before, 'The moved self-contained runtime can preview its own recovery.');
+  assert.throws(() => updateProject({ ...moved, clients: ['claude'] }), /all installed clients/);
+  assert.deepEqual(snapshot(moved.project), before);
+  const updated = updateProject(moved);
+  assert.ok(updated.warnings.some(warning => /Project moved.*restart/.test(warning)));
+  const inspected = inspectInstallation(moved);
+  assert.equal(inspected.relocated, null);
+  assert.equal(inspected.receipt.project, canonical(moved.project));
+  for (const entry of inspected.receipt.entries) assert.equal(inspectManagedEntry({ project: moved.project, entry }).status, 'present');
+  for (const relative of ['.codex/config.toml', '.codex/hooks.json', '.mcp.json', 'opencode.json', '.claude/settings.local.json', '.agent-chat/launchers/codex.mjs', '.agent-chat/launchers/claude.mjs', '.opencode/plugins/agent-chat.js']) {
+    assert.ok(!read(moved.project, relative).includes(moved.oldProject.replaceAll('\\', '\\\\')), relative);
+  }
+  assert.equal(readJson(moved.project, '.mcp.json').mcpServers.other.command, 'keep-server');
+  assert.deepEqual(readJson(moved.project, '.claude/settings.local.json').hooks.PostToolUse[0], otherHook);
+  assert.equal(updateProject(moved).changes.length, 0);
+  assert.deepEqual(snapshot(moved.oldProject), oldBefore);
+});
+
+test('moved installation update refuses edited owned bytes or settings before any mutation', t => {
+  for (const edited of ['runtime', 'launcher', 'mcp', 'duplicate-hook']) {
+    const f = fixture(t, edited);
+    installProject({ ...f, clients: ['codex', 'claude', 'opencode'], hooks: true });
+    const moved = moveInstalledProject(f);
+    if (edited === 'runtime') fs.appendFileSync(path.join(moved.project, '.agent-chat/runtime/lib/mailbox.mjs'), '// edited\n');
+    if (edited === 'launcher') fs.appendFileSync(path.join(moved.project, '.agent-chat/launchers/claude.mjs'), '// edited\n');
+    if (edited === 'mcp') {
+      const config = readJson(moved.project, 'opencode.json');
+      config.mcp['agent-chat'].command.push('edited'); write(moved.project, 'opencode.json', config);
+    }
+    if (edited === 'duplicate-hook') {
+      const config = readJson(moved.project, '.codex/hooks.json');
+      config.hooks.PostToolUse.push(config.hooks.PostToolUse[0]); write(moved.project, '.codex/hooks.json', config);
+    }
+    const before = snapshot(moved.project); const oldBefore = snapshot(moved.oldProject);
+    for (const dryRun of [true, false]) assert.throws(() => updateProject({ ...moved, dryRun }), /cannot relocate/);
+    assert.deepEqual(snapshot(moved.project), before);
+    assert.deepEqual(snapshot(moved.oldProject), oldBefore);
+  }
+});
+
+test('moved installation restores missing owned resources and uninstalls without touching the old location', t => {
+  for (const action of ['update', 'uninstall']) {
+    const f = fixture(t, action);
+    installProject({ ...f, clients: ['codex', 'claude', 'opencode'], hooks: true });
+    const moved = moveInstalledProject(f);
+    const oldBefore = snapshot(moved.oldProject);
+    fs.rmSync(path.join(moved.project, '.agent-chat/runtime/lib/mailbox.mjs'));
+    fs.rmSync(path.join(moved.project, '.codex/config.toml'));
+    if (action === 'update') {
+      updateProject(moved);
+      assert.equal(inspectInstallation(moved).relocated, null);
+      assert.ok(fs.existsSync(path.join(moved.project, '.agent-chat/runtime/lib/mailbox.mjs')));
+      assert.equal(parseToml(read(moved.project, '.codex/config.toml')).mcp_servers['agent-chat'].cwd, canonical(moved.project));
+    } else {
+      const before = snapshot(moved.project);
+      assert.ok(uninstallProject({ ...moved, dryRun: true }).changes.length);
+      assert.deepEqual(snapshot(moved.project), before);
+      assert.deepEqual(uninstallProject(moved).retainedClients, []);
+      assert.equal(inspectInstallation(moved).exists, false);
+      assert.ok(!fs.existsSync(path.join(moved.project, '.agent-chat/runtime/agent-chat.mjs')));
+    }
+    assert.deepEqual(snapshot(moved.oldProject), oldBefore);
+  }
+});
+
+test('relocation maps project-local broker tokens and preserves external or explicit token paths', t => {
+  for (const kind of ['project-local', 'external', 'explicit-override']) {
+    const f = fixture(t, kind);
+    const tokenFile = path.join(kind === 'external' ? f.base : f.project, 'private token');
+    fs.writeFileSync(tokenFile, 'a'.repeat(64));
+    installProject({ ...f, clients: ['codex', 'claude', 'opencode'], hooks: true,
+      brokerUrl: 'http://broker:47321', brokerTokenFile: tokenFile, room: 'shared-room' });
+    const moved = moveInstalledProject(f);
+    const oldBefore = snapshot(moved.oldProject);
+    const override = path.join(f.base, 'explicit token');
+    if (kind === 'explicit-override') fs.writeFileSync(override, 'b'.repeat(64));
+    updateProject({ ...moved, ...(kind === 'explicit-override' ? { brokerTokenFile: override } : {}) });
+    const expected = kind === 'project-local' ? path.join(canonical(moved.project), 'private token') : kind === 'external' ? tokenFile : override;
+    for (const connection of Object.values(inspectInstallation(moved).receipt.connections)) assert.equal(connection.tokenFile, expected);
+    assert.ok(fs.existsSync(expected));
+    assert.equal(readJson(moved.project, '.mcp.json').mcpServers['agent-chat'].env.AGENT_CHAT_BROKER_TOKEN_FILE, expected);
+    assert.ok(read(moved.project, '.agent-chat/launchers/codex.mjs').includes(JSON.stringify(expected)));
+    assert.deepEqual(snapshot(moved.oldProject), oldBefore);
+  }
+});
+
+test('a fully absent outer ignore block is restored while partial, edited and duplicate blocks conflict', t => {
+  for (const missing of ['file', 'block']) {
+    const f = fixture(t, missing);
+    installProject({ ...f, clients: ['claude'] });
+    const unrelated = '# user rules\r\n*.cache\r\n';
+    if (missing === 'file') fs.unlinkSync(path.join(f.project, '.gitignore'));
+    else write(f.project, '.gitignore', unrelated);
+    const before = snapshot(f.project);
+    assert.ok(updateProject({ ...f, dryRun: true }).changes.some(change => change.path === '.gitignore'));
+    assert.deepEqual(snapshot(f.project), before);
+    updateProject(f);
+    const ignored = read(f.project, '.gitignore');
+    assert.ok(ignored.includes('/.agent-chat/'));
+    if (missing === 'block') { assert.ok(ignored.startsWith(unrelated)); assert.doesNotMatch(ignored, /(?<!\r)\n/); }
+    assert.equal(read(f.project, '.agent-chat/.gitignore'), '*\n');
+    assert.equal(updateProject(f).changes.length, 0);
+  }
+  for (const edited of ['start-only', 'end-only', 'changed', 'duplicate']) {
+    const f = fixture(t, edited);
+    installProject({ ...f, clients: ['claude'] });
+    const block = inspectInstallation(f).receipt.ignore.content;
+    write(f.project, '.gitignore', edited === 'start-only' ? block.replace('# <<< agent-chat local state <<<', '')
+      : edited === 'end-only' ? block.replace('# >>> agent-chat local state >>>', '')
+      : edited === 'changed' ? block.replace('/.agent-chat/', '/something-else/') : block + block);
+    const before = snapshot(f.project);
+    assert.throws(() => updateProject(f), /managed local-state ignore block was changed/);
+    assert.deepEqual(snapshot(f.project), before);
+  }
+});
+
 test('OpenCode hooks install a discoverable JavaScript wrapper that loads the shared adapter', async t => {
   const f = fixture(t);
   installProject({ ...f, clients: ['opencode'], hooks: true });
