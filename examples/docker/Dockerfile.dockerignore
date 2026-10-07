@@ -1,0 +1,9 @@
+**
+!agent-chat.mjs
+!LICENSE
+!lib/
+!lib/**
+!hooks/
+!hooks/**
+!integrations/
+!integrations/**

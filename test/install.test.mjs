@@ -1,0 +1,304 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { parse as parseToml } from 'smol-toml';
+import { installProject, updateProject, uninstallProject, inspectInstallation, inspectManagedEntry, detectClients, RUNTIME_FILES, quotePosix, quoteWindows } from '../lib/install.mjs';
+const root = fileURLToPath(new URL('../', import.meta.url));
+function fixture(t, name = 'project with spaces') {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-install-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const project = path.join(base, name); fs.mkdirSync(project);
+  return { base, project, sourceRoot: root };
+}
+function write(project, relative, data) {
+  const file = path.join(project, relative); fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, typeof data === 'string' ? data : JSON.stringify(data, null, 2) + '\n');
+}
+const read = (project, relative) => fs.readFileSync(path.join(project, relative), 'utf8');
+const readJson = (project, relative) => JSON.parse(read(project, relative));
+test('broker install shares connection settings with hooks, preserves them on update, and supports returning to local', t => {
+  const f = fixture(t);
+  const brokerTokenFile = path.join(f.base, 'token');
+  fs.writeFileSync(brokerTokenFile, 'private-token-not-copied-into-client-config');
+  installProject({ ...f, clients: 'codex,claude,opencode', hooks: true, brokerUrl: 'http://broker:47321/', brokerTokenFile, room: 'test-task' });
+  const connections = inspectInstallation(f).receipt.connections;
+  for (const client of ['codex', 'claude', 'opencode']) assert.deepEqual(connections[client], { url: 'http://broker:47321', tokenFile: brokerTokenFile, room: 'test-task' });
+  const envs = [parseToml(read(f.project, '.codex/config.toml')).mcp_servers['agent-chat'].env,
+    readJson(f.project, '.mcp.json').mcpServers['agent-chat'].env,
+    readJson(f.project, 'opencode.json').mcp['agent-chat'].environment];
+  for (const env of envs) {
+    assert.equal(env.AGENT_CHAT_ROOM, 'test-task');
+    assert.equal(env.AGENT_CHAT_BROKER_URL, 'http://broker:47321');
+    assert.equal(env.AGENT_CHAT_BROKER_TOKEN_FILE, brokerTokenFile);
+    assert.equal(env.AGENT_CHAT_BROKER_SESSION_DIR, path.join(fs.realpathSync(f.project), '.agent-chat/broker-sessions'));
+  }
+  for (const file of ['.agent-chat/launchers/codex.mjs', '.agent-chat/launchers/claude.mjs', '.opencode/plugins/agent-chat.mjs']) {
+    assert.match(read(f.project, file), /AGENT_CHAT_BROKER_URL/);
+    assert.match(read(f.project, file), /test-task/);
+  }
+  assert.doesNotMatch(read(f.project, '.agent-chat/install.json'), /private-token-not-copied/);
+  updateProject(f);
+  assert.deepEqual(inspectInstallation(f).receipt.connections, connections);
+  updateProject({ ...f, clients: 'claude', local: true });
+  assert.equal(inspectInstallation(f).receipt.connections.claude, null);
+  assert.deepEqual(inspectInstallation(f).receipt.connections.codex, connections.codex);
+  assert.equal(readJson(f.project, '.mcp.json').mcpServers['agent-chat'].env.AGENT_CHAT_BROKER_URL, '');
+  uninstallProject({ ...f, clients: 'codex' });
+  assert.equal(inspectInstallation(f).receipt.connections.codex, undefined);
+  assert.equal(fs.readFileSync(brokerTokenFile, 'utf8'), 'private-token-not-copied-into-client-config');
+});
+test('incomplete or unsafe broker install settings fail before project mutation', t => {
+  const f = fixture(t);
+  const valid = { brokerUrl: 'http://broker:47321', brokerTokenFile: path.join(f.base, 'token'), room: 'task' };
+  for (const options of [{ brokerUrl: valid.brokerUrl }, { ...valid, local: true }, { ...valid, room: '/workspace' },
+    { ...valid, brokerUrl: 'http://secret@broker:47321' }, { ...valid, brokerUrl: 'file:///tmp/broker' },
+    { ...valid, brokerUrl: 'http://broker:47321/?token=secret' }, { ...valid, brokerTokenFile: 'relative' }]) {
+    assert.throws(() => installProject({ ...f, clients: 'claude', ...options }));
+    assert.deepEqual(fs.readdirSync(f.project), []);
+  }
+});
+function snapshot(project) {
+  const result = {};
+  const walk = relative => {
+    for (const entry of fs.readdirSync(path.join(project, relative), { withFileTypes: true })) {
+      const child = path.join(relative, entry.name); if (entry.isDirectory()) walk(child); else result[child] = fs.readFileSync(path.join(project, child));
+    }
+  };
+  walk(''); return result;
+}
+
+test('dry-run plans explicit clients without creating files; detection only suggests', t => {
+  const f = fixture(t); write(f.project, '.claude/settings.local.json', { theme: 'dark' });
+  const before = snapshot(f.project);
+  assert.deepEqual(detectClients(f), ['claude']);
+  const result = installProject({ ...f, clients: 'codex,claude,opencode', hooks: true, dryRun: true });
+  assert.ok(result.changes.some(change => change.path === '.codex/config.toml'));
+  assert.equal(result.dryRun, true); assert.deepEqual(snapshot(f.project), before);
+  assert.throws(() => installProject(f), /--clients/);
+});
+
+test('installs all clients, preserves unrelated settings and provides a self-contained runtime', t => {
+  const f = fixture(t);
+  const toml = '# Existing comment\nmodel = "test"\n[features]\nexample = true\n';
+  write(f.project, '.codex/config.toml', toml);
+  const otherHook = { matcher: 'Write', hooks: [{ type: 'command', command: 'other-check' }] };
+  write(f.project, '.codex/hooks.json', { description: 'existing', hooks: { PostToolUse: [otherHook] } });
+  write(f.project, '.claude/settings.local.json', { permissions: { deny: ['Bash(rm *)'] }, hooks: { PostToolUse: [otherHook] } });
+  write(f.project, '.mcp.json', { mcpServers: { other: { command: 'other' } } });
+  write(f.project, 'opencode.json', { model: 'test/model', mcp: { other: { type: 'local', command: ['other'] } } });
+  const installed = installProject({ ...f, clients: 'codex,claude,opencode', hooks: true });
+  assert.ok(installed.backup); assert.ok(read(f.project, '.codex/config.toml').startsWith(toml));
+  const codex = parseToml(read(f.project, '.codex/config.toml'));
+  assert.equal(codex.model, 'test'); assert.equal(codex.mcp_servers['agent-chat'].command, process.execPath);
+  assert.equal(codex.mcp_servers['agent-chat'].cwd, fs.realpathSync(f.project));
+  assert.equal(readJson(f.project, '.mcp.json').mcpServers.other.command, 'other');
+  assert.equal(readJson(f.project, 'opencode.json').model, 'test/model');
+  assert.deepEqual(readJson(f.project, '.claude/settings.local.json').permissions, { deny: ['Bash(rm *)'] });
+  for (const relative of ['.codex/hooks.json', '.claude/settings.local.json']) {
+    const groups = readJson(f.project, relative).hooks.PostToolUse;
+    assert.deepEqual(groups[0], otherHook); assert.equal(groups.length, 2);
+  }
+  assert.equal(Boolean(readJson(f.project, '.codex/hooks.json').hooks.PostToolUse[1].hooks[0].commandWindows), process.platform === 'win32');
+  const inspection = inspectInstallation(f);
+  for (const entry of inspection.receipt.entries) assert.equal(inspectManagedEntry({ project: f.project, entry }).status, 'present');
+  for (const relative of RUNTIME_FILES) assert.ok(fs.existsSync(path.join(f.project, '.agent-chat/runtime', relative)), relative);
+  const run = spawnSync(process.execPath, [path.join(f.project, '.agent-chat/runtime/agent-chat.mjs'), '--version'], { encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr); assert.equal(run.stdout.trim(), '0.3.0');
+  const diagnostic = spawnSync(process.execPath, [path.join(f.project, '.agent-chat/runtime/agent-chat.mjs'), 'doctor', '--project', f.project, '--json'], { encoding: 'utf8' });
+  assert.equal(diagnostic.status, 0, diagnostic.stderr + diagnostic.stdout);
+  assert.equal(JSON.parse(diagnostic.stdout).ok, true);
+});
+
+test('hooks are opt-in and update preserves choice unless explicitly changed', t => {
+  const f = fixture(t);
+  installProject({ ...f, clients: ['codex', 'claude', 'opencode'] });
+  assert.ok(!fs.existsSync(path.join(f.project, '.codex/hooks.json')));
+  assert.ok(!fs.existsSync(path.join(f.project, '.claude/settings.local.json')));
+  assert.ok(!fs.existsSync(path.join(f.project, '.opencode/plugins/agent-chat.mjs')));
+  updateProject({ ...f, hooks: true });
+  assert.equal(inspectInstallation(f).receipt.hooks.codex, true);
+  updateProject(f); assert.equal(inspectInstallation(f).receipt.hooks.codex, true);
+  updateProject({ ...f, hooks: false });
+  assert.ok(!fs.existsSync(path.join(f.project, '.codex/hooks.json')));
+  assert.ok(!fs.existsSync(path.join(f.project, '.opencode/plugins/agent-chat.mjs')));
+  assert.equal(inspectInstallation(f).receipt.hooks.codex, false);
+});
+
+test('repeated install and update are idempotent and restore missing owned files/entries', t => {
+  const f = fixture(t); installProject({ ...f, clients: ['codex', 'claude'] });
+  assert.equal(updateProject(f).changes.length, 0);
+  assert.equal(installProject({ ...f, clients: ['codex', 'claude'] }).changes.length, 0);
+  fs.unlinkSync(path.join(f.project, '.agents/skills/agent-chat/SKILL.md'));
+  fs.unlinkSync(path.join(f.project, '.codex/config.toml'));
+  const mcp = readJson(f.project, '.mcp.json'); delete mcp.mcpServers['agent-chat']; write(f.project, '.mcp.json', mcp);
+  updateProject(f);
+  assert.ok(fs.existsSync(path.join(f.project, '.agents/skills/agent-chat/SKILL.md')));
+  assert.ok(parseToml(read(f.project, '.codex/config.toml')).mcp_servers['agent-chat']);
+  assert.ok(readJson(f.project, '.mcp.json').mcpServers['agent-chat']);
+});
+
+test('uninstall preserves user changes elsewhere and removes only its own entries', t => {
+  const f = fixture(t); const toml = '# User comment\nmodel = "keep"\n'; write(f.project, '.codex/config.toml', toml);
+  const other = { hooks: [{ type: 'command', command: 'keep' }] };
+  write(f.project, '.claude/settings.local.json', { hooks: { PostToolUse: [other] }, permissions: { allow: ['Read'] } });
+  installProject({ ...f, clients: ['codex', 'claude'], hooks: true });
+  const settings = readJson(f.project, '.claude/settings.local.json'); settings.theme = 'later'; write(f.project, '.claude/settings.local.json', settings);
+  const result = uninstallProject(f); assert.equal(result.warnings.length, 1); assert.match(result.warnings[0], /private backups/);
+  assert.equal(read(f.project, '.codex/config.toml'), toml);
+  const after = readJson(f.project, '.claude/settings.local.json'); assert.deepEqual(after.hooks.PostToolUse, [other]); assert.equal(after.theme, 'later');
+  assert.ok(!fs.existsSync(path.join(f.project, '.mcp.json')));
+  assert.ok(!fs.existsSync(path.join(f.project, '.agent-chat/install.json')));
+  assert.ok(!fs.existsSync(path.join(f.project, '.agent-chat/runtime/agent-chat.mjs')));
+});
+
+test('edited managed entries and files survive uninstall with their runtime dependency', t => {
+  const f = fixture(t); installProject({ ...f, clients: ['claude'], hooks: true });
+  const mcp = readJson(f.project, '.mcp.json'); mcp.mcpServers['agent-chat'].args.push('user-argument'); write(f.project, '.mcp.json', mcp);
+  write(f.project, '.claude/skills/agent-chat/SKILL.md', 'my custom skill');
+  assert.throws(() => updateProject(f), /edited|changed/);
+  const result = uninstallProject(f); assert.ok(result.warnings.length >= 2);
+  assert.deepEqual(readJson(f.project, '.mcp.json'), mcp);
+  assert.equal(read(f.project, '.claude/skills/agent-chat/SKILL.md'), 'my custom skill');
+  assert.ok(fs.existsSync(path.join(f.project, '.agent-chat/runtime/agent-chat.mjs')));
+  assert.deepEqual(inspectInstallation(f).receipt.clients, ['claude']);
+});
+
+test('partial uninstall keeps other clients and removes selected unchanged skills', t => {
+  const f = fixture(t); installProject({ ...f, clients: ['codex', 'claude', 'opencode'], hooks: true });
+  uninstallProject({ ...f, clients: ['claude'] });
+  assert.deepEqual(inspectInstallation(f).receipt.clients, ['codex', 'opencode']);
+  assert.ok(!fs.existsSync(path.join(f.project, '.mcp.json')));
+  assert.ok(!fs.existsSync(path.join(f.project, '.claude/skills/agent-chat/SKILL.md')));
+  assert.ok(fs.existsSync(path.join(f.project, '.agent-chat/runtime/agent-chat.mjs')));
+  assert.equal(updateProject(f).changes.length, 0);
+});
+
+test('malformed, duplicate and conflicting configs fail before any mutation', t => {
+  for (const [relative, content, clients] of [
+    ['.mcp.json', '{bad', ['claude']],
+    ['.mcp.json', '{"mcpServers":{},"mcpServers":{}}', ['claude']],
+    ['.mcp.json', '{"mcpServers":{"agent-chat":{"command":"mine"}}}', ['claude']],
+    ['.codex/config.toml', 'model = [', ['codex']],
+    ['.codex/config.toml', '[mcp_servers."agent-chat"]\ncommand="mine"', ['codex']],
+    ['opencode.jsonc', '{ // keep comments\n}', ['opencode']],
+    ['.claude/settings.local.json', '{"hooks":[]}', ['claude']],
+  ]) {
+    const f = fixture(t, `case-${Math.random()}`); write(f.project, relative, content); const before = snapshot(f.project);
+    assert.throws(() => installProject({ ...f, clients, hooks: true }), /invalid|duplicate|exists|JSONC|must be/);
+    assert.deepEqual(snapshot(f.project), before);
+  }
+});
+
+test('unmanaged runtime or skills and symlink escapes are refused without overwriting', t => {
+  for (const relative of ['.agent-chat/runtime/agent-chat.mjs', '.agents/skills/agent-chat/SKILL.md']) {
+    const f = fixture(t, `case-${Math.random()}`); write(f.project, relative, 'mine'); const before = snapshot(f.project);
+    assert.throws(() => installProject({ ...f, clients: ['codex'] }), /outside this installation/); assert.deepEqual(snapshot(f.project), before);
+  }
+  const f = fixture(t, 'symlink'); const external = path.join(f.base, 'external'); fs.mkdirSync(external);
+  try { fs.symlinkSync(external, path.join(f.project, '.codex'), process.platform === 'win32' ? 'junction' : 'dir'); }
+  catch (error) { if (error.code === 'EPERM' && process.platform === 'win32') return t.skip('symlink permission unavailable'); throw error; }
+  assert.throws(() => installProject({ ...f, clients: ['codex'] }), /symlinks/);
+  assert.deepEqual(fs.readdirSync(external), []);
+});
+
+test('transaction failure rolls back every written file and retains private backups', t => {
+  const f = fixture(t); write(f.project, '.mcp.json', { mcpServers: { other: { command: 'original' } } });
+  const before = read(f.project, '.mcp.json');
+  assert.throws(() => installProject({ ...f, clients: ['codex', 'claude'], hooks: true, beforeWrite: ({ index }) => { if (index === 4) throw new Error('simulated disk failure'); } }), /rolled back/);
+  assert.equal(read(f.project, '.mcp.json'), before);
+  assert.ok(!fs.existsSync(path.join(f.project, '.codex/config.toml')));
+  assert.ok(!fs.existsSync(path.join(f.project, '.agent-chat/install.json')));
+  assert.ok(!fs.existsSync(path.join(f.project, '.agent-chat/install.lock')));
+  const backups = fs.readdirSync(path.join(f.project, '.agent-chat/backups')); assert.equal(backups.length, 1);
+  if (process.platform !== 'win32') assert.equal(fs.statSync(path.join(f.project, '.agent-chat/backups', backups[0], '0.before')).mode & 0o777, 0o600);
+});
+
+test('concurrent edits and installer locks never overwrite the changed file', t => {
+  const f = fixture(t); write(f.project, '.mcp.json', { preserve: true });
+  assert.throws(() => installProject({ ...f, clients: ['claude'], beforeWrite: ({ path: relative }) => { if (relative === '.mcp.json') write(f.project, relative, { preserve: 'changed-during-transaction' }); } }), /changed during/);
+  assert.deepEqual(readJson(f.project, '.mcp.json'), { preserve: 'changed-during-transaction' });
+  write(f.project, '.agent-chat/install.lock', '{}');
+  assert.throws(() => installProject({ ...f, clients: ['claude'] }), /locked/);
+  assert.deepEqual(readJson(f.project, '.mcp.json'), { preserve: 'changed-during-transaction' });
+});
+
+test('receipt cannot claim arbitrary project files for deletion', t => {
+  const f = fixture(t); installProject({ ...f, clients: ['claude'] }); write(f.project, 'precious.txt', 'preserve');
+  const receipt = inspectInstallation(f).receipt; receipt.files['precious.txt'] = { sha256: '0'.repeat(64), clients: ['claude'] }; write(f.project, '.agent-chat/install.json', receipt);
+  assert.throws(() => uninstallProject(f), /unexpected owned file/); assert.equal(read(f.project, 'precious.txt'), 'preserve');
+});
+
+test('portable hook command quoting handles spaces and POSIX metacharacters safely', t => {
+  if (process.platform !== 'win32') {
+    const f = fixture(t, "project '$` %! spaces");
+    installProject({ ...f, clients: ['codex', 'claude'], hooks: true });
+    for (const relative of ['.codex/hooks.json', '.claude/settings.local.json']) {
+      const command = readJson(f.project, relative).hooks.SessionStart[0].hooks[0].command;
+      const payload = JSON.stringify({ session_id: 'test', cwd: f.project, hook_event_name: 'SessionStart' });
+      const result = spawnSync('/bin/sh', ['-c', command], { input: payload, encoding: 'utf8', timeout: 3000 });
+      assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout, '');
+    }
+  }
+  assert.equal(quotePosix("a'b"), "'a'\\''b'"); assert.equal(quoteWindows('C:\\with space\\node.exe'), '"C:\\with space\\node.exe"');
+  assert.throws(() => quoteWindows('unsafe%PATH%'), /cannot contain/);
+});
+
+test('private backups stay ignored after uninstall and reinstall accepts the retained block', t => {
+  const f = fixture(t); const original = 'node_modules/\n# user setting\n'; write(f.project, '.gitignore', original);
+  installProject({ ...f, clients: ['claude'] });
+  assert.ok(read(f.project, '.gitignore').startsWith(original));
+  assert.match(read(f.project, '.gitignore'), /\/\.agent-chat\//);
+  uninstallProject(f);
+  assert.ok(read(f.project, '.gitignore').startsWith(original));
+  installProject({ ...f, clients: ['claude'] });
+  assert.equal(read(f.project, '.gitignore').split('# >>> agent-chat local state >>>').length, 2);
+});
+
+test('existing config modes survive install and rollback', t => {
+  if (process.platform === 'win32') return t.skip('POSIX modes unavailable');
+  const f = fixture(t); write(f.project, '.mcp.json', { keep: true }); fs.chmodSync(path.join(f.project, '.mcp.json'), 0o640);
+  installProject({ ...f, clients: ['claude'] });
+  assert.equal(fs.statSync(path.join(f.project, '.mcp.json')).mode & 0o777, 0o640);
+  const f2 = fixture(t, 'rollback-mode'); write(f2.project, '.mcp.json', { keep: true }); fs.chmodSync(path.join(f2.project, '.mcp.json'), 0o640);
+  assert.throws(() => installProject({ ...f2, clients: ['claude'], beforeWrite: ({ index }) => { if (index === 3) throw new Error('fail'); } }), /rolled back/);
+  assert.equal(fs.statSync(path.join(f2.project, '.mcp.json')).mode & 0o777, 0o640);
+});
+
+test('concurrent receipt replacement cannot silently discard another client', t => {
+  const f = fixture(t); installProject({ ...f, clients: ['claude'] });
+  let triggered = false;
+  const options = { ...f, hooks: true, get clients() { if (!triggered) { triggered = true; installProject({ ...f, clients: ['opencode'] }); } return ['claude']; } };
+  assert.throws(() => installProject(options), /changed while|changed during/);
+  assert.deepEqual(inspectInstallation(f).receipt.clients, ['claude', 'opencode']);
+});
+
+test('unsafe backup directory rejection never leaves an install lock', t => {
+  const f = fixture(t); const outside = path.join(f.base, 'outside'); fs.mkdirSync(outside); fs.mkdirSync(path.join(f.project, '.agent-chat'));
+  const link = path.join(f.project, '.agent-chat/backups');
+  try { fs.symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir'); }
+  catch (error) { if (process.platform === 'win32' && error.code === 'EPERM') return t.skip('symlink permission unavailable'); throw error; }
+  assert.throws(() => installProject({ ...f, clients: ['claude'] }), /symlinks/);
+  assert.ok(!fs.existsSync(path.join(f.project, '.agent-chat/install.lock')));
+  fs.unlinkSync(link);
+  installProject({ ...f, clients: ['claude'] });
+  assert.ok(inspectInstallation(f).exists);
+  assert.deepEqual(fs.readdirSync(outside), []);
+});
+
+test('failed first install leaves all private backup snapshots ignored by Git', t => {
+  const f = fixture(t); const git = spawnSync('git', ['init', '-q', f.project], { encoding: 'utf8' });
+  if (git.error?.code === 'ENOENT') return t.skip('Git unavailable');
+  assert.equal(git.status, 0, git.stderr);
+  write(f.project, '.mcp.json', { privateSetting: 'fixture-secret' });
+  assert.throws(() => installProject({ ...f, clients: ['claude'], beforeWrite: ({ index }) => { if (index === 2) throw new Error('fail'); } }), /rolled back/);
+  assert.equal(fs.existsSync(path.join(f.project, '.gitignore')), false);
+  const directory = fs.readdirSync(path.join(f.project, '.agent-chat/backups'))[0];
+  const backup = `.agent-chat/backups/${directory}/0.before`;
+  const ignored = spawnSync('git', ['-C', f.project, 'check-ignore', backup], { encoding: 'utf8' });
+  assert.equal(ignored.status, 0, ignored.stderr); assert.match(ignored.stdout, /0.before/);
+  assert.equal(read(f.project, '.agent-chat/.gitignore'), '*\n');
+});

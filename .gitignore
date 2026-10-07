@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+.temp/
+.agent-chat/
+.env
+.env.*
+!.env.example
+*.tgz
+*.zip
+*.log
+.DS_Store
+test/fixtures/private/

@@ -1,0 +1,9 @@
+{
+  "name": "agent-chat",
+  "version": "0.3.0",
+  "description": "Coordinate local coding agents through a shared, file-backed mailbox.",
+  "author": { "name": "agent-chat contributors" },
+  "repository": "https://github.com/moogento/agent-chat",
+  "license": "MIT",
+  "hooks": "./hooks/claude-code.json"
+}

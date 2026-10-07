@@ -1,0 +1,7 @@
+{
+  "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "node \"${PLUGIN_ROOT}/hooks/notify.mjs\" codex", "timeout": 5 }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node \"${PLUGIN_ROOT}/hooks/notify.mjs\" codex", "timeout": 5 }] }],
+    "PostToolUse": [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "node \"${PLUGIN_ROOT}/hooks/notify.mjs\" codex", "timeout": 5 }] }]
+  }
+}

@@ -1,0 +1,48 @@
+services:
+  broker:
+    build:
+      context: ../..
+      dockerfile: examples/docker/Dockerfile
+    image: ${AGENT_CHAT_IMAGE:-agent-chat-local:0.3.0}
+    read_only: true
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]
+    secrets: [broker_token]
+    volumes:
+      - mailbox:/data
+    ports:
+      - target: 47321
+        host_ip: 127.0.0.1
+        published: "${AGENT_CHAT_PORT:-47321}"
+    healthcheck:
+      test: [CMD, node, --input-type=module, -e, "const r = await fetch('http://127.0.0.1:47321/health'); if (!r.ok || !(await r.json()).ok) process.exit(1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 2s
+  agent:
+    image: ${AGENT_CHAT_IMAGE:-agent-chat-local:0.3.0}
+    profiles: [agents]
+    entrypoint: [node, /app/agent-chat.mjs]
+    command: [proxy]
+    read_only: true
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]
+    secrets: [broker_token]
+    environment:
+      AGENT_CHAT_BROKER_URL: http://broker:47321
+      AGENT_CHAT_BROKER_TOKEN_FILE: /run/secrets/broker_token
+      AGENT_CHAT_BROKER_SESSION_DIR: /tmp/broker-sessions
+      AGENT_CHAT_ROOM: ${AGENT_CHAT_ROOM:-docker-example}
+    depends_on:
+      broker:
+        condition: service_healthy
+secrets:
+  broker_token:
+    file: ${AGENT_CHAT_TOKEN_FILE:?Generate a private token file first}
+volumes:
+  mailbox:

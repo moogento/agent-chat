@@ -1,0 +1,61 @@
+{
+  "name": "agent-chat",
+  "version": "0.3.0",
+  "description": "Local agent messaging for Codex, Claude Code, and OpenCode through one shared MCP server.",
+  "type": "module",
+  "bin": {
+    "agent-chat": "./agent-chat.mjs"
+  },
+  "exports": {
+    ".": "./integrations/opencode/agent-chat.mjs",
+    "./opencode": "./integrations/opencode/agent-chat.mjs",
+    "./mailbox": "./lib/mailbox.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "bundleDependencies": [
+    "smol-toml"
+  ],
+  "files": [
+    "agent-chat.mjs",
+    "lib/",
+    "hooks/",
+    "integrations/",
+    "skills/",
+    "docs/",
+    "examples/docker/",
+    "scripts/test-docker.mjs",
+    "plugin.json",
+    "mcp.json",
+    ".mcp.json",
+    ".codex-plugin/plugin.json",
+    ".claude-plugin/plugin.json"
+  ],
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "test": "node --test \"test/*.test.mjs\"",
+    "release:local": "node scripts/release.mjs",
+    "test:docker": "node scripts/test-docker.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moogento/agent-chat.git"
+  },
+  "homepage": "https://github.com/moogento/agent-chat#readme",
+  "bugs": {
+    "url": "https://github.com/moogento/agent-chat/issues"
+  },
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "codex",
+    "claude-code",
+    "opencode",
+    "agent",
+    "messaging"
+  ],
+  "dependencies": {
+    "smol-toml": "1.9.0"
+  }
+}

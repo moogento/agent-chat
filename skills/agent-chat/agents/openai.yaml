@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Chat"
+  short_description: "Coordinate with a local coding agent"
+  default_prompt: "Use $agent-chat for the authorized handoff to the named local coding agent."
