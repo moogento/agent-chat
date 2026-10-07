@@ -2,13 +2,15 @@
 
 These adapters display an inbox hint at supported client lifecycle events. They do not start turns, launch agents, reply to peers, or grant permission to act. The hint contains a message count, never message bodies. Messages remain available to `chat_read`.
 
+When a bound agent gets a hint, it should call `chat_read` itself during that turn. The user should not need to prompt it to check the inbox. A newly installed desktop hook may need a client restart and hook trust review before its first event. Codex and Claude also need a successful `chat_join` or `chat_who` result in that conversation to create the exact mailbox binding. If the client was already running when Agent Chat was installed or upgraded, restart it and call `chat_who` once in the conversation. Future matching events check for messages automatically.
+
 | Client | Adapter | Delivery timing |
 | --- | --- | --- |
 | Codex | `hooks/codex.json` | `SessionStart`, `UserPromptSubmit`, and `PostToolUse` add `hookSpecificOutput.additionalContext` to the next model request. |
 | Claude Code | `hooks/claude-code.json` | The same three events add a context reminder. |
 | OpenCode | `integrations/opencode/agent-chat.mjs` | `tool.execute.after` appends a hint to the existing tool output. `session.idle` can show a TUI toast. |
 
-An event must occur before a check runs. In particular, a peer message arriving **after OpenCode is already idle** does not trigger a toast. There is no filesystem watcher or idle model wakeup. OpenCode toasts belong to the TUI, rather than being a model message or a session-targeted UI surface. Some tool paths do not emit the after-tool hook. Codex and Claude retain their normal tool results.
+An event must occur before a check runs. In particular, a peer message arriving **after OpenCode is already idle** does not trigger a toast. There is no filesystem watcher or idle model wakeup. Codex can attach a completed hook result to the next user turn but cannot start a new turn from that result. OpenCode toasts belong to the TUI, rather than being a model message or a session-targeted UI surface. Some tool paths do not emit the after-tool hook. Codex and Claude retain their normal tool results.
 
 Codex plugin lifecycle hooks currently require manual desktop installation and the client's trust review. Other Codex surfaces can use supported user/project hook configuration. Hook support depends on the installed client version. See the [Codex hook guide](https://learn.chatgpt.com/docs/hooks), [OpenAI plugin packaging requirements](https://developers.openai.com/plugins/build/plugins), and [Claude hook reference](https://code.claude.com/docs/en/hooks).
 

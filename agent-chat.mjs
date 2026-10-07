@@ -8,7 +8,7 @@ import { createMailbox, safeName, safeSessionId, pidAlive, LIMITS } from './lib/
 import { CHAT_LABEL } from './lib/presentation.mjs';
 import { createPresence } from './lib/presence.mjs';
 
-export const VERSION = '0.4.0';
+export const VERSION = '0.4.1';
 function envValue(name) {
   const value = process.env[name];
   return value === undefined || !value.trim() ? undefined : value;
@@ -308,7 +308,7 @@ export async function cli(argv) {
   if (process.env.AGENT_CHAT_BROKER_URL && !['--help', '-h', 'help', '--version', '-v'].includes(cmd)) throw new Error('Local mailbox CLI commands are unavailable in broker mode. Use the connected MCP tools; no local fallback was attempted.');
   if (cmd === '--version' || cmd === '-v') return console.log(VERSION);
   if (cmd === undefined || cmd === 'serve') return serve();
-  if (['--help', '-h', 'help'].includes(cmd)) return console.log('agent-chat 0.4.0\n\nagent-chat [serve]\nagent-chat broker --token-file PATH [--host HOST] [--port PORT] [--home PATH]\nagent-chat proxy  (requires broker URL, token file, and explicit room)\nagent-chat log [-f] [-n N] [--room ROOM]\nagent-chat send [--to NAME] [--as NAME] [--room ROOM] TEXT\nagent-chat who [--room ROOM]\nagent-chat set [--summary TEXT] [--status TEXT] [--room ROOM]\nagent-chat rooms\nagent-chat tidy\nagent-chat install --clients codex,claude,opencode [--hooks] [--project PATH] [--dry-run]\nagent-chat update [--project PATH] [--dry-run]\nagent-chat uninstall [--project PATH] [--dry-run]\nagent-chat doctor [--project PATH] [--json]\n\nROOM is a task name or directory. Default: current git repo.');
+  if (['--help', '-h', 'help'].includes(cmd)) return console.log('agent-chat 0.4.1\n\nagent-chat [serve]\nagent-chat broker --token-file PATH [--host HOST] [--port PORT] [--home PATH]\nagent-chat proxy  (requires broker URL, token file, and explicit room)\nagent-chat log [-f] [-n N] [--room ROOM]\nagent-chat send [--to NAME] [--as NAME] [--room ROOM] TEXT\nagent-chat who [--room ROOM]\nagent-chat set [--summary TEXT] [--status TEXT] [--room ROOM]\nagent-chat rooms\nagent-chat tidy\nagent-chat install --clients codex,claude,opencode [--hooks] [--project PATH] [--dry-run]\nagent-chat update [--project PATH] [--dry-run]\nagent-chat uninstall [--project PATH] [--dry-run]\nagent-chat doctor [--project PATH] [--json]\n\nROOM is a task name or directory. Default: current git repo.');
   const { flags, rest } = parseFlags(more);
   const mailbox = createMailbox();
   const room = mailbox.resolveRoom(flags.room ?? envValue('AGENT_CHAT_ROOM'));
