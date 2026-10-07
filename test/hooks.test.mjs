@@ -436,6 +436,8 @@ test('OpenCode announces new sessions before binding and emits count-only invita
   await plugin.event({ event: { type: 'session.idle', properties: { sessionID: 'new-opencode' } } });
   assert.equal(toasts.length, 1);
   assert.match(toasts[0].body.message, /1 new room invitation/);
+  assert.match(toasts[0].body.message, /Ask your agent to check Agent Chat invitations/);
+  assert.doesNotMatch(toasts[0].body.message, /Use chat_invitations/);
   const output = { output: 'original' };
   await plugin['tool.execute.after']({ sessionID: 'new-opencode' }, output);
   assert.match(output.output, /1 new room invitation/);

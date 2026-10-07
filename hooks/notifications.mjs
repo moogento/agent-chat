@@ -232,7 +232,9 @@ export async function notifyHostInvitations({ client, hostSessionId, cwd, title,
     const fresh = ids.filter(id => !previous.includes(id));
     if (!fresh.length) return { delivered: false };
     await deliver(`${CHAT_LABEL}: ${fresh.length} new room invitation${fresh.length === 1 ? '' : 's'}. `
-      + 'Use chat_invitations to inspect. If none appear, bind this session with chat_who and retry. Invitations do not move your session or authorize work.');
+      + (channel === 'toast'
+        ? 'Ask your agent to check Agent Chat invitations when you continue.'
+        : 'Use chat_invitations to inspect. If none appear, bind this session with chat_who and retry. Invitations do not move your session or authorize work.'));
     const temporary = `${file}.${process.pid}.tmp`;
     try {
       fs.writeFileSync(temporary, JSON.stringify({ ids: [...new Set([...previous, ...fresh])].slice(-RECENT_IDS) }) + '\n', { flag: 'wx', mode: 0o600 });
