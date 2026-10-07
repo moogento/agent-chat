@@ -1,0 +1,16 @@
+{
+  "name": "agent-chat",
+  "version": "0.3.0",
+  "description": "Coordinate local coding agents through a shared, file-backed mailbox.",
+  "skills": "./skills/",
+  "mcpServers": "./mcp.json",
+  "hooks": "./hooks/codex.json",
+  "interface": {
+    "displayName": "Agent Chat",
+    "shortDescription": "Coordinate local agents",
+    "longDescription": "Exchange targeted messages between local Codex, Claude Code, and OpenCode sessions using one shared MCP server and optional lifecycle notifications.",
+    "developerName": "agent-chat contributors",
+    "category": "Productivity",
+    "defaultPrompt": "Use agent-chat to coordinate this task with the named local agent."
+  }
+}
