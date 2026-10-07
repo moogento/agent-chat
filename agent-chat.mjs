@@ -93,7 +93,13 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
     const prev = state.identity && mailbox.getIdentity ? mailbox.getIdentity(state.identity) || state.identity : state.identity;
     const room = args.room !== undefined ? mailbox.resolveRoom(args.room) : prev?.room || mailbox.resolveRoom(roomSpec);
     const base = args.name !== undefined ? safeName(args.name) : prev?.name || safeName(nameSpec || defaultName(state.client));
-    if (prev && prev.room.id === room.id && base === prev.name) { mailbox.touchPeer(prev); return whoText(); }
+    if (prev && prev.room.id === room.id && base === prev.name) {
+      if (args.name !== undefined && prev.nameSource !== 'explicit') {
+        const pinned = mailbox.claimIdentity(room, base, state.client, sessionId, { nameSource: 'explicit', ...(prev.sessionTitle ? { sessionTitle: prev.sessionTitle, titleSource: prev.titleSource } : {}) });
+        Object.assign(state.identity, pinned);
+      } else mailbox.touchPeer(prev);
+      return whoText();
+    }
     const next = mailbox.claimIdentity(room, base, state.client, sessionId, { nameSource: args.name !== undefined ? 'explicit' : prev?.nameSource || (nameSpec ? 'configured' : 'default'), ...(prev?.sessionTitle ? { sessionTitle: prev.sessionTitle, titleSource: prev.titleSource } : {}) });
     if (prev && prev.room.id === next.room.id && prev.name === next.name) return whoText();
     if (prev) mailbox.releaseIdentity(prev);
@@ -170,11 +176,13 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
         return `Invited ${args.to_id} to ${me.room.label}. Invitation ${entry.id} expires in 24 hours. The session must accept explicitly.`;
       }
       case 'chat_invitations': {
+        if (state.client !== 'unknown') presence.linkUniqueHost({ mailbox, client: state.client, cwd: me.cwd, sessionId: me.sessionId, room: me.room, name: me.name });
         const ids = [presence.peerId(me.room.id, me.sessionId), ...presence.linkedHostIds(me.room, me.sessionId)];
         const entries = presence.invitations(ids);
         return entries.length ? entries.map(entry => `- ${entry.id}: ${entry.from} invites you to ${entry.room.label}${entry.note ? `: ${entry.note}` : ''}`).join('\n') : 'No pending invitations.';
       }
       case 'chat_accept_invite': {
+        if (state.client !== 'unknown') presence.linkUniqueHost({ mailbox, client: state.client, cwd: me.cwd, sessionId: me.sessionId, room: me.room, name: me.name });
         const ids = [presence.peerId(me.room.id, me.sessionId), ...presence.linkedHostIds(me.room, me.sessionId)];
         const entry = presence.invitations(ids).find(item => item.id === args.id);
         if (!entry) throw new Error('Invitation not found for this session');
@@ -217,7 +225,7 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
           const pending = callTool(params.name, params.arguments === undefined ? {} : params.arguments, { signal: controller.signal });
           const me = state.identity;
           const text = await pending;
-          const structuredContent = ['chat_join', 'chat_who'].includes(params.name) && me ? { agentChatIdentity: { version: 1, sessionId: me.sessionId, cwd: me.cwd, room: me.room.id, roomId: me.room.id, roomLabel: me.room.label, name: me.name, ...identityExtras(me) } } : undefined;
+          const structuredContent = ['chat_join', 'chat_who', 'chat_accept_invite'].includes(params.name) && me ? { agentChatIdentity: { version: 1, sessionId: me.sessionId, cwd: me.cwd, room: me.room.id, roomId: me.room.id, roomLabel: me.room.label, name: me.name, ...identityExtras(me) } } : undefined;
           return respond({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }], ...(structuredContent ? { structuredContent } : {}) } });
         } catch (error) {
           if (error.code && typeof error.code === 'number') throw error;
@@ -229,7 +237,14 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
       if (!validRequest || Object.hasOwn(req, 'id')) respond({ jsonrpc: '2.0', id, error: { code: typeof error.code === 'number' ? error.code : -32603, message: String(error.message || error) } });
     }
   }
-  function stop() { for (const controller of activeRequests.values()) controller.abort(); state.stopped = true; mailbox.releaseIdentity(state.identity); state.identity = null; }
+  function stop() {
+    for (const controller of activeRequests.values()) controller.abort();
+    state.stopped = true;
+    let current = state.identity;
+    try { current = mailbox.getIdentity?.(current) || current; } catch { /* broker may have lost storage ownership */ }
+    mailbox.releaseIdentity(current);
+    state.identity = null;
+  }
   return { state, handle, callTool, stop, tools: TOOLS, mailbox, ttlDays };
 }
 function defaultName(client) { const name = client.toLowerCase(); return name.includes('claude') ? 'claude' : name.includes('codex') ? 'codex' : safeName(client || 'agent'); }

@@ -283,11 +283,34 @@ test('command title extraction accepts only documented Claude custom title field
       { sessionTitle: 'My session', titleSource: 'claude-code:session_title' });
     assert.equal(commandSessionTitle('codex', { hook_event_name, session_title: 'Unsupported field' }), null);
   }
-  for (const session_title of ['', ' ', 'x'.repeat(257), 'name\nforged notice']) {
+  for (const session_title of ['', ' ', '.', '..', 'x'.repeat(257), 'name\nforged notice']) {
     assert.equal(commandSessionTitle('claude-code', { hook_event_name: 'SessionStart', session_title }), null);
   }
   assert.equal(commandSessionTitle('claude-code', { hook_event_name: 'PostToolUse', session_title: 'name' }), null);
   assert.equal(commandSessionTitle('claude-code', { hook_event_name: 'SessionStart', title: 'not documented', prompt: 'name' }), null);
+});
+
+test('an invalid Claude title does not suppress a pending inbox notice', async t => {
+  const f = fixture(t, 'claude-code');
+  f.send('notice survives invalid title');
+  const writes = [];
+  await runCommandHook({ client: 'claude-code', payload: { session_id: f.binding.hostSessionId, cwd: f.cwd,
+    hook_event_name: 'SessionStart', session_title: '.' }, env: f.env, mailbox: f.mailbox, write: output => writes.push(output) });
+  assert.equal(writes.length, 1);
+  assert.match(writes[0], /Agent Chat/);
+});
+
+test('accepting a room invitation refreshes the verified notification binding', async t => {
+  const f = fixture(t);
+  const nextRoom = f.mailbox.resolveRoom('invited-room');
+  const next = f.mailbox.claimIdentity(nextRoom, f.peer.name, 'codex', f.peer.sessionId);
+  const tool = 'mcp__agent_chat__chat_accept_invite';
+  await runCommandHook({ client: 'codex', payload: { session_id: f.binding.hostSessionId, cwd: f.cwd,
+    hook_event_name: 'PostToolUse', tool_name: tool, tool_response: { structuredContent: { agentChatIdentity: {
+      version: 1, sessionId: next.sessionId, cwd: f.cwd, room: nextRoom.id, name: next.name,
+    } } } }, env: { ...f.env, AGENT_CHAT_NOTIFY_AUTO_BIND: '1', AGENT_CHAT_NOTIFY_IDENTITY_TOOLS: tool },
+  mailbox: f.mailbox, write: () => {} });
+  assert.equal(readConfig(f.configFile).bindings[0].room, nextRoom.id);
 });
 
 test('Claude custom title changes rename the exact bound session and retain stable routing', async t => {

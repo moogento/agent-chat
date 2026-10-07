@@ -79,3 +79,31 @@ test('broker invitations instruct reconnection without changing a pinned room', 
   assert.equal(broker.state.identity.room.id, 'current');
   assert.match(await broker.callTool('chat_invitations'), new RegExp(invitationId));
 });
+
+test('a uniquely matched unjoined host reads an invite on its first MCP tool call', async t => {
+  const { mailbox, presence } = fixture(t);
+  const host = presence.registerHost({ client: 'claude-code', hostSessionId: 'host-first', cwd: process.cwd(), title: 'reviewer' });
+  const sender = createServer({ mailbox, sessionId: 'sender-first', roomSpec: 'review-room' });
+  const receiver = createServer({ mailbox, sessionId: 'receiver-first', roomSpec: 'other-room' });
+  receiver.state.client = 'claude-mcp-client';
+  t.after(() => { sender.stop(); receiver.stop(); });
+  await sender.callTool('chat_join', { name: 'sender' });
+  const invitationId = (await sender.callTool('chat_invite', { to_id: host.id })).match(/Invitation ([a-f0-9-]{36})/)?.[1];
+  assert.ok(invitationId);
+  assert.match(await receiver.callTool('chat_invitations'), new RegExp(invitationId));
+  assert.match(await receiver.callTool('chat_accept_invite', { id: invitationId }), /room review-room/);
+});
+
+test('ambiguous host sessions are not linked to the wrong MCP identity', async t => {
+  const { mailbox, presence } = fixture(t);
+  const first = presence.registerHost({ client: 'codex', hostSessionId: 'one', cwd: process.cwd() });
+  presence.registerHost({ client: 'codex', hostSessionId: 'two', cwd: process.cwd() });
+  const sender = createServer({ mailbox, sessionId: 'sender-ambiguous', roomSpec: 'room' });
+  const receiver = createServer({ mailbox, sessionId: 'receiver-ambiguous', roomSpec: 'other' });
+  receiver.state.client = 'codex-mcp-client';
+  t.after(() => { sender.stop(); receiver.stop(); });
+  await sender.callTool('chat_join', { name: 'sender' });
+  await sender.callTool('chat_invite', { to_id: first.id });
+  assert.equal(await receiver.callTool('chat_invitations'), 'No pending invitations.');
+  assert.equal(presence.linkedHostIds(receiver.state.identity.room, receiver.state.identity.sessionId).length, 0);
+});

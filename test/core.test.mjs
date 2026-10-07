@@ -357,6 +357,29 @@ test('repeated joins preserve a suffixed identity, status and pending read', asy
   assert.deepEqual(mailbox.listPeers(room).map(peer => peer.sessionId), [builder.sessionId]);
 });
 
+test('explicitly joining with the current handle pins it against later title changes', async t => {
+  const { mailbox, room } = fixture(t);
+  const { server } = serverFor(t, mailbox, { roomSpec: room.id, nameSpec: 'claude' });
+  server.state.client = 'claude-mcp-client';
+  await server.callTool('chat_who');
+  assert.equal(server.state.identity.nameSource, 'configured');
+  await server.callTool('chat_join', { name: 'claude' });
+  assert.equal(server.state.identity.nameSource, 'explicit');
+  mailbox.syncSessionTitle({ room, sessionId: server.state.identity.sessionId, title: 'New host title', client: server.state.client, cwd: server.state.identity.cwd });
+  assert.match(await server.callTool('chat_who'), /You are "claude"/);
+});
+
+test('stopping after a host title rename removes the current peer record', async t => {
+  const { mailbox, room } = fixture(t);
+  const { server } = serverFor(t, mailbox, { roomSpec: room.id, nameSpec: 'claude' });
+  server.state.client = 'claude-mcp-client';
+  await server.callTool('chat_who');
+  mailbox.syncSessionTitle({ room, sessionId: server.state.identity.sessionId, title: 'New host title', client: server.state.client, cwd: server.state.identity.cwd });
+  assert.equal(mailbox.listPeers(room).length, 1);
+  server.stop();
+  assert.equal(mailbox.listPeers(room).length, 0);
+});
+
 test('cancelled pending read does not consume messages', async (t) => {
   const { mailbox, room } = fixture(t); const { server, responses } = serverFor(t, mailbox);
   await server.callTool('chat_join', { name: 'reader', room: room.id }); mailbox.claimIdentity(room, 'peer');

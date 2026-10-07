@@ -14,7 +14,7 @@ const RECENT_IDS = 128;
 const TITLE_SOURCES = new Set(['claude-code:session_title', 'opencode:session.created', 'opencode:session.updated']);
 
 export function supportedSessionTitle(value) {
-  return typeof value === 'string' && value.trim() && value.length <= 256 && !/[\x00-\x1f\x7f]/.test(value)
+  return typeof value === 'string' && value.trim() && !['.', '..'].includes(value.trim()) && value.length <= 256 && !/[\x00-\x1f\x7f]/.test(value)
     ? value.trim() : null;
 }
 
@@ -232,7 +232,7 @@ export async function notifyHostInvitations({ client, hostSessionId, cwd, title,
     const fresh = ids.filter(id => !previous.includes(id));
     if (!fresh.length) return { delivered: false };
     await deliver(`${CHAT_LABEL}: ${fresh.length} new room invitation${fresh.length === 1 ? '' : 's'}. `
-      + 'Use chat_invitations to inspect. Invitations do not move your session or authorize work.');
+      + 'Use chat_invitations to inspect. If none appear, bind this session with chat_who and retry. Invitations do not move your session or authorize work.');
     const temporary = `${file}.${process.pid}.tmp`;
     try {
       fs.writeFileSync(temporary, JSON.stringify({ ids: [...new Set([...previous, ...fresh])].slice(-RECENT_IDS) }) + '\n', { flag: 'wx', mode: 0o600 });
@@ -349,7 +349,7 @@ export async function autoBindCommand({ client, payload, env = process.env, mail
   const identity = commandIdentity(client, payload);
   if (!identity || payload.hook_event_name !== 'PostToolUse') return false;
   const tools = (env.AGENT_CHAT_NOTIFY_IDENTITY_TOOLS || '').split(',').map(value => value.trim()).filter(Boolean);
-  if (!tools.includes(payload.tool_name) || !/__(chat_join|chat_who)$/.test(payload.tool_name)) return false;
+  if (!tools.includes(payload.tool_name) || !/__(chat_join|chat_who|chat_accept_invite)$/.test(payload.tool_name)) return false;
   const response = payload.tool_response;
   if (!response || response.isError || response.error) return false;
   const metadata = response.structuredContent?.agentChatIdentity;
@@ -386,7 +386,10 @@ export async function runCommandHook({ client, payload, env = process.env, mailb
   if (!identity) return { delivered: false, reason: 'unsupported-event' };
   await autoBindCommand({ client, payload, env, mailbox, remoteInspector });
   const title = commandSessionTitle(client, payload);
-  if (title) await syncBoundSessionTitle({ ...identity, ...title, env, mailbox, remoteInspector });
+  if (title) {
+    try { await syncBoundSessionTitle({ ...identity, ...title, env, mailbox, remoteInspector }); }
+    catch (error) { if (env.AGENT_CHAT_NOTIFY_DEBUG === '1') console.error(`agent-chat title hook: ${error.message}`); }
+  }
   const deliver = async notice => {
     await write(JSON.stringify({ hookSpecificOutput: { hookEventName: payload.hook_event_name, additionalContext: notice } }) + '\n');
   };
