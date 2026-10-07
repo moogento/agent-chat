@@ -2,23 +2,29 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { acquireLock, readConfig, validateBinding } from './notifications.mjs';
+import { acquireLock, readConfig, validateBinding, sameBindingCwd, NOTIFICATION_LIMITS } from './notifications.mjs';
 
 export function bindNotification({ configFile, binding }) {
   if (!configFile || !path.isAbsolute(configFile)) throw new Error('--config must be an absolute path');
-  const valid = validateBinding(binding);
+  const valid = { ...validateBinding(binding), boundAt: Date.now() };
   fs.mkdirSync(path.dirname(configFile), { recursive: true, mode: 0o700 });
   const lock = `${configFile}.lock`;
   if (!acquireLock(lock)) throw new Error('Notification configuration is busy; retry shortly');
   try {
     let config = { version: 1, bindings: [] };
     try { config = readConfig(configFile); } catch (e) { if (e.code !== 'ENOENT') throw e; }
-    config.bindings = config.bindings.filter(item => !(item.client === valid.client
-      && item.hostSessionId === valid.hostSessionId && item.cwd === valid.cwd));
-    config.bindings.push(valid);
-    if (config.bindings.length > 100) throw new Error('notification config allows at most 100 bindings');
-    const serialized = JSON.stringify(config, null, 2) + '\n';
-    if (Buffer.byteLength(serialized) > 64 * 1024) throw new Error('notification config exceeds the 64 KiB size limit');
+    const history = config.bindings.filter(item => !(item.client === valid.client && sameBindingCwd(item.cwd, valid.cwd)
+      && item.brokerUrl === valid.brokerUrl && (item.hostSessionId === valid.hostSessionId || item.mailboxSessionId === valid.mailboxSessionId)));
+    // Legacy records have no timestamp. Stable ordering makes their oldest array entry leave first.
+    history.sort((a, b) => Math.min(a.boundAt ?? 0, valid.boundAt) - Math.min(b.boundAt ?? 0, valid.boundAt));
+    let serialized;
+    for (;;) {
+      config.bindings = [...history, valid];
+      serialized = JSON.stringify(config, null, 2) + '\n';
+      if (config.bindings.length <= NOTIFICATION_LIMITS.bindings && Buffer.byteLength(serialized) <= NOTIFICATION_LIMITS.configBytes) break;
+      if (!history.length) throw new Error('new notification binding exceeds the 64 KiB size limit');
+      history.shift();
+    }
     const temporary = `${configFile}.${process.pid}.tmp`;
     try {
       fs.writeFileSync(temporary, serialized, { flag: 'wx', mode: 0o600 });

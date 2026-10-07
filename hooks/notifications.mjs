@@ -6,7 +6,8 @@ import { CHAT_LABEL } from '../lib/presentation.mjs';
 
 export const CLIENTS = new Set(['codex', 'claude-code', 'opencode']);
 export const COMMAND_EVENTS = new Set(['SessionStart', 'UserPromptSubmit', 'PostToolUse']);
-const CONFIG_BYTES = 64 * 1024;
+export const NOTIFICATION_LIMITS = Object.freeze({ bindings: 100, configBytes: 64 * 1024,
+  warningBindings: 90, warningBytes: Math.floor(64 * 1024 * 0.9), refreshMs: 60 * 60 * 1000 });
 const SCAN_BYTES = 64 * 1024;
 const RECENT_IDS = 128;
 
@@ -26,7 +27,16 @@ function readJson(file, maxBytes) {
 
 function canonicalCwd(cwd) {
   if (typeof cwd !== 'string' || !path.isAbsolute(cwd)) return null;
-  try { return fs.statSync(cwd).isDirectory() ? fs.realpathSync(cwd) : null; } catch { return null; }
+  try { return fs.statSync(cwd).isDirectory() ? (process.platform === 'win32' ? fs.realpathSync.native(cwd) : fs.realpathSync(cwd)) : null; } catch { return null; }
+}
+
+export function sameBindingCwd(left, right) {
+  if (typeof left !== 'string' || typeof right !== 'string') return false;
+  if (left === right) return true;
+  if (process.platform !== 'win32' || path.normalize(left).toLowerCase() !== path.normalize(right).toLowerCase()) return false;
+  // Support legacy case variants without following a stored path into a different worktree.
+  const canonicalLeft = canonicalCwd(left); const canonicalRight = canonicalCwd(right);
+  return canonicalLeft !== null && canonicalLeft === canonicalRight;
 }
 
 // Bind to one endpoint without persisting credentials or URL query parameters.
@@ -39,18 +49,27 @@ function brokerUrl(value) {
   return url.origin;
 }
 
-export function validateBinding(binding) {
+function validateStoredBinding(binding) {
   if (!binding || !CLIENTS.has(binding.client)) throw new Error('client must be codex, claude-code, or opencode');
   if (typeof binding.hostSessionId !== 'string' || !binding.hostSessionId.trim() || binding.hostSessionId.length > 256) {
     throw new Error('hostSessionId is required (maximum 256 characters)');
   }
-  if (!canonicalCwd(binding.cwd)) throw new Error('cwd must be an existing absolute directory');
+  if (typeof binding.cwd !== 'string' || !path.isAbsolute(binding.cwd) || binding.cwd.includes('\0')) throw new Error('stored cwd must be an absolute directory path');
   if (typeof binding.room !== 'string' || !/^[A-Za-z0-9._-]+$/.test(binding.room)
     || ['.', '..'].includes(binding.room) || binding.room.length > 128) throw new Error('room must be the exact Room id from chat_who');
   safeSessionId(binding.mailboxSessionId);
-  return { client: binding.client, hostSessionId: binding.hostSessionId, cwd: canonicalCwd(binding.cwd),
+  if (binding.boundAt !== undefined && (!Number.isSafeInteger(binding.boundAt) || binding.boundAt < 0)) throw new Error('boundAt must be a nonnegative integer timestamp');
+  return { client: binding.client, hostSessionId: binding.hostSessionId, cwd: path.normalize(binding.cwd),
     room: binding.room, mailboxSessionId: binding.mailboxSessionId,
-    ...(binding.brokerUrl === undefined ? {} : { brokerUrl: brokerUrl(binding.brokerUrl) }) };
+    ...(binding.brokerUrl === undefined ? {} : { brokerUrl: brokerUrl(binding.brokerUrl) }),
+    ...(binding.boundAt === undefined ? {} : { boundAt: binding.boundAt }) };
+}
+
+export function validateBinding(binding) {
+  const valid = validateStoredBinding(binding);
+  const cwd = canonicalCwd(valid.cwd);
+  if (!cwd) throw new Error('cwd must be an existing absolute directory');
+  return { ...valid, cwd };
 }
 
 function remoteMode(binding, env) {
@@ -70,7 +89,7 @@ async function inspectRemote(binding, env, afterOffset, remoteInspector) {
       home: env.AGENT_CHAT_HOME, afterOffset, limit: 10, maxBytes: SCAN_BYTES });
   } catch { throw new Error('Broker notification inspection failed; verify the broker connection and session credentials'); }
   if (result?.peer?.sessionId !== binding.mailboxSessionId || result.peer.room !== binding.room
-    || canonicalCwd(result.peer.clientCwd) !== binding.cwd) return null;
+    || !sameBindingCwd(canonicalCwd(result.peer.clientCwd), binding.cwd)) return null;
   if (!Array.isArray(result.messages) || result.messages.length > 10
     || result.messages.some(message => typeof message?.id !== 'string' || !message.id
       || Buffer.byteLength(JSON.stringify(message.id)) > 130)
@@ -82,19 +101,22 @@ async function inspectRemote(binding, env, afterOffset, remoteInspector) {
 
 export function readConfig(file) {
   if (!path.isAbsolute(file)) throw new Error('AGENT_CHAT_NOTIFY_CONFIG must be an absolute path');
-  const config = readJson(file, CONFIG_BYTES);
-  if (config?.version !== 1 || !Array.isArray(config.bindings) || config.bindings.length > 100) {
+  const config = readJson(file, NOTIFICATION_LIMITS.configBytes);
+  if (config?.version !== 1 || !Array.isArray(config.bindings) || config.bindings.length > NOTIFICATION_LIMITS.bindings) {
     throw new Error('notification config requires version 1 and at most 100 bindings');
   }
-  return { version: 1, bindings: config.bindings.map(validateBinding) };
+  return { version: 1, bindings: config.bindings.map(validateStoredBinding) };
 }
 
 export function findBinding({ client, hostSessionId, cwd, env = process.env }) {
-  if (!env.AGENT_CHAT_NOTIFY_CONFIG || !CLIENTS.has(client) || !hostSessionId || !canonicalCwd(cwd)) return null;
+  if (!env.AGENT_CHAT_NOTIFY_CONFIG || !CLIENTS.has(client) || !hostSessionId) return null;
+  const currentCwd = canonicalCwd(cwd);
+  if (!currentCwd) return null;
   let config;
   try { config = readConfig(env.AGENT_CHAT_NOTIFY_CONFIG); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  const endpoint = env.AGENT_CHAT_BROKER_URL ? brokerUrl(env.AGENT_CHAT_BROKER_URL) : undefined;
   const matches = config.bindings.filter(binding => binding.client === client && binding.hostSessionId === hostSessionId
-    && binding.cwd === canonicalCwd(cwd));
+    && sameBindingCwd(binding.cwd, currentCwd) && binding.brokerUrl === endpoint);
   // Duplicate or conflicting bindings never fan out to several rooms.
   if (matches.length !== 1) return null;
   return matches[0];
@@ -150,7 +172,7 @@ export async function notifySession({ client, hostSessionId, cwd, env = process.
     if (peers.length !== 1) return { delivered: false, reason: 'no-peer' };
     peer = peers[0];
     // Local mailbox identities must run in the bound worktree.
-    if (canonicalCwd(peer.cwd) !== binding.cwd) return { delivered: false, reason: 'wrong-worktree' };
+    if (!sameBindingCwd(canonicalCwd(peer.cwd), binding.cwd)) return { delivered: false, reason: 'wrong-worktree' };
   }
   const key = crypto.createHash('sha256').update(JSON.stringify([client, hostSessionId, binding.cwd,
     room.id, binding.mailboxSessionId, channel, ...(remote ? [binding.brokerUrl] : [])])).digest('hex');
@@ -226,12 +248,13 @@ export async function autoBindCommand({ client, payload, env = process.env, mail
     const room = { id: binding.room, label: binding.room };
     mailbox.roomPath(room);
     const matches = mailbox.listPeers(room).filter(peer => peer.sessionId === binding.mailboxSessionId
-      && peer.name === metadata.name && canonicalCwd(peer.cwd) === binding.cwd);
+      && peer.name === metadata.name && sameBindingCwd(canonicalCwd(peer.cwd), binding.cwd));
     if (matches.length !== 1) return false;
   }
   const existing = findBinding({ ...identity, env });
   if (existing?.room === binding.room && existing.mailboxSessionId === binding.mailboxSessionId
-    && existing.brokerUrl === binding.brokerUrl) return true;
+    && existing.brokerUrl === binding.brokerUrl && existing.boundAt !== undefined
+    && existing.boundAt <= Date.now() && Date.now() - existing.boundAt < NOTIFICATION_LIMITS.refreshMs) return true;
   const { bindNotification } = await import('./bind.mjs');
   bindNotification({ configFile: env.AGENT_CHAT_NOTIFY_CONFIG, binding });
   return true;

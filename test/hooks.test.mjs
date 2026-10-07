@@ -12,7 +12,8 @@ import { notifySession, runCommandHook, readConfig } from '../hooks/notification
 import { AgentChatPlugin } from '../integrations/opencode/agent-chat.mjs';
 
 function fixture(t, client = 'codex') {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-hooks-'));
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-hooks-'));
+  const root = process.platform === 'win32' ? fs.realpathSync.native(temporary) : fs.realpathSync(temporary);
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const cwd = path.join(root, 'worktree');
   fs.mkdirSync(cwd);

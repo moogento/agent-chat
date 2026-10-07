@@ -20,6 +20,8 @@ function write(project, relative, data) {
 }
 const read = (project, relative) => fs.readFileSync(path.join(project, relative), 'utf8');
 const readJson = (project, relative) => JSON.parse(read(project, relative));
+const canonical = project => (process.platform === 'win32' ? fs.realpathSync.native : fs.realpathSync)(project);
+const crlf = text => text.replace(/\r?\n/g, '\r\n');
 
 function useLegacyOpenCodeWrapper(f) {
   const current = '.opencode/plugins/agent-chat.js';
@@ -46,7 +48,7 @@ test('Codex install and update preserve literal dollar patterns in runtime and t
     updateProject({ ...f, brokerTokenFile: replacementToken });
     const text = read(f.project, '.codex/config.toml');
     const server = parseToml(text).mcp_servers['agent-chat'];
-    const canonicalProject = fs.realpathSync(f.project);
+    const canonicalProject = canonical(f.project);
     assert.equal(server.cwd, canonicalProject);
     assert.deepEqual(server.args, [path.join(canonicalProject, '.agent-chat/runtime/agent-chat.mjs')]);
     assert.equal(server.env.AGENT_CHAT_BROKER_TOKEN_FILE, replacementToken);
@@ -55,6 +57,87 @@ test('Codex install and update preserve literal dollar patterns in runtime and t
     uninstallProject(f);
     assert.equal(read(f.project, '.codex/config.toml'), original);
   }
+});
+
+test('managed ignore blocks accept CRLF clones and converted files while preserving existing bytes', t => {
+  const block = '\n# >>> agent-chat local state >>>\n/.agent-chat/\n# <<< agent-chat local state <<<\n';
+  for (const state of ['fresh-clone', 'existing-receipt', 'crlf-receipt', 'new-block']) {
+    const f = fixture(t, state);
+    const prefix = '# user ignores\r\nnode_modules/\r\n';
+    const suffix = '# later ignores\r\n*.cache\r\n';
+    if (state === 'fresh-clone') write(f.project, '.gitignore', prefix + crlf(block) + suffix);
+    else write(f.project, '.gitignore', prefix);
+    installProject({ ...f, clients: ['codex'] });
+    if (state === 'existing-receipt' || state === 'crlf-receipt') {
+      write(f.project, '.gitignore', crlf(read(f.project, '.gitignore')) + suffix);
+      if (state === 'crlf-receipt') {
+        const receipt = inspectInstallation(f).receipt;
+        receipt.ignore.content = crlf(receipt.ignore.content);
+        write(f.project, '.agent-chat/install.json', receipt);
+      }
+    }
+    const before = read(f.project, '.gitignore');
+    assert.doesNotMatch(before, /(?<!\r)\n/, state);
+    assert.ok(before.startsWith(prefix));
+    assert.equal(updateProject(f).changes.length, 0, state);
+    assert.equal(read(f.project, '.gitignore'), before);
+    uninstallProject(f);
+    assert.equal(read(f.project, '.gitignore'), before, 'Retained privacy rules keep their original line endings.');
+    installProject({ ...f, clients: ['codex'] });
+    assert.equal(read(f.project, '.gitignore'), before, 'A retained CRLF block is adopted without duplication.');
+  }
+});
+
+test('Codex TOML handles CRLF conversion on update and uninstall with literal dollar paths', t => {
+  for (const pattern of ['$$', '$&']) {
+    for (const state of ['initial-crlf', 'converted-crlf', 'crlf-receipt']) {
+      const f = fixture(t, `project ${pattern} ${state}`);
+      const prefix = '# user settings $$ and $&\nmodel = "keep"\n';
+      const suffix = '# later settings $$ and $&\r\n[custom]\r\nvalue = "$&"\r\n';
+      write(f.project, '.codex/config.toml', state === 'initial-crlf' ? crlf(prefix) : prefix);
+      const tokenFile = path.join(f.project, `token ${pattern}`);
+      installProject({ ...f, clients: ['codex'], brokerUrl: 'http://broker:47321', brokerTokenFile: tokenFile, room: 'task' });
+      write(f.project, '.codex/config.toml', crlf(read(f.project, '.codex/config.toml')) + suffix);
+      if (state === 'crlf-receipt') {
+        const receipt = inspectInstallation(f).receipt;
+        receipt.entries.find(entry => entry.kind === 'toml-block').content = crlf(receipt.entries.find(entry => entry.kind === 'toml-block').content);
+        write(f.project, '.agent-chat/install.json', receipt);
+      }
+      const entry = inspectInstallation(f).receipt.entries.find(entry => entry.kind === 'toml-block');
+      assert.equal(inspectManagedEntry({ project: f.project, entry }).status, 'present');
+      const replacementToken = path.join(f.project, `replacement ${pattern}`);
+      updateProject({ ...f, brokerTokenFile: replacementToken });
+      const text = read(f.project, '.codex/config.toml');
+      assert.doesNotMatch(text, /(?<!\r)\n/);
+      assert.ok(text.startsWith(crlf(prefix)));
+      assert.ok(text.endsWith(suffix));
+      const server = parseToml(text).mcp_servers['agent-chat'];
+      assert.equal(server.cwd, canonical(f.project));
+      assert.equal(server.env.AGENT_CHAT_BROKER_TOKEN_FILE, replacementToken);
+      assert.equal(updateProject(f).changes.length, 0);
+      uninstallProject(f);
+      assert.equal(read(f.project, '.codex/config.toml'), crlf(prefix) + suffix);
+    }
+  }
+});
+
+test('Windows project drive casing and legacy receipt casing resolve to one installation', { skip: process.platform !== 'win32' }, t => {
+  const f = fixture(t, 'Project Mixed Case');
+  const expected = fs.realpathSync.native(f.project);
+  const lowerDrive = f.project.replace(/^([A-Za-z]):/, (_, drive) => `${drive.toLowerCase()}:`);
+  const upperDrive = f.project.replace(/^([A-Za-z]):/, (_, drive) => `${drive.toUpperCase()}:`);
+  assert.notEqual(lowerDrive, upperDrive);
+  installProject({ ...f, project: lowerDrive, clients: ['codex', 'claude'] });
+  assert.equal(inspectInstallation({ project: upperDrive }).project, expected);
+  assert.equal(updateProject({ ...f, project: upperDrive }).changes.length, 0);
+  const receipt = inspectInstallation(f).receipt;
+  receipt.project = lowerDrive;
+  write(f.project, '.agent-chat/install.json', receipt);
+  assert.equal(inspectInstallation({ project: upperDrive }).receipt.project, expected);
+  updateProject({ ...f, project: upperDrive });
+  assert.equal(readJson(f.project, '.agent-chat/install.json').project, expected);
+  assert.deepEqual(uninstallProject({ ...f, project: lowerDrive }).retainedClients, []);
+  assert.equal(inspectInstallation({ project: upperDrive }).exists, false);
 });
 
 test('OpenCode hooks install a discoverable JavaScript wrapper that loads the shared adapter', async t => {
@@ -128,7 +211,7 @@ test('broker install shares connection settings with hooks, preserves them on up
     assert.equal(env.AGENT_CHAT_ROOM, 'test-task');
     assert.equal(env.AGENT_CHAT_BROKER_URL, 'http://broker:47321');
     assert.equal(env.AGENT_CHAT_BROKER_TOKEN_FILE, brokerTokenFile);
-    assert.equal(env.AGENT_CHAT_BROKER_SESSION_DIR, path.join(fs.realpathSync(f.project), '.agent-chat/broker-sessions'));
+    assert.equal(env.AGENT_CHAT_BROKER_SESSION_DIR, path.join(canonical(f.project), '.agent-chat/broker-sessions'));
   }
   for (const file of ['.agent-chat/launchers/codex.mjs', '.agent-chat/launchers/claude.mjs', '.opencode/plugins/agent-chat.js']) {
     assert.match(read(f.project, file), /AGENT_CHAT_BROKER_URL/);
@@ -188,7 +271,7 @@ test('installs all clients, preserves unrelated settings and provides a self-con
   assert.ok(installed.backup); assert.ok(read(f.project, '.codex/config.toml').startsWith(toml));
   const codex = parseToml(read(f.project, '.codex/config.toml'));
   assert.equal(codex.model, 'test'); assert.equal(codex.mcp_servers['agent-chat'].command, process.execPath);
-  assert.equal(codex.mcp_servers['agent-chat'].cwd, fs.realpathSync(f.project));
+  assert.equal(codex.mcp_servers['agent-chat'].cwd, canonical(f.project));
   assert.equal(readJson(f.project, '.mcp.json').mcpServers.other.command, 'other');
   assert.equal(readJson(f.project, 'opencode.json').model, 'test/model');
   assert.deepEqual(readJson(f.project, '.claude/settings.local.json').permissions, { deny: ['Bash(rm *)'] });

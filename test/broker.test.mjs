@@ -165,10 +165,10 @@ test('capacity rejection is definite only for a fresh transport ID, not a potent
 async function proxy(t, f, extra = {}) {
   const child = spawn(process.execPath, [fileURLToPath(new URL('../agent-chat.mjs', import.meta.url))], { env: { ...process.env, AGENT_CHAT_BROKER_URL: f.broker.url, AGENT_CHAT_BROKER_TOKEN_FILE: f.tokenFile, AGENT_CHAT_ROOM: 'shared', AGENT_CHAT_BROKER_SESSION_DIR: f.creds, ...extra }, cwd: f.base, stdio: ['pipe', 'pipe', 'pipe'] });
   t.after(() => { if (child.exitCode === null) child.kill(); });
-  let buffer = ''; const waiting = new Map(); let stderr = '';
-  child.stderr.on('data', chunk => stderr += chunk); child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { buffer += chunk; let end; while ((end = buffer.indexOf('\n')) >= 0) { const response = JSON.parse(buffer.slice(0, end)); buffer = buffer.slice(end + 1); waiting.get(response.id)?.(response); waiting.delete(response.id); } });
+  let buffer = ''; const waiting = new Map(); const responses = []; let stderr = '';
+  child.stderr.on('data', chunk => stderr += chunk); child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { buffer += chunk; let end; while ((end = buffer.indexOf('\n')) >= 0) { const response = JSON.parse(buffer.slice(0, end)); responses.push(response); buffer = buffer.slice(end + 1); waiting.get(response.id)?.(response); waiting.delete(response.id); } });
   const send = rpc => new Promise((resolve, reject) => { const timer = setTimeout(() => reject(new Error(`Proxy timed out: ${stderr}`)), 5000); waiting.set(rpc.id, value => { clearTimeout(timer); resolve(value); }); child.stdin.write(JSON.stringify(rpc) + '\n'); });
-  return { child, send, stderr: () => stderr };
+  return { child, send, responses, stderr: () => stderr };
 }
 
 test('stdio adapter forwards independent MCP sessions and never prints credentials', async t => {
@@ -199,6 +199,123 @@ test('stdio adapter distinguishes definite capacity refusal from uncertain conne
   const uncertain = await p.send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'chat_who' } });
   assert.equal(uncertain.error.code, -32000); assert.match(uncertain.error.message, /may have completed/);
   p.child.stdin.end(); await once(p.child, 'exit');
+});
+
+function loseRpcResponses(t, broker, shouldDrop) {
+  const requests = [];
+  const intercept = (req, res) => {
+    if (!req.url.endsWith('/rpc')) return;
+    let body = ''; req.on('data', chunk => { body += chunk; });
+    req.on('end', () => { requests.push(JSON.parse(body)); });
+    const end = res.end;
+    res.end = function(data, ...args) {
+      const result = JSON.parse(String(data));
+      if (shouldDrop(result)) { res.socket.destroy(); return res; }
+      return end.call(this, data, ...args);
+    };
+  };
+  broker.server.prependListener('request', intercept);
+  t.after(() => broker.server.removeListener('request', intercept));
+  return requests;
+}
+
+test('stdio proxy recovers lost cached reads and sends with the same transport ID', async t => {
+  const f = await fixture(t); const sender = await f.make('sender');
+  const p = await proxy(t, f, { AGENT_CHAT_NAME: 'proxy' });
+  const who = await p.send({ jsonrpc: '2.0', id: 100001, method: 'tools/call', params: { name: 'chat_who' } });
+  await call(sender, 'chat_send', { to: 'proxy', text: 'recover cached read' });
+  const dropOnce = new Set([100002, 100004]);
+  const requests = loseRpcResponses(t, f.broker, result => dropOnce.delete(result.responses?.[0]?.id));
+  const read = await p.send({ jsonrpc: '2.0', id: 100002, method: 'tools/call', params: { name: 'chat_read' } });
+  assert.match(read.result.content[0].text, /recover cached read/);
+  const next = await p.send({ jsonrpc: '2.0', id: 100003, method: 'tools/call', params: { name: 'chat_read' } });
+  assert.match(next.result.content[0].text, /No new messages/);
+  const sent = await p.send({ jsonrpc: '2.0', id: 100004, method: 'tools/call', params: { name: 'chat_send', arguments: { to: 'sender', text: 'send exactly once' } } });
+  assert.match(sent.result.content[0].text, /Sent/);
+  const received = await call(sender, 'chat_read'); assert.equal(received.text.match(/send exactly once/g)?.length, 1);
+  for (const id of [100002, 100004]) {
+    const attempts = requests.filter(request => request.rpc.id === id);
+    assert.equal(attempts.length, 2); assert.deepEqual(attempts[0], attempts[1]);
+    assert.equal(p.responses.filter(response => response.id === id).length, 1);
+  }
+  assert.equal(dropOnce.size, 0);
+  const sessionId = who.result.structuredContent.agentChatIdentity.sessionId;
+  const cursor = JSON.parse(fs.readFileSync(path.join(f.home, 'rooms/shared/cursors', `${sessionId}.json`), 'utf8'));
+  assert.ok(cursor.offset > 0);
+  p.child.stdin.end(); await once(p.child, 'exit'); assert.equal(f.broker.stats().pendingBytes, 0);
+});
+
+test('stdio proxy preserves uncertainty after both cached response deliveries are lost', async t => {
+  const f = await fixture(t); const recipient = await f.make('recipient'); const p = await proxy(t, f, { AGENT_CHAT_NAME: 'proxy' });
+  await p.send({ jsonrpc: '2.0', id: 200001, method: 'tools/call', params: { name: 'chat_who' } });
+  const requests = loseRpcResponses(t, f.broker, result => result.responses?.[0]?.id === 200002);
+  const response = await p.send({ jsonrpc: '2.0', id: 200002, method: 'tools/call', params: { name: 'chat_send', arguments: { to: 'recipient', text: 'uncertain but only once' } } });
+  assert.equal(response.error.code, -32000); assert.match(response.error.message, /may have completed/);
+  assert.equal(p.responses.filter(value => value.id === 200002).length, 1);
+  const attempts = requests.filter(request => request.rpc.id === 200002);
+  assert.equal(attempts.length, 2); assert.deepEqual(attempts[0], attempts[1]);
+  assert.equal((await call(recipient, 'chat_read')).text.match(/uncertain but only once/g)?.length, 1);
+  p.child.stdin.end(); await once(p.child, 'exit'); assert.equal(f.broker.stats().pendingBytes, 0);
+});
+
+test('RPC retry keeps an ambiguous earlier execution uncertain when recovery is refused', async t => {
+  const f = await fixture(t); const sender = await f.make('sender');
+  const fetch = globalThis.fetch; const attempts = [];
+  globalThis.fetch = async (url, options) => {
+    const value = JSON.parse(options.body); attempts.push(value);
+    if (attempts.length === 1) {
+      const completed = await fetch(url, options); await completed.text();
+      throw new TypeError('lost first response after execution');
+    }
+    return new Response(JSON.stringify({ execution: 'not-started', requestId: value.requestId }), { status: 429 });
+  };
+  try {
+    await assert.rejects(remoteRpc(sender, { jsonrpc: '2.0', id: 300001, method: 'tools/call', params: { name: 'chat_send', arguments: { text: 'completed before refused recovery' } } }),
+      error => error.status === 429 && error.rejectedBeforeExecution === true && error.definitelyNotExecuted === false);
+    assert.equal(attempts.length, 2); assert.deepEqual(attempts[0], attempts[1]);
+  } finally { globalThis.fetch = fetch; }
+  const messages = fs.readFileSync(path.join(f.home, 'rooms/shared/messages.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(messages.filter(message => message.text === 'completed before refused recovery').length, 1);
+});
+
+test('RPC transport retries stop on cancellation and never retry an HTTP rejection', async t => {
+  const f = await fixture(t); const sender = await f.make('sender');
+  const fetch = globalThis.fetch; const controller = new AbortController(); let attempts = 0;
+  globalThis.fetch = async () => { attempts++; controller.abort(); throw new TypeError('cancelled transport'); };
+  try {
+    await assert.rejects(remoteRpc(sender, { jsonrpc: '2.0', id: 400001, method: 'ping' }, { signal: controller.signal }), /cancelled transport/);
+    assert.equal(attempts, 1);
+    attempts = 0;
+    globalThis.fetch = async () => { attempts++; return new Response('{}', { status: 403 }); };
+    await assert.rejects(remoteRpc(sender, { jsonrpc: '2.0', id: 400002, method: 'ping' }), error => error.status === 403);
+    assert.equal(attempts, 1);
+    attempts = 0;
+    globalThis.fetch = async () => { attempts++; return new Response(new ReadableStream({ start(stream) { stream.error(new TypeError('refusal body disconnected')); } }), { status: 403 }); };
+    await assert.rejects(remoteRpc(sender, { jsonrpc: '2.0', id: 400003, method: 'ping' }), error => error.status === 403);
+    assert.equal(attempts, 1);
+  } finally { globalThis.fetch = fetch; }
+});
+
+test('a timed-out response can recover the same cached result without changing RPC payload or reused-ID rules', async t => {
+  const f = await fixture(t); const sender = await f.make('sender');
+  const fetch = globalThis.fetch; const attempts = []; const requestId = crypto.randomUUID();
+  const rpc = { jsonrpc: '2.0', id: 500001, method: 'tools/call', params: { name: 'chat_send', arguments: { text: 'original payload' } } };
+  globalThis.fetch = async (url, options) => {
+    attempts.push(JSON.parse(options.body));
+    const response = await fetch(url, options);
+    if (attempts.length === 1) { await response.text(); rpc.params.arguments.text = 'mutated payload'; throw new DOMException('response timed out', 'TimeoutError'); }
+    return response;
+  };
+  let recovered;
+  try {
+    recovered = await remoteRpc(sender, rpc, { requestId });
+    assert.equal(attempts.length, 2); assert.deepEqual(attempts[0], attempts[1]);
+  } finally { globalThis.fetch = fetch; }
+  assert.match(recovered.responses[0].result.content[0].text, /Sent/);
+  await assert.rejects(remoteRpc(sender, rpc, { requestId }), error => error.status === 409 && error.definitelyNotExecuted === false);
+  await acknowledgeRemoteResponse(sender, recovered.receipt);
+  const messages = fs.readFileSync(path.join(f.home, 'rooms/shared/messages.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(messages.map(message => message.text), ['original payload']);
 });
 
 test('explicit private session file resumes across adapter restart and rejects sharing', async t => {

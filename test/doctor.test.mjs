@@ -7,9 +7,10 @@ import crypto from 'node:crypto';
 import { doctorProject } from '../lib/doctor.mjs';
 import { installProject, inspectInstallation, installationPaths } from '../lib/install.mjs';
 import { bindNotification } from '../hooks/bind.mjs';
+import { NOTIFICATION_LIMITS } from '../hooks/notifications.mjs';
 
 function fixture(t, options = {}) {
-  const project = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-doctor-')));
+  const project = (process.platform === 'win32' ? fs.realpathSync.native : fs.realpathSync)(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-doctor-')));
   t.after(() => fs.rmSync(project, { recursive: true, force: true }));
   if (options.install !== false) installProject({ project, clients: options.clients || ['codex', 'claude', 'opencode'], hooks: Boolean(options.hooks) });
   return { project, paths: installationPaths(project) };
@@ -191,6 +192,48 @@ test('doctor reports binding counts without exposing session IDs or room content
   const result = await doctorProject({ project });
   assert.equal(check(result, 'codex.notifications')[0].status, 'ok');
   assert.doesNotMatch(JSON.stringify(result), /private-host-session|private-mailbox-session|private-room/);
+  assert.deepEqual(snapshot(project), before);
+});
+
+test('doctor warns near notification history count and byte limits without modifying records', async t => {
+  const { project, paths } = fixture(t, { clients: ['codex'], hooks: true });
+  const binding = index => ({ client: 'codex', hostSessionId: `private-host-${index}`, cwd: project,
+    room: 'private-room', mailboxSessionId: `private-mailbox-${index}`, boundAt: Date.now() });
+  for (const count of [NOTIFICATION_LIMITS.warningBindings - 1, NOTIFICATION_LIMITS.warningBindings, NOTIFICATION_LIMITS.bindings]) {
+    fs.writeFileSync(paths.notificationConfig, JSON.stringify({ version: 1, bindings: Array.from({ length: count }, (_, index) => binding(index)) }));
+    const before = snapshot(project);
+    const result = await doctorProject({ project });
+    const near = count >= NOTIFICATION_LIMITS.warningBindings;
+    assert.equal(result.ok, true);
+    assert.equal(check(result, 'codex.notifications')[0].status, near ? 'warning' : 'ok');
+    assert.equal(check(result, 'codex.notification-history').length, near ? 1 : 0);
+    if (near) assert.match(check(result, 'codex.notification-history')[0].message, /evict older bindings.*Rebind/);
+    assert.doesNotMatch(JSON.stringify(result), /private-host-|private-mailbox-|private-room/);
+    assert.deepEqual(snapshot(project), before);
+  }
+  const config = JSON.stringify({ version: 1, bindings: [binding(0)] });
+  fs.writeFileSync(paths.notificationConfig, config + ' '.repeat(NOTIFICATION_LIMITS.warningBytes - Buffer.byteLength(config)));
+  const before = snapshot(project);
+  const result = await doctorProject({ project });
+  assert.equal(result.ok, true);
+  assert.equal(check(result, 'codex.notifications')[0].status, 'warning');
+  assert.equal(check(result, 'codex.notification-history')[0].status, 'warning');
+  assert.deepEqual(snapshot(project), before);
+});
+
+test('doctor accepts alternate Windows drive casing and a legacy receipt path', { skip: process.platform !== 'win32' }, async t => {
+  const { project, paths } = fixture(t, { clients: ['codex'] });
+  const lowerDrive = project.replace(/^([A-Za-z]):/, (_, drive) => `${drive.toLowerCase()}:`);
+  const upperDrive = project.replace(/^([A-Za-z]):/, (_, drive) => `${drive.toUpperCase()}:`);
+  const receipt = JSON.parse(fs.readFileSync(paths.receipt, 'utf8'));
+  receipt.project = lowerDrive;
+  fs.writeFileSync(paths.receipt, JSON.stringify(receipt));
+  const before = snapshot(project);
+  for (const variant of [lowerDrive, upperDrive]) {
+    const result = await doctorProject({ project: variant });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.project, fs.realpathSync.native(project));
+  }
   assert.deepEqual(snapshot(project), before);
 });
 

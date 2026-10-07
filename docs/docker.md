@@ -53,6 +53,8 @@ Default MCP startup also selects the proxy when `AGENT_CHAT_BROKER_URL` is set. 
 
 Resuming an explicit session file while its adapter is still active fails with a conflict. After an abrupt adapter crash, wait for its lease to expire (30 seconds by default) before retrying. A normal shutdown releases the lease. Without an explicit session file, restarting an adapter creates a fresh session and a bounded recent inbox tail. The broker removes ephemeral session descriptors on close or expiry. A clean proxy shutdown also removes its ephemeral local credentials; a hard crash can leave local credential files for manual cleanup.
 
+If a response is lost during a brief network interruption, the adapter retries once with the same request ID. The broker can return the saved response without repeating a send or consuming an unread message twice. If recovery also fails, check whether the operation completed before retrying manually; reconnect the adapter if reads remain blocked. A capacity rejection explicitly marked as not executed is safe to retry after pending requests finish.
+
 Explicit session files also have a local `.lock`. Linux checks process start time and PID namespace to distinguish a replaced container from its previous adapter. On other platforms, PID reuse can require inspecting and manually removing a stale lock, only after confirming the previous adapter has stopped.
 
 The example's private Docker network and loopback host port use HTTP. This is not a public network deployment recipe. Use a trusted transport with appropriate TLS and access controls when extending beyond this local setup.

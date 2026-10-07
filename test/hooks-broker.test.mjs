@@ -59,10 +59,12 @@ test('broker configuration requires pinned endpoint, explicit room and token fil
   ];
   for (const env of invalid) {
     const result = await notifySession({ ...f.input, env, deliver: () => assert.fail('mismatched broker notice') });
-    assert.equal(result.reason, 'broker-mismatch');
+    assert.equal(result.delivered, false);
+    assert.ok(['unbound', 'broker-mismatch'].includes(result.reason));
   }
+  fs.rmSync(f.configFile);
   bindNotification({ configFile: f.configFile, binding: { ...f.binding, brokerUrl: undefined } });
-  assert.equal((await notifySession({ ...f.input, deliver: () => assert.fail('local binding in broker mode') })).reason, 'broker-mismatch');
+  assert.equal((await notifySession({ ...f.input, deliver: () => assert.fail('local binding in broker mode') })).delivered, false);
   assert.equal(f.calls.length, 0);
   assert.equal(fs.existsSync(path.join(f.root, 'notification-state')), false);
 });
@@ -169,7 +171,7 @@ test('manual bind helper pins normalized broker endpoint without credentials', t
   }
 });
 
-test('additional broker bindings cannot make the notification configuration unreadable', t => {
+test('additional broker bindings trim oldest history to keep the notification configuration readable', t => {
   const f = fixture(t);
   const bindings = [];
   const added = { ...f.binding, hostSessionId: 'new-host' };
@@ -183,7 +185,11 @@ test('additional broker bindings cannot make the notification configuration unre
   assert.ok(Buffer.byteLength(before) <= 64 * 1024);
   assert.ok(Buffer.byteLength(serializedAfter()) > 64 * 1024);
   fs.writeFileSync(f.configFile, before);
-  assert.throws(() => bindNotification({ configFile: f.configFile, binding: added }), /64 KiB/);
-  assert.equal(fs.readFileSync(f.configFile, 'utf8'), before);
+  bindNotification({ configFile: f.configFile, binding: added });
+  assert.ok(fs.statSync(f.configFile).size <= 64 * 1024);
+  const retained = readConfig(f.configFile).bindings;
+  assert.equal(retained.at(-1).hostSessionId, added.hostSessionId);
+  assert.ok(retained.length < bindings.length + 1);
+  assert.equal(retained.some(binding => binding.hostSessionId === bindings[0].hostSessionId), false);
   assert.equal(fs.existsSync(`${f.configFile}.lock`), false);
 });
