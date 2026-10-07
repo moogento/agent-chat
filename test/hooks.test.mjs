@@ -335,7 +335,7 @@ test('OpenCode supported title events sync only exact bound main sessions', asyn
   const plugin = await AgentChatPlugin({ directory: f.cwd, client: {} }, { env: f.env, mailbox: f.mailbox });
   const event = (id, title, extra = {}) => ({ event: { type: 'session.updated', properties: { info: { id, title, ...extra } } } });
   await plugin.event(event('unbound-host', 'must-not-rename'));
-  await plugin.event(event(f.binding.hostSessionId, 'child-name', { parentID: 'parent' }));
+  await plugin.event(event('child-session', 'child-name', { parentID: 'parent' }));
   await plugin.event(event(f.binding.hostSessionId, 'bad\nname'));
   assert.equal(f.mailbox.listPeers(f.room).find(item => item.sessionId === f.peer.sessionId).name, f.peer.name);
   await plugin.event(event(f.binding.hostSessionId, 'agentcommerce-cx'));
@@ -344,6 +344,17 @@ test('OpenCode supported title events sync only exact bound main sessions', asyn
   assert.equal(readConfig(f.configFile).bindings[0].sessionTitle, 'agentcommerce-cx');
   await plugin.event(event(f.binding.hostSessionId, 'agentcommerce-next'));
   assert.equal(f.mailbox.listPeers(f.room).find(item => item.sessionId === f.peer.sessionId).name, 'agentcommerce-next');
+});
+
+test('OpenCode child session tool and idle events do not register invitable presence', async t => {
+  const f = fixture(t, 'opencode');
+  const plugin = await AgentChatPlugin({ directory: f.cwd, client: {} }, { env: f.env, mailbox: f.mailbox });
+  await plugin.event({ event: { type: 'session.created', properties: { info: { id: 'child-session', parentID: 'parent-session', title: 'child' } } } });
+  const output = { output: 'original' };
+  await plugin['tool.execute.after']({ sessionID: 'child-session' }, output);
+  await plugin.event({ event: { type: 'session.idle', properties: { sessionID: 'child-session' } } });
+  assert.equal(output.output, 'original');
+  assert.equal(createPresence({ home: f.home }).list(f.mailbox).some(item => item.name === 'child'), false);
 });
 
 test('OpenCode title seen before binding is applied after a later tool event', async t => {

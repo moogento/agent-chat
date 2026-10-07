@@ -107,3 +107,18 @@ test('ambiguous host sessions are not linked to the wrong MCP identity', async t
   assert.equal(await receiver.callTool('chat_invitations'), 'No pending invitations.');
   assert.equal(presence.linkedHostIds(receiver.state.identity.room, receiver.state.identity.sessionId).length, 0);
 });
+
+test('a stale linked host prevents a newer host invitation being claimed by another session', async t => {
+  const { mailbox, presence } = fixture(t);
+  presence.registerHost({ client: 'codex', hostSessionId: 'older', cwd: process.cwd() });
+  presence.linkHost({ client: 'codex', hostSessionId: 'older', sessionId: 'former-session', room: mailbox.resolveRoom('old'), name: 'former' });
+  const newer = presence.registerHost({ client: 'codex', hostSessionId: 'newer', cwd: process.cwd() });
+  const sender = createServer({ mailbox, sessionId: 'sender-stale', roomSpec: 'review' });
+  const receiver = createServer({ mailbox, sessionId: 'receiver-stale', roomSpec: 'other' });
+  receiver.state.client = 'codex-mcp-client';
+  t.after(() => { sender.stop(); receiver.stop(); });
+  await sender.callTool('chat_join', { name: 'sender' });
+  await sender.callTool('chat_invite', { to_id: newer.id });
+  assert.equal(await receiver.callTool('chat_invitations'), 'No pending invitations.');
+  assert.equal(presence.linkedHostIds(receiver.state.identity.room, receiver.state.identity.sessionId).length, 0);
+});

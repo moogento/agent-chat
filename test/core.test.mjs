@@ -380,6 +380,26 @@ test('stopping after a host title rename removes the current peer record', async
   assert.equal(mailbox.listPeers(room).length, 0);
 });
 
+test('a departed recipient produces a delivery warning even when its old handle resolves', async t => {
+  const { mailbox, room } = fixture(t);
+  const departed = mailbox.claimIdentity(room, 'reviewer', 'codex', 'departed-session');
+  mailbox.releaseIdentity(departed);
+  const { server } = serverFor(t, mailbox, { roomSpec: room.id });
+  const receipt = await server.callTool('chat_send', { to: 'reviewer', text: 'Please review' });
+  assert.match(receipt, /not active/);
+  assert.match(receipt, /new session using that handle will not receive/);
+});
+
+test('chat_join refreshes the current handle after a hook title rename', async t => {
+  const { mailbox, room } = fixture(t);
+  const { server } = serverFor(t, mailbox, { roomSpec: room.id, nameSpec: 'claude' });
+  server.state.client = 'claude-mcp-client';
+  await server.callTool('chat_who');
+  mailbox.syncSessionTitle({ room, sessionId: server.state.identity.sessionId, title: 'renamed-title', client: server.state.client, cwd: server.state.identity.cwd });
+  assert.match(await server.callTool('chat_join', {}), /You are "renamed-title"/);
+  assert.equal(server.state.identity.name, 'renamed-title');
+});
+
 test('cancelled pending read does not consume messages', async (t) => {
   const { mailbox, room } = fixture(t); const { server, responses } = serverFor(t, mailbox);
   await server.callTool('chat_join', { name: 'reader', room: room.id }); mailbox.claimIdentity(room, 'peer');

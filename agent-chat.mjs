@@ -56,7 +56,7 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
     { name: 'chat_invitations', description: 'Read invitations addressed to your session.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
     { name: 'chat_accept_invite', description: 'Accept an invitation and join its room. Broker sessions must reconnect to the invited room.', inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'], additionalProperties: false } },
   ];
-  function ensureIdentity() {
+  function refreshIdentity() {
     if (state.identity && mailbox.getIdentity) {
       const current = mailbox.getIdentity(state.identity);
       if (current) {
@@ -64,6 +64,10 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
         else state.identity = current;
       }
     }
+    return state.identity;
+  }
+  function ensureIdentity() {
+    refreshIdentity();
     if (!state.identity) state.identity = mailbox.claimIdentity(mailbox.resolveRoom(roomSpec), safeName(nameSpec || defaultName(state.client)), state.client, sessionId, { nameSource: nameSpec ? 'configured' : 'default' });
     mailbox.touchPeer(state.identity);
     return state.identity;
@@ -90,7 +94,7 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
     if (name === 'chat_status' && !Object.keys(args).length) throw protocolError('Pass mine, room_summary or room_status');
   }
   function join(args) {
-    const prev = state.identity && mailbox.getIdentity ? mailbox.getIdentity(state.identity) || state.identity : state.identity;
+    const prev = refreshIdentity();
     const room = args.room !== undefined ? mailbox.resolveRoom(args.room) : prev?.room || mailbox.resolveRoom(roomSpec);
     const base = args.name !== undefined ? safeName(args.name) : prev?.name || safeName(nameSpec || defaultName(state.client));
     if (prev && prev.room.id === room.id && base === prev.name) {
@@ -119,8 +123,10 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
         const to = requested === 'all' ? 'all' : target?.name || safeName(requested);
         const msg = mailbox.appendMessage(me.room, me.name, to, args.text, me.sessionId, target?.sessionId);
         const unknown = requested !== 'all' && !target ? `\nNo known peer named "${requested}". Confirm its handle or session ID with chat_who.` : '';
+        const inactive = target && !mailbox.listPeers(me.room).some(peer => peer.sessionId === target.sessionId && (mailbox.isPeerAlive ? mailbox.isPeerAlive(peer) : pidAlive(peer.pid)))
+          ? `\nRecipient "${to}" is not active. A new session using that handle will not receive this directed message.` : '';
         const renamed = target?.alias ? `\nResolved remembered name to current handle "${target.name}".` : '';
-        return `Sent ${msg.id} to ${to}.${unknown}${renamed}`;
+        return `Sent ${msg.id} to ${to}.${unknown}${inactive}${renamed}`;
       }
       case 'chat_read': {
         if (signal?.aborted) return 'Read stopped: request cancelled.';

@@ -7,6 +7,7 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
   const mailbox = options.mailbox;
   const remoteInspector = options.remoteInspector;
   const titles = new Map();
+  const childSessions = new Set();
   const syncTitle = sessionID => {
     const title = titles.get(sessionID);
     return title ? syncBoundSessionTitle({ client: 'opencode', hostSessionId: sessionID, cwd: directory,
@@ -21,7 +22,7 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
   };
   return {
     'tool.execute.after': async (input, output) => {
-      if (typeof input?.sessionID !== 'string' || typeof output?.output !== 'string') return;
+      if (typeof input?.sessionID !== 'string' || childSessions.has(input.sessionID) || typeof output?.output !== 'string') return;
       await safely(() => syncTitle(input.sessionID));
       await safely(() => notifyHostInvitations({ client: 'opencode', hostSessionId: input.sessionID,
         cwd: directory, env, mailbox, deliver: async notice => { output.output += `\n\n[${notice}]`; } }));
@@ -32,8 +33,17 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
       // Keep a bounded cache so a title seen before manual binding can sync on the next tool.
       if (['session.created', 'session.updated'].includes(event?.type)) {
         const info = event.properties?.info;
+        if (typeof info?.id !== 'string' || !info.id || info.id.length > 256) return;
+        if (info.parentID) {
+          titles.delete(info.id);
+          childSessions.delete(info.id);
+          childSessions.add(info.id);
+          if (childSessions.size > 100) childSessions.delete(childSessions.values().next().value);
+          return;
+        }
+        if (childSessions.has(info.id)) return;
         const title = supportedSessionTitle(info?.title);
-        if (typeof info?.id !== 'string' || !info.id || info.id.length > 256 || !title || info.parentID) return;
+        if (!title) return;
         titles.delete(info.id);
         titles.set(info.id, { sessionTitle: title, titleSource: `opencode:${event.type}` });
         if (titles.size > 100) titles.delete(titles.keys().next().value);
@@ -42,7 +52,7 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
           env, mailbox });
         return;
       }
-      if (event?.type !== 'session.idle' || typeof event.properties?.sessionID !== 'string') return;
+      if (event?.type !== 'session.idle' || typeof event.properties?.sessionID !== 'string' || childSessions.has(event.properties.sessionID)) return;
       if (env.AGENT_CHAT_NOTIFY_DEBUG === '1') console.error(`agent-chat hook identity: ${JSON.stringify({ client: 'opencode', hostSessionId: event.properties.sessionID, cwd: directory })}`);
       const deliver = async notice => {
         if (typeof client?.tui?.showToast !== 'function') throw new Error('OpenCode TUI toast API unavailable');
