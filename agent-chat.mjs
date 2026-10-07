@@ -191,8 +191,14 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
         const family = client => String(client || '').toLowerCase().includes('claude') ? 'claude'
           : String(client || '').toLowerCase().includes('codex') ? 'codex'
             : String(client || '').toLowerCase().includes('opencode') ? 'opencode' : String(client || '').toLowerCase();
-        const hosts = sessions.filter(item => item.id.startsWith('host-') && !item.roomId);
-        const pendingPeers = sessions.filter(item => item.id.startsWith('peer-') && hosts.some(host => host.cwd === item.cwd && family(host.client) === family(item.client)));
+        const canonical = cwd => { try { return fs.realpathSync.native(cwd); } catch { return null; } };
+        const hosts = sessions.filter(item => item.id.startsWith('host-') && !item.roomId)
+          .map(item => ({ cwd: canonical(item.cwd), family: family(item.client) }));
+        const pendingPeers = sessions.filter(item => {
+          if (!item.id.startsWith('peer-')) return false;
+          const cwd = canonical(item.cwd);
+          return cwd !== null && hosts.some(host => host.cwd === cwd && host.family === family(item.client));
+        });
         const pendingIds = new Set(pendingPeers.map(item => item.id));
         const lines = sessions.filter(item => !pendingIds.has(item.id)).map(item => `- ${item.name} (${item.client || 'unknown'}) [${item.id}] in ${item.room || '(host not linked)'}${item.repo ? `, ${item.room ? 'repo' : 'provisional repo'}: ${item.repo}` : ''}${item.title && item.title !== item.name ? `, title: ${item.title}` : ''}${formatProfile(item)}`);
         if (pendingPeers.length) lines.push(`Unlinked MCP connections (exact host unknown; call chat_who in each session to link): ${pendingPeers.map(item => `${item.name} [${item.id}] in ${item.room}`).join(', ')}`);

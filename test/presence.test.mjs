@@ -72,6 +72,19 @@ test('same-repo unlinked MCP peers are grouped without guessing host identity', 
   assert.equal(presence.linkedHostIds(first.state.identity.room, first.state.identity.sessionId).length, 0);
 });
 
+test('roster groups a host launched through a symlink with its canonical peer directory', async t => {
+  const { home, mailbox, presence } = fixture(t);
+  const alias = path.join(home, 'cwd-alias');
+  try { fs.symlinkSync(process.cwd(), alias, 'dir'); }
+  catch (error) { if (process.platform === 'win32' && error.code === 'EPERM') { t.skip('symlink privilege unavailable'); return; } throw error; }
+  presence.registerHost({ client: 'codex', hostSessionId: 'alias-host', cwd: alias });
+  const server = createServer({ mailbox, sessionId: 'alias-peer' });
+  t.after(() => server.stop());
+  server.state.client = 'codex';
+  await server.callTool('chat_who');
+  assert.match(await server.callTool('chat_presence'), /Unlinked MCP connections/);
+});
+
 test('joined sessions can invite across rooms and accept explicitly', async t => {
   const { mailbox } = fixture(t);
   const alice = createServer({ mailbox, sessionId: 'alice-session', roomSpec: 'alpha' });

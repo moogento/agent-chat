@@ -39,7 +39,7 @@ function readJson(file, maxBytes) {
   }
 }
 
-function canonicalCwd(cwd) {
+export function canonicalCwd(cwd) {
   if (typeof cwd !== 'string' || !path.isAbsolute(cwd)) return null;
   try { return fs.statSync(cwd).isDirectory() ? (['win32', 'darwin'].includes(process.platform) ? fs.realpathSync.native(cwd) : fs.realpathSync(cwd)) : null; } catch { return null; }
 }
@@ -418,7 +418,7 @@ export async function runCommandHook({ client, payload, env = process.env, mailb
     catch (error) { if (env.AGENT_CHAT_NOTIFY_DEBUG === '1') console.error(`agent-chat title hook: ${error.message}`); }
   }
   const startupHint = payload.hook_event_name === 'SessionStart' && env.AGENT_CHAT_NOTIFY_AUTO_BIND === '1'
-    && ['startup', 'resume', undefined].includes(payload.source)
+    && ['startup', 'resume', 'clear', undefined].includes(payload.source)
     ? `${CHAT_LABEL}: Call chat_who once to link your joined MCP peer to this host session. If you can see a host title, match it with chat_join(name: ...); do not guess a hidden title.` : '';
   const deliver = async notice => {
     await write(JSON.stringify({ hookSpecificOutput: { hookEventName: payload.hook_event_name,

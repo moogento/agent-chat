@@ -3,7 +3,7 @@ import path from 'node:path';
 import { createMailbox } from '../../lib/mailbox.mjs';
 import { createPresence } from '../../lib/presence.mjs';
 import { bindNotification } from '../../hooks/bind.mjs';
-import { findBinding, notifySession, supportedSessionTitle, syncBoundSessionTitle, registerHostPresence, notifyHostInvitations } from '../../hooks/notifications.mjs';
+import { canonicalCwd, findBinding, notifySession, supportedSessionTitle, syncBoundSessionTitle, registerHostPresence, notifyHostInvitations } from '../../hooks/notifications.mjs';
 import { CHAT_LABEL } from '../../lib/presentation.mjs';
 
 /** OpenCode local plugin. No session.prompt, prompt_async, or peer replies. */
@@ -22,21 +22,26 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
     cwd: directory, env, mailbox, remoteInspector, deliver });
   const linkIdentityTool = (input, output) => {
     if (!env.AGENT_CHAT_NOTIFY_CONFIG || env.AGENT_CHAT_BROKER_URL
-      || !['agent-chat_chat_who', 'agent-chat_chat_join'].includes(input.tool)) return;
+      || !['agent-chat_chat_who', 'agent-chat_chat_join', 'agent-chat_chat_accept_invite'].includes(input.tool)) return;
     const response = output.output;
-    if (typeof response !== 'string' || !response.startsWith('You are "')) return;
-    const peerName = response.match(/^You are "([A-Za-z0-9._-]+)" in room /)?.[1];
-    const sessionId = response.match(/^Session: ([A-Za-z0-9._-]+)$/m)?.[1];
-    const roomId = response.match(/^Room id: ([A-Za-z0-9._-]+)$/m)?.[1];
+    if (typeof response !== 'string') return;
+    const identityText = response.startsWith('You are "') ? response
+      : /^Accepted invitation [a-f0-9-]{36}\.\nYou are "/.test(response) ? response.slice(response.indexOf('\n') + 1) : null;
+    if (!identityText) return;
+    const peerName = identityText.match(/^You are "([A-Za-z0-9._-]+)" in room /)?.[1];
+    const sessionId = identityText.match(/^Session: ([A-Za-z0-9._-]+)$/m)?.[1];
+    const roomId = identityText.match(/^Room id: ([A-Za-z0-9._-]+)$/m)?.[1];
     if (!peerName || !sessionId || !roomId) return;
     const store = mailbox || createMailbox({ home: env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat'), cwd: directory });
     const room = { id: roomId, label: roomId };
-    const peers = store.listPeers(room).filter(peer => peer.sessionId === sessionId && peer.name === peerName && peer.cwd === directory
+    const currentCwd = canonicalCwd(directory);
+    if (!currentCwd) return;
+    const peers = store.listPeers(room).filter(peer => peer.sessionId === sessionId && peer.name === peerName && canonicalCwd(peer.cwd) === currentCwd
       && peer.client.toLowerCase().includes('opencode') && store.isPeerAlive(peer));
     if (peers.length !== 1) return;
     const presence = createPresence({ home: store.home });
     const host = presence.getHost({ client: 'opencode', hostSessionId: input.sessionID });
-    if (!host || host.cwd !== directory) return;
+    if (!host || canonicalCwd(host.cwd) !== currentCwd) return;
     const binding = findBinding({ client: 'opencode', hostSessionId: input.sessionID, cwd: directory, env });
     if (binding?.room !== roomId || binding.mailboxSessionId !== sessionId) {
       bindNotification({ configFile: env.AGENT_CHAT_NOTIFY_CONFIG, binding: { client: 'opencode', hostSessionId: input.sessionID,
