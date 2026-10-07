@@ -122,7 +122,7 @@ test('bound title sync validates room, session, client and cwd while preserving 
   assert.equal(mailbox.syncSessionTitle({ room, sessionId: peer.sessionId, title: 'new', client: peer.client, cwd: path.join(peer.cwd, 'other') }), null);
   assert.equal(mailbox.syncSessionTitle({ room, sessionId: 'other-session', title: 'new', client: peer.client, cwd: peer.cwd }), null);
   const renamed = mailbox.syncSessionTitle({ room, sessionId: peer.sessionId, title: 'New title', client: peer.client, cwd: peer.cwd, titleSource: 'opencode:session.updated' });
-  assert.equal(renamed.name, 'New_title');
+  assert.equal(renamed.name, 'New-title');
   assert.equal(renamed.pid, peer.pid);
   assert.equal(renamed.titleSource, 'opencode:session.updated');
   assert.equal(mailbox.resolveRecipient(room, 'old').sessionId, peer.sessionId);
@@ -166,4 +166,74 @@ test('identity and handle storage reject directory symlinks', t => {
     fs.rmSync(original);
     fs.renameSync(moved, original);
   }
+});
+
+test('tidy prunes released identity scans but retains handle tombstones and active aliases', t => {
+  const { mailbox, room } = fixture(t);
+  const active = mailbox.claimIdentity(room, 'active', 'codex', 'active-session');
+  const released = mailbox.claimIdentity(room, 'reused', 'codex', 'released-session');
+  const alias = mailbox.claimIdentity(room, 'old-name', 'codex', 'alias-session');
+  const renamed = mailbox.claimIdentity(room, 'new-name', 'codex', alias.sessionId);
+  mailbox.releaseIdentity(released);
+  mailbox.releaseIdentity(renamed);
+  const directory = mailbox.roomPath(room);
+  const old = new Date(Date.now() - IDENTITY_LIMITS.aliasTtlMs - 1000);
+  for (const session of [active.sessionId, released.sessionId, renamed.sessionId]) {
+    const file = path.join(directory, 'identities', `${session}.json`);
+    if (session !== active.sessionId) {
+      const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+      fs.writeFileSync(file, JSON.stringify({ ...record, releasedAt: old.getTime() }));
+    }
+    fs.utimesSync(file, old, old);
+  }
+  mailbox.tidyRooms({ force: true });
+  assert.equal(fs.existsSync(path.join(directory, 'identities', `${released.sessionId}.json`)), false);
+  assert.equal(fs.existsSync(path.join(directory, 'identities', `${active.sessionId}.json`)), true);
+  assert.equal(fs.existsSync(path.join(directory, 'identities', `${renamed.sessionId}.json`)), true);
+  assert.equal(fs.existsSync(path.join(directory, 'handles', 'reused.json')), true);
+  assert.equal(mailbox.resolveRecipient(room, 'reused'), null);
+  const newcomer = mailbox.claimIdentity(room, 'reused', 'claude', 'new-session');
+  const record = JSON.parse(fs.readFileSync(path.join(directory, 'identities', `${newcomer.sessionId}.json`), 'utf8'));
+  assert.equal(record.firstClaim, false);
+});
+
+test('a long-lived session retains its routing record for a full day after release', t => {
+  const { mailbox, room } = fixture(t);
+  const peer = mailbox.claimIdentity(room, 'long-running', 'codex', 'long-session');
+  const file = path.join(mailbox.roomPath(room), 'identities', `${peer.sessionId}.json`);
+  const old = new Date(Date.now() - IDENTITY_LIMITS.aliasTtlMs - 1000);
+  fs.utimesSync(file, old, old);
+  mailbox.releaseIdentity(peer);
+  mailbox.tidyRooms({ force: true });
+  assert.equal(fs.existsSync(file), true);
+  assert.equal(mailbox.resolveRecipient(room, 'long-running')?.sessionId, peer.sessionId);
+});
+
+test('broker-style identity pruning retains idle room history', t => {
+  const { mailbox } = fixture(t);
+  const room = mailbox.resolveRoom('resumable-history');
+  const directory = mailbox.roomDir(room);
+  const old = new Date(Date.now() - 10 * 86400000);
+  fs.utimesSync(path.join(directory, 'room.json'), old, old);
+  assert.deepEqual(mailbox.tidyRooms({ force: true, ttlDays: 0, pruneOnly: true }), []);
+  assert.equal(fs.existsSync(directory), true);
+});
+
+test('broker identity retention can outlast the local alias window', t => {
+  const { mailbox, room } = fixture(t);
+  const peer = mailbox.claimIdentity(room, 'resumable', 'broker', 'retained-session');
+  mailbox.releaseIdentity(peer);
+  const file = path.join(mailbox.roomPath(room), 'identities', `${peer.sessionId}.json`);
+  const ageRecord = days => {
+    const at = new Date(Date.now() - days * 86400000);
+    const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+    fs.writeFileSync(file, JSON.stringify({ ...record, releasedAt: at.getTime() }));
+    fs.utimesSync(file, at, at);
+  };
+  ageRecord(2);
+  mailbox.tidyRooms({ force: true, pruneOnly: true, identityTtlMs: 7 * 86400000 });
+  assert.equal(fs.existsSync(file), true);
+  ageRecord(8);
+  mailbox.tidyRooms({ force: true, pruneOnly: true, identityTtlMs: 7 * 86400000 });
+  assert.equal(fs.existsSync(file), false);
 });

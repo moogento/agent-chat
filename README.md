@@ -33,7 +33,7 @@ Choose only the clients you use. Omit `--hooks` to start with messaging and skil
 
 `--room` configures one named local room for the selected clients. A plain name such as `checkout-refactor` and a directory path are different rooms. If you omit it, each client defaults to its current Git worktree or directory. `doctor` reports the configured source and warns when a same-named path room exists.
 
-Give the sessions clear names and the same task room:
+The MCP connection joins its configured repository room on startup with a unique provisional handle. For a shared task room, give sessions clear names and join that room:
 
 ```text
 First agent:  Use agent-chat. Join room checkout-refactor as builder.
@@ -85,7 +85,7 @@ Ask each session to use agent-chat and join a shared room, such as `checkout-ref
 | `chat_who()` | See active peers and statuses |
 | `chat_send(text, to?)` | Message a named peer; omitted `to` broadcasts to the room |
 | `chat_read(wait_seconds?, limit?, max_bytes?)` | Read a bounded batch of unread messages, optionally waiting |
-| `chat_status(mine?, room_summary?, room_status?)` | Update status or room summary when it changes |
+| `chat_status(mine?, task?, availability?, model?, effort?, context_remaining_percent?, room_summary?, room_status?)` | Publish your task and routing profile or update room status |
 | `chat_presence()` | Find recent sessions in this mailbox, including sessions that have not joined a room |
 | `chat_invite(to_id, note?)` | Invite a listed session to your room |
 | `chat_invitations()` | Read invitations addressed to your session |
@@ -101,13 +101,15 @@ MCP is pull-based. Hooks surface an inbox hint at supported client lifecycle eve
 
 In local mode, the default room is the current Git worktree, or the current directory outside Git. Use `AGENT_CHAT_ROOM` or `chat_join(room: "task-name")` to coordinate across worktrees. Broker connections require an explicit room and keep each session pinned to it. A room is a coordination scope, not a resource lock or permission boundary.
 
-`chat_presence` shows sessions known to the same local mailbox or broker, with their room or `(not joined)` and a short presence ID. Supported lifecycle hooks announce new local sessions before they first call MCP. Other sessions appear when they first use Agent Chat. An invitation is a request, and the recipient joins only after accepting it. If an invited unjoined session sees no invitation, call `chat_who` to establish its exact notification binding, then retry `chat_invitations`; OpenCode may need the manual binding step in the notification guide when multiple sessions share a project. Broker sessions cannot switch rooms in place; reconnect their adapter to the invited room. Presence expires after 30 minutes without a fresh host event or active peer record, and invitations expire after 24 hours. These signals stay within the mailbox or broker, rather than publishing a machine-wide session directory.
+`chat_presence` lists recent sessions in the same mailbox, including hook-announced sessions that have not connected to MCP yet. It shows the provisional repository, title when available, room, model when reported by the host, activity, and any self-reported task, availability, effort, or context remaining. OpenCode also reports its model variant when an assistant message event supplies one. It provides a short presence ID for invitations. Until a host session is exactly linked to its MCP connection, the roster groups same-repo unlinked connections separately instead of guessing which host owns them. Call `chat_who` once in each session to establish that link. An invitation is a request, and the recipient joins only after accepting it. If an invited session sees no invitation, call `chat_who`, then retry `chat_invitations`; a manually registered or broker OpenCode connection may need the binding step in the notification guide. Broker sessions cannot switch rooms in place; reconnect their adapter to the invited room. Presence expires after 30 minutes without a fresh host event or active peer record, and invitations expire after 24 hours. These signals stay within the mailbox or broker, rather than publishing a machine-wide session directory.
 
-Each MCP process has an independent session identity. Names are unique among active peers, so two `codex` sessions can become `codex` and `codex-2`. Use `chat_join(name: "reviewer")` for a clearer recipient. Supported hooks sync a custom Claude session title or an OpenCode session title to the connected handle once the exact conversation is bound. An explicit `chat_join(name: ...)` pins that handle. Codex does not currently expose a documented session title to its hooks, so set its handle explicitly. Renames retain recent aliases for 24 hours, and new directed messages are routed to a stable session ID even if the handle changes. A reused handle cannot read its previous owner's directed messages.
+Each MCP process has an independent session identity and a unique fallback handle such as `codex-agent-chat-a1b2c3`. Prefer a short, two-to-four-word task name, for example `PCai-agent-registration`. A custom Claude session title or OpenCode session title becomes the handle once the exact conversation is bound. An explicit `chat_join(name: ...)` pins the chosen handle. Codex `/rename` changes the saved chat title but its documented hook payload does not include that title, so use `chat_join(name: "abc1")` to match it there. The roster never guesses a Codex title. Renames retain recent aliases for 24 hours, and directed messages route to a stable session ID. A reused handle cannot read its previous owner's messages. MCP connections join their configured room at initialization, so an idle connection may still appear as an active peer until it disconnects or expires.
+
+After a task is complete and validated, an agent can set `chat_status(task: "", availability: "available")` so another agent can assign work. `context_remaining_percent` is only a self-reported value when the client exposes it; Agent Chat does not estimate it or clear a host conversation after a merge. Codex and Claude hook activity shows `working` or `idle`, which is separate from whether a task is finished.
 
 In local mode, set `AGENT_CHAT_SESSION` to a distinct, stable identifier when reconnecting a client to its own cursor. Broker identities are generated by the server; opt into a private saved session file for restart recovery as described in the Docker guide. Never share it between concurrent sessions. Hooks require an explicit binding, described in [notifications](docs/notifications.md).
 
-A fresh session starts with a bounded recent tail of up to 20 eligible messages, rather than replaying the entire room. Subsequent reads follow its saved cursor. In local mode, read the transcript with the CLI to inspect older history. Existing room histories survive an upgrade from 0.2, but old display-name cursors are not reused by new session identities; restart participating clients together after upgrading.
+A fresh session starts with a bounded recent tail of up to 20 eligible messages, rather than replaying the entire room. Subsequent reads follow its saved cursor. In local mode, read the transcript with the CLI to inspect older history. Existing room histories survive an upgrade from 0.2, but old display-name cursors are not reused by new session identities; restart participating clients together after upgrading. Periodic cleanup prunes released identity records after 24 hours locally or after the broker's seven-day saved-session window. Small handle tombstones remain so a later owner cannot inherit old name-only messages.
 
 Local CLI transcript reads do not mark MCP messages as read. Broker connections use the connected MCP tools; local CLI commands do not fall back to a different mailbox:
 
@@ -127,7 +129,8 @@ agent-chat tidy
 | --- | --- | --- |
 | `AGENT_CHAT_HOME` | `~/.agent-chat` | Mailbox storage |
 | `AGENT_CHAT_ROOM` | Current worktree or directory | Initial room |
-| `AGENT_CHAT_NAME` | Detected client name or `agent` | Preferred peer name |
+| `AGENT_CHAT_NAME` | Unique client/repository/session handle | Optional fixed preferred handle; omit for unique provisional naming |
+| `AGENT_CHAT_CLIENT` | `unknown` | Broker client family used for its provisional handle; local mode uses MCP `clientInfo.name` |
 | `AGENT_CHAT_SESSION` | New random identity | Stable MCP session and cursor identity |
 | `AGENT_CHAT_SESSION_ID` | Unset | Alias for `AGENT_CHAT_SESSION` |
 | `AGENT_CHAT_MAX_WAIT` | `50` | Maximum wait per read, in seconds; older values above `50` are capped at `50` with a stderr notice |

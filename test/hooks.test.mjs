@@ -177,7 +177,10 @@ test('subagents, stop and notification events cannot consume main-session notice
   for (const event of ['Stop', 'Notification', 'SubagentStart', 'PostToolUse']) {
     await runCommandHook({ client: 'codex', payload: { session_id: f.binding.hostSessionId, cwd: f.cwd,
       hook_event_name: event, ...(event === 'PostToolUse' ? { agent_id: 'child' } : {}) },
-    env: f.env, mailbox: f.mailbox, write: () => assert.fail('unexpected host output') });
+    env: f.env, mailbox: f.mailbox, write: value => {
+      if (event === 'Stop') assert.deepEqual(JSON.parse(value), {});
+      else assert.fail('unexpected host output');
+    } });
   }
   let delivered = 0;
   await notifySession({ ...f.input, deliver: () => delivered++ });
@@ -332,6 +335,19 @@ test('Claude custom title changes rename the exact bound session and retain stab
   assert.equal(readConfig(f.configFile).bindings[0].titleSource, 'claude-code:session_title');
 });
 
+test('Claude startup title names the peer on its first exact chat_who binding', async t => {
+  const f = fixture(t, 'claude-code');
+  fs.rmSync(f.configFile);
+  const host = { session_id: f.binding.hostSessionId, cwd: f.cwd };
+  await runCommandHook({ client: 'claude-code', payload: { ...host, hook_event_name: 'SessionStart', session_title: 'PCai agent registration' }, env: f.env, mailbox: f.mailbox, write: () => {} });
+  const tool = 'mcp__agent-chat__chat_who';
+  const env = { ...f.env, AGENT_CHAT_NOTIFY_AUTO_BIND: '1', AGENT_CHAT_NOTIFY_IDENTITY_TOOLS: tool };
+  await runCommandHook({ client: 'claude-code', payload: { ...host, hook_event_name: 'PostToolUse', tool_name: tool,
+    tool_response: { structuredContent: { agentChatIdentity: { version: 1, sessionId: f.peer.sessionId,
+      cwd: f.cwd, room: f.room.id, name: f.peer.name } } } }, env, mailbox: f.mailbox, write: () => {} });
+  assert.equal(f.mailbox.listPeers(f.room).find(item => item.sessionId === f.peer.sessionId).name, 'PCai-agent-registration');
+});
+
 test('OpenCode supported title events sync only exact bound main sessions', async t => {
   const f = fixture(t, 'opencode');
   const other = f.mailbox.claimIdentity(f.room, 'other', 'opencode', crypto.randomUUID());
@@ -368,7 +384,82 @@ test('OpenCode title seen before binding is applied after a later tool event', a
   assert.equal(fs.existsSync(f.configFile), false);
   bindNotification({ configFile: f.configFile, binding: f.binding });
   await plugin['tool.execute.after']({ sessionID: f.binding.hostSessionId }, { output: 'unchanged' });
-  assert.equal(f.mailbox.listPeers(f.room).find(item => item.sessionId === f.peer.sessionId).name, 'New_session');
+  assert.equal(f.mailbox.listPeers(f.room).find(item => item.sessionId === f.peer.sessionId).name, 'New-session');
+});
+
+test('OpenCode chat_who links exact same-repo sessions and syncs their own titles', async t => {
+  const f = fixture(t, 'opencode');
+  fs.rmSync(f.configFile);
+  const other = f.mailbox.claimIdentity(f.room, 'other', 'opencode', crypto.randomUUID());
+  const plugin = await AgentChatPlugin({ directory: f.cwd, client: {} }, { env: f.env, mailbox: f.mailbox });
+  const hosts = [{ host: 'host-one', peer: f.peer, title: 'First session' },
+    { host: 'host-two', peer: other, title: 'Second session' }];
+  for (const item of hosts) await plugin.event({ event: { type: 'session.created', properties: { info: { id: item.host, title: item.title } } } });
+  for (const item of hosts) {
+    const result = { output: `You are "${item.peer.name}" in room ${f.room.label}\nSession: ${item.peer.sessionId}\nRoom id: ${f.room.id}` };
+    await plugin['tool.execute.after']({ sessionID: item.host, tool: 'agent-chat_chat_who' }, result);
+  }
+  const bindings = readConfig(f.configFile).bindings;
+  assert.equal(bindings.length, 2);
+  for (const item of hosts) {
+    assert.equal(bindings.find(binding => binding.hostSessionId === item.host).mailboxSessionId, item.peer.sessionId);
+    assert.equal(f.mailbox.listPeers(f.room).find(peer => peer.sessionId === item.peer.sessionId).name, item.title.replace(' ', '-'));
+  }
+  await plugin.event({ event: { type: 'message.updated', properties: { sessionID: 'host-one',
+    info: { role: 'assistant', providerID: 'openai', modelID: 'gpt-6.1-sol' } } } });
+  await plugin.event({ event: { type: 'session.updated', properties: { info: { id: 'host-one', title: 'First session' } } } });
+  assert.equal(createPresence({ home: f.home }).getHost({ client: 'opencode', hostSessionId: 'host-one' }).activity, 'working');
+});
+
+test('OpenCode accepting an invitation moves its exact binding to the new room', async t => {
+  const f = fixture(t, 'opencode');
+  fs.rmSync(f.configFile);
+  const plugin = await AgentChatPlugin({ directory: f.cwd, client: {} }, { env: f.env, mailbox: f.mailbox });
+  await plugin.event({ event: { type: 'session.created', properties: { info: { id: 'invited-host' } } } });
+  await plugin['tool.execute.after']({ sessionID: 'invited-host', tool: 'agent-chat_chat_who' },
+    { output: `You are "${f.peer.name}" in room ${f.room.label}\nSession: ${f.peer.sessionId}\nRoom id: ${f.room.id}` });
+  const next = f.mailbox.resolveRoom('invited-room');
+  f.mailbox.releaseIdentity(f.peer);
+  const moved = f.mailbox.claimIdentity(next, f.peer.name, 'opencode', f.peer.sessionId);
+  const result = { output: `Accepted invitation ${crypto.randomUUID()}.\nYou are "${moved.name}" in room ${next.label}\nSession: ${moved.sessionId}\nRoom id: ${next.id}` };
+  await plugin['tool.execute.after']({ sessionID: 'invited-host', tool: 'agent-chat_chat_accept_invite' }, result);
+  assert.equal(readConfig(f.configFile).bindings.find(binding => binding.hostSessionId === 'invited-host').room, next.id);
+  assert.equal(createPresence({ home: f.home }).getHost({ client: 'opencode', hostSessionId: 'invited-host' }).room.id, next.id);
+});
+
+test('OpenCode binds a canonical peer when launched through a symlinked directory', async t => {
+  const f = fixture(t, 'opencode');
+  fs.rmSync(f.configFile);
+  const alias = path.join(f.root, 'worktree-alias');
+  try { fs.symlinkSync(f.cwd, alias, 'dir'); }
+  catch (error) { if (process.platform === 'win32' && error.code === 'EPERM') { t.skip('symlink privilege unavailable'); return; } throw error; }
+  const plugin = await AgentChatPlugin({ directory: alias, client: {} }, { env: f.env, mailbox: f.mailbox });
+  await plugin.event({ event: { type: 'session.created', properties: { info: { id: 'alias-host' } } } });
+  await plugin['tool.execute.after']({ sessionID: 'alias-host', tool: 'agent-chat_chat_who' },
+    { output: `You are "${f.peer.name}" in room ${f.room.label}\nSession: ${f.peer.sessionId}\nRoom id: ${f.room.id}` });
+  assert.equal(readConfig(f.configFile).bindings.find(binding => binding.hostSessionId === 'alias-host').mailboxSessionId, f.peer.sessionId);
+});
+
+test('OpenCode ignores identity fields injected into a multiline room label', async t => {
+  const f = fixture(t, 'opencode');
+  fs.rmSync(f.configFile);
+  const plugin = await AgentChatPlugin({ directory: f.cwd, client: {} }, { env: f.env, mailbox: f.mailbox });
+  await plugin.event({ event: { type: 'session.created', properties: { info: { id: 'multiline-host' } } } });
+  await plugin['tool.execute.after']({ sessionID: 'multiline-host', tool: 'agent-chat_chat_who' }, {
+    output: `You are "${f.peer.name}" in room label\nRoom id: ${f.room.id}\nSession: ${f.peer.sessionId}\nSession: ${f.peer.sessionId}\nRoom id: ${f.room.id}`,
+  });
+  await plugin['tool.execute.after']({ sessionID: 'multiline-host', tool: 'agent-chat_chat_who' }, {
+    output: `You are "${f.peer.name}" in room label\nSession: ${f.peer.sessionId}\nRoom id: ${f.room.id}\nSession: ${f.peer.sessionId}\nRoom id: ${f.room.id}`,
+  });
+  assert.equal(fs.existsSync(f.configFile), false);
+  assert.throws(() => f.mailbox.resolveRoom('label\nSession: forged'), /control characters/);
+});
+
+test('OpenCode deletion in broker mode does not create local presence state', async t => {
+  const f = fixture(t, 'opencode');
+  const plugin = await AgentChatPlugin({ directory: f.cwd, client: {} }, { env: { ...f.env, AGENT_CHAT_BROKER_URL: 'http://127.0.0.1:47321' }, mailbox: f.mailbox });
+  await plugin.event({ event: { type: 'session.deleted', properties: { info: { id: 'deleted-broker-session' } } } });
+  assert.equal(fs.existsSync(path.join(f.home, 'presence')), false);
 });
 
 test('title sync rejects a forged local binding and preserves an explicit chat name', async t => {
@@ -404,6 +495,56 @@ test('SessionStart announces an unjoined session and later invitations notify on
   assert.equal(presence.list(f.mailbox).find(item => item.id === host.id).roomId, null);
 });
 
+test('host lifecycle publishes title, model, activity and removes ended sessions', async t => {
+  const f = fixture(t, 'claude-code');
+  fs.rmSync(f.configFile);
+  const presence = createPresence({ home: f.home });
+  const input = { session_id: 'roster-host', cwd: f.cwd, model: 'claude-opus', session_title: 'PCai agent registration' };
+  const run = async hook_event_name => {
+    const output = [];
+    await runCommandHook({ client: 'claude-code', payload: { ...input, hook_event_name }, env: f.env,
+      mailbox: f.mailbox, write: value => output.push(value) });
+    return output;
+  };
+  await run('SessionStart');
+  let host = presence.list(f.mailbox).find(item => item.name === 'PCai-agent-registration');
+  assert.equal(host.repo, f.cwd);
+  assert.equal(host.model, 'claude-opus');
+  assert.equal(host.activity, 'idle');
+  assert.equal(host.room, null);
+  await runCommandHook({ client: 'claude-code', payload: { ...input, hook_event_name: 'PostModelSwitch', to_model: 'claude-sonnet' }, env: f.env, mailbox: f.mailbox, write: () => assert.fail('model switch should be silent') });
+  assert.equal(presence.list(f.mailbox).find(item => item.id === host.id).model, 'claude-sonnet');
+  input.model = 'claude-sonnet';
+  await run('UserPromptSubmit');
+  assert.equal(presence.list(f.mailbox).find(item => item.id === host.id).activity, 'working');
+  assert.deepEqual((await run('Stop')).map(value => JSON.parse(value)), [{}]);
+  assert.equal(presence.list(f.mailbox).find(item => item.id === host.id).activity, 'idle');
+  await run('SessionEnd');
+  assert.equal(presence.list(f.mailbox).some(item => item.id === host.id), false);
+});
+
+test('managed SessionStart asks for one identity link without requiring a user chat_read prompt', async t => {
+  const f = fixture(t);
+  fs.rmSync(f.configFile);
+  const output = [];
+  await runCommandHook({ client: 'codex', payload: { session_id: 'new-host', cwd: f.cwd,
+    hook_event_name: 'SessionStart', source: 'startup', model: 'gpt-6.1-sol' },
+  env: { ...f.env, AGENT_CHAT_NOTIFY_AUTO_BIND: '1' }, mailbox: f.mailbox, write: value => output.push(value) });
+  assert.equal(output.length, 1);
+  assert.match(JSON.parse(output[0]).hookSpecificOutput.additionalContext, /Call chat_who once/);
+  assert.equal(createPresence({ home: f.home }).list(f.mailbox).find(item => item.model === 'gpt-6.1-sol').activity, 'idle');
+});
+
+test('Claude SessionStart after clear asks the new session to link its identity', async t => {
+  const f = fixture(t, 'claude-code');
+  fs.rmSync(f.configFile);
+  const output = [];
+  await runCommandHook({ client: 'claude-code', payload: { session_id: 'after-clear', cwd: f.cwd,
+    hook_event_name: 'SessionStart', source: 'clear' }, env: { ...f.env, AGENT_CHAT_NOTIFY_AUTO_BIND: '1' },
+  mailbox: f.mailbox, write: value => output.push(value) });
+  assert.match(JSON.parse(output[0]).hookSpecificOutput.additionalContext, /Call chat_who once/);
+});
+
 test('command invitations and chat messages share one valid JSON hook response', async t => {
   const f = fixture(t);
   const presence = createPresence({ home: f.home });
@@ -436,7 +577,7 @@ test('OpenCode announces new sessions before binding and emits count-only invita
   await plugin.event({ event: { type: 'session.idle', properties: { sessionID: 'new-opencode' } } });
   assert.equal(toasts.length, 1);
   assert.match(toasts[0].body.message, /1 new room invitation/);
-  assert.match(toasts[0].body.message, /Ask your agent to check Agent Chat invitations/);
+  assert.match(toasts[0].body.message, /Ask your agent to call chat_who, then check Agent Chat invitations/);
   assert.doesNotMatch(toasts[0].body.message, /Use chat_invitations/);
   const output = { output: 'original' };
   await plugin['tool.execute.after']({ sessionID: 'new-opencode' }, output);
@@ -445,6 +586,24 @@ test('OpenCode announces new sessions before binding and emits count-only invita
   const second = { output: 'second' };
   await plugin['tool.execute.after']({ sessionID: 'new-opencode' }, second);
   assert.equal(second.output, 'second');
+});
+
+test('OpenCode registers an unnamed session with a provisional repo before any MCP call', async t => {
+  const f = fixture(t, 'opencode');
+  const plugin = await AgentChatPlugin({ directory: f.cwd, client: {} }, { env: f.env, mailbox: f.mailbox });
+  await plugin.event({ event: { type: 'session.created', properties: { info: { id: 'untitled-opencode' } } } });
+  const presence = createPresence({ home: f.home });
+  const host = presence.list(f.mailbox).find(item => /^opencode-/.test(item.name) && item.roomId === null);
+  assert.equal(host.repo, f.cwd);
+  assert.equal(host.activity, 'idle');
+  await plugin.event({ event: { type: 'message.updated', properties: { sessionID: 'untitled-opencode',
+    info: { role: 'assistant', providerID: 'openai', modelID: 'gpt-6.1-sol', variant: 'high' } } } });
+  const active = presence.list(f.mailbox).find(item => item.id === host.id);
+  assert.equal(active.model, 'openai/gpt-6.1-sol');
+  assert.equal(active.variant, 'high');
+  assert.equal(active.activity, 'working');
+  await plugin.event({ event: { type: 'session.deleted', properties: { info: { id: 'untitled-opencode' } } } });
+  assert.equal(presence.list(f.mailbox).some(item => item.id === host.id), false);
 });
 
 test('command executable ignores malformed and oversized payloads and does not block', t => {

@@ -6,7 +6,7 @@ import { createMailbox, safeSessionId } from '../lib/mailbox.mjs';
 import { CHAT_LABEL } from '../lib/presentation.mjs';
 
 export const CLIENTS = new Set(['codex', 'claude-code', 'opencode']);
-export const COMMAND_EVENTS = new Set(['SessionStart', 'UserPromptSubmit', 'PostToolUse']);
+export const COMMAND_EVENTS = new Set(['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop', 'SessionEnd', 'PostModelSwitch']);
 export const NOTIFICATION_LIMITS = Object.freeze({ bindings: 100, configBytes: 64 * 1024,
   warningBindings: 90, warningBytes: Math.floor(64 * 1024 * 0.9), refreshMs: 60 * 60 * 1000 });
 const SCAN_BYTES = 64 * 1024;
@@ -39,7 +39,7 @@ function readJson(file, maxBytes) {
   }
 }
 
-function canonicalCwd(cwd) {
+export function canonicalCwd(cwd) {
   if (typeof cwd !== 'string' || !path.isAbsolute(cwd)) return null;
   try { return fs.statSync(cwd).isDirectory() ? (['win32', 'darwin'].includes(process.platform) ? fs.realpathSync.native(cwd) : fs.realpathSync(cwd)) : null; } catch { return null; }
 }
@@ -178,7 +178,7 @@ export async function syncBoundSessionTitle({ client, hostSessionId, cwd, sessio
     // MCP clientInfo.name is client-defined (for example, claude-ai), while the
     // binding records the host family. Pass the verified peer's exact client name.
     if (typeof mailbox.syncSessionTitle !== 'function') return { synced: false, reason: 'title-api-unavailable' };
-    peer = mailbox.syncSessionTitle({ room, sessionId: binding.mailboxSessionId, title: sessionTitle,
+    if (peer.sessionTitle !== sessionTitle || peer.titleSource !== titleSource) peer = mailbox.syncSessionTitle({ room, sessionId: binding.mailboxSessionId, title: sessionTitle,
       client: peer.client, cwd: binding.cwd, titleSource });
     if (!peer) return { synced: false, reason: 'wrong-local-identity' };
   }
@@ -192,12 +192,12 @@ export async function syncBoundSessionTitle({ client, hostSessionId, cwd, sessio
 }
 
 /** Discovery is optional and shares the local mailbox boundary. */
-export async function registerHostPresence({ client, hostSessionId, cwd, title, env = process.env, mailbox }) {
+export async function registerHostPresence({ client, hostSessionId, cwd, title, model, variant, activity, env = process.env, mailbox }) {
   if (!env.AGENT_CHAT_NOTIFY_CONFIG || env.AGENT_CHAT_BROKER_URL || env.AGENT_CHAT_BROKER_TOKEN_FILE) return null;
   try {
     const { createPresence } = await import('../lib/presence.mjs');
     const presence = createPresence({ home: mailbox?.home || env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat') });
-    const host = presence.registerHost({ client, hostSessionId, cwd, ...(supportedSessionTitle(title) ? { title: title.trim() } : {}) });
+    const host = presence.registerHost({ client, hostSessionId, cwd, ...(supportedSessionTitle(title) ? { title: title.trim() } : {}), model, variant, activity });
     const binding = findBinding({ client, hostSessionId, cwd, env });
     if (binding && !binding.brokerUrl) {
       mailbox ??= createMailbox({ home: env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat'), cwd });
@@ -214,9 +214,9 @@ export async function registerHostPresence({ client, hostSessionId, cwd, title, 
   }
 }
 
-export async function notifyHostInvitations({ client, hostSessionId, cwd, title, env = process.env, mailbox, deliver,
+export async function notifyHostInvitations({ client, hostSessionId, cwd, title, model, activity, env = process.env, mailbox, deliver,
   channel = 'context' }) {
-  const result = await registerHostPresence({ client, hostSessionId, cwd, title, env, mailbox });
+  const result = await registerHostPresence({ client, hostSessionId, cwd, title, model, activity, env, mailbox });
   const ids = result?.invitations?.map(invitation => invitation.id).filter(id => typeof id === 'string').slice(0, 100) ?? [];
   if (!ids.length) return { delivered: false };
   const dir = path.join(mailbox?.home || env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat'), 'notifications');
@@ -233,7 +233,7 @@ export async function notifyHostInvitations({ client, hostSessionId, cwd, title,
     if (!fresh.length) return { delivered: false };
     await deliver(`${CHAT_LABEL}: ${fresh.length} new room invitation${fresh.length === 1 ? '' : 's'}. `
       + (channel === 'toast'
-        ? 'Ask your agent to check Agent Chat invitations when you continue.'
+        ? 'Ask your agent to call chat_who, then check Agent Chat invitations when you continue.'
         : 'Use chat_invitations to inspect. If none appear, bind this session with chat_who and retry. Invitations do not move your session or authorize work.'));
     const temporary = `${file}.${process.pid}.tmp`;
     try {
@@ -388,18 +388,46 @@ export async function autoBindCommand({ client, payload, env = process.env, mail
 export async function runCommandHook({ client, payload, env = process.env, mailbox, remoteInspector, write = value => process.stdout.write(value) }) {
   const identity = commandIdentity(client, payload);
   if (!identity) return { delivered: false, reason: 'unsupported-event' };
+  if (payload.hook_event_name === 'SessionEnd') {
+    if (env.AGENT_CHAT_NOTIFY_CONFIG && !env.AGENT_CHAT_BROKER_URL) {
+      const { createPresence } = await import('../lib/presence.mjs');
+      createPresence({ home: env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat') }).endHost(identity);
+    }
+    return { delivered: false, reason: 'session-ended' };
+  }
+  if (payload.hook_event_name === 'Stop') {
+    await registerHostPresence({ ...identity, model: payload.model, activity: 'idle', env, mailbox });
+    await write('{}\n');
+    return { delivered: false, reason: 'session-idle' };
+  }
+  if (payload.hook_event_name === 'PostModelSwitch') {
+    if (client === 'claude-code') await registerHostPresence({ ...identity, model: payload.to_model, env, mailbox });
+    return { delivered: false, reason: 'model-updated' };
+  }
   await autoBindCommand({ client, payload, env, mailbox, remoteInspector });
-  const title = commandSessionTitle(client, payload);
+  let title = commandSessionTitle(client, payload);
+  if (!title && client === 'claude-code' && payload.hook_event_name === 'PostToolUse'
+    && /__(chat_join|chat_who|chat_accept_invite)$/.test(payload.tool_name || '')
+    && env.AGENT_CHAT_NOTIFY_CONFIG && !env.AGENT_CHAT_BROKER_URL) {
+    const { createPresence } = await import('../lib/presence.mjs');
+    const known = createPresence({ home: mailbox?.home || env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat') }).getHost(identity);
+    if (known?.cwd === path.resolve(identity.cwd) && supportedSessionTitle(known.title)) title = { sessionTitle: known.title, titleSource: 'claude-code:session_title' };
+  }
   if (title) {
     try { await syncBoundSessionTitle({ ...identity, ...title, env, mailbox, remoteInspector }); }
     catch (error) { if (env.AGENT_CHAT_NOTIFY_DEBUG === '1') console.error(`agent-chat title hook: ${error.message}`); }
   }
+  const startupHint = payload.hook_event_name === 'SessionStart' && env.AGENT_CHAT_NOTIFY_AUTO_BIND === '1'
+    && ['startup', 'resume', 'clear', undefined].includes(payload.source)
+    ? `${CHAT_LABEL}: Call chat_who once to link your joined MCP peer to this host session. If you can see a host title, match it with chat_join(name: ...); do not guess a hidden title.` : '';
   const deliver = async notice => {
-    await write(JSON.stringify({ hookSpecificOutput: { hookEventName: payload.hook_event_name, additionalContext: notice } }) + '\n');
+    await write(JSON.stringify({ hookSpecificOutput: { hookEventName: payload.hook_event_name,
+      additionalContext: [startupHint, notice].filter(Boolean).join('\n') } }) + '\n');
   };
   let invitationMessageResult;
   try {
-    const invitations = await notifyHostInvitations({ ...identity, title: title?.sessionTitle, env, mailbox,
+    const invitations = await notifyHostInvitations({ ...identity, title: title?.sessionTitle, model: payload.model,
+      activity: payload.hook_event_name === 'SessionStart' ? 'idle' : 'working', env, mailbox,
       deliver: async invitationNotice => {
         let combined = false;
         invitationMessageResult = await notifySession({ ...identity, env, mailbox, remoteInspector,
@@ -409,5 +437,7 @@ export async function runCommandHook({ client, payload, env = process.env, mailb
     if (invitations.delivered) return { ...invitationMessageResult, delivered: true, invitationCount: invitations.count };
   }
   catch (error) { if (env.AGENT_CHAT_NOTIFY_DEBUG === '1') console.error(`agent-chat invitation hook: ${error.message}`); }
-  return notifySession({ ...identity, env, mailbox, remoteInspector, deliver });
+  const notification = await notifySession({ ...identity, env, mailbox, remoteInspector, deliver });
+  if (!notification.delivered && startupHint) await deliver('');
+  return notification;
 }

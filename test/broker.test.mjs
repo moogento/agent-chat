@@ -427,7 +427,7 @@ test('inactive retained credentials expire after seven days and free bounded des
 
 test('a broker that loses storage ownership cannot consume a resumed session read or release its peer', async t => {
   const f = await fixture(t); const bob = await f.make('bob', 'shared', { resumable: true }); const alice = await f.make('alice');
-  const pending = call(bob, 'chat_read', { wait_seconds: 2 });
+  const pending = call(bob, 'chat_read', { wait_seconds: 2 }).catch(error => error);
   await new Promise(resolve => setTimeout(resolve, 50));
   fs.writeFileSync(path.join(f.home, '.broker-owner.lock'), JSON.stringify({ epoch: 'expired-other-owner', expiresAt: 0 }));
   const successor = await createBroker({ home: f.home, tokenFile: f.tokenFile }); t.after(() => successor.close());
@@ -435,7 +435,7 @@ test('a broker that loses storage ownership cannot consume a resumed session rea
   const sender = await createRemoteSession({ url: successor.url, tokenFile: f.tokenFile, room: 'shared', name: 'new-sender', clientCwd: f.base, sessionDir: f.creds });
   await call(sender, 'chat_send', { to: 'bob', text: 'new owner message' });
   await f.broker.close();
-  await pending.catch(() => {});
+  await pending;
   assert.match((await call(resumed, 'chat_who')).text, /bob/);
   assert.match((await call(resumed, 'chat_read')).text, /new owner message/);
   assert.equal(successor.stats().activeSessions, 2);

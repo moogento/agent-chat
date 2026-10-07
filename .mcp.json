@@ -3,7 +3,7 @@
     "agent-chat": {
       "command": "node",
       "args": ["${CLAUDE_PLUGIN_ROOT}/agent-chat.mjs"],
-      "env": { "AGENT_CHAT_NAME": "claude" }
+      "env": { "AGENT_CHAT_CLIENT": "claude-code" }
     }
   }
 }
