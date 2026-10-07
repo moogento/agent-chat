@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { fileURLToPath } from 'node:url';
 import { createMailbox, LIMITS } from '../lib/mailbox.mjs';
 import { createServer } from '../agent-chat.mjs';
 
@@ -169,8 +170,8 @@ test('pending reads retain old identity and stop safely on rename and join', asy
   assert.equal((await server.callTool('chat_read')).includes('old room only'), false);
 });
 
-test('cancelled pending read does not consume messages; waiting budget stops', async (t) => {
-  const { mailbox, room } = fixture(t); const { server, responses } = serverFor(t, mailbox, { waitBudget: 0.05 });
+test('cancelled pending read does not consume messages', async (t) => {
+  const { mailbox, room } = fixture(t); const { server, responses } = serverFor(t, mailbox);
   await server.callTool('chat_join', { name: 'reader', room: room.id }); mailbox.claimIdentity(room, 'peer');
   const pending = server.handle({ jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'chat_read', arguments: { wait_seconds: 1 } } });
   await server.handle({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 10 } });
@@ -178,15 +179,35 @@ test('cancelled pending read does not consume messages; waiting budget stops', a
   await pending;
   assert.match(responses.at(-1).result.content[0].text, /cancelled/);
   assert.match(await server.callTool('chat_read'), /after cancellation/);
+});
+
+test('zero waiting budget stops immediately without consuming messages', async (t) => {
+  const { mailbox, room } = fixture(t); const { server } = serverFor(t, mailbox, { waitBudget: 0 });
+  await server.callTool('chat_join', { name: 'reader', room: room.id }); mailbox.claimIdentity(room, 'peer');
+  assert.match(await server.callTool('chat_read', { wait_seconds: 1 }), /budget exhausted/);
+  mailbox.appendMessage(room, 'peer', 'reader', 'still readable');
+  assert.match(await server.callTool('chat_read', { wait_seconds: 1 }), /still readable/);
+});
+
+test('a completed wait exhausts its cumulative session budget', async (t) => {
+  const { mailbox, room } = fixture(t); const { server } = serverFor(t, mailbox, { waitBudget: 0.25 });
+  await server.callTool('chat_join', { name: 'reader', room: room.id }); mailbox.claimIdentity(room, 'peer');
+  assert.match(await server.callTool('chat_read', { wait_seconds: 1 }), /Wait ended/);
   assert.match(await server.callTool('chat_read', { wait_seconds: 1 }), /budget exhausted/);
 });
 
 test('simultaneous processes claim unique handles atomically', async (t) => {
   const { home, mailbox, room } = fixture(t);
-  const script = `import {createMailbox} from ${JSON.stringify(new URL('../lib/mailbox.mjs', import.meta.url).href)};const m=createMailbox({home:process.argv[1]}); const me=m.claimIdentity(m.resolveRoom('test-room'),'same'); for(let i=0;i<20;i++) m.appendMessage(me.room,me.name,'all',String(i)+' 🦉',me.sessionId); console.log(JSON.stringify(me));setInterval(()=>{},1000);`;
-  const children = Array.from({ length: 8 }, () => spawn(process.execPath, ['--input-type=module', '-e', script, home], { stdio: ['ignore', 'pipe', 'pipe'] }));
+  const script = `import {createMailbox} from ${JSON.stringify(new URL('../lib/mailbox.mjs', import.meta.url).href)};const m=createMailbox({home:process.argv[2]}); const me=m.claimIdentity(m.resolveRoom('test-room'),'same'); for(let i=0;i<20;i++) m.appendMessage(me.room,me.name,'all',String(i)+' 🦉',me.sessionId); console.log(JSON.stringify(me));setInterval(()=>{},1000);`;
+  const worker = path.join(home, 'claim-worker.mjs'); fs.writeFileSync(worker, script);
+  const children = Array.from({ length: 8 }, () => spawn(process.execPath, [worker, home], { stdio: ['ignore', 'pipe', 'pipe'] }));
+  const workerErrors = new Map();
+  for (const child of children) {
+    workerErrors.set(child, ''); child.stderr.setEncoding('utf8');
+    child.stderr.on('data', chunk => workerErrors.set(child, workerErrors.get(child) + chunk));
+  }
   t.after(async () => { await Promise.all(children.map(async (child) => { if (child.exitCode === null) { child.kill(); await once(child, 'exit'); } })); });
-  const identities = await Promise.all(children.map(async (child) => { let data = ''; for await (const chunk of child.stdout) { data += chunk; if (data.includes('\n')) return JSON.parse(data.split('\n')[0]); } throw new Error('Worker exited without identity'); }));
+  const identities = await Promise.all(children.map(async (child) => { let data = ''; for await (const chunk of child.stdout) { data += chunk; if (data.includes('\n')) return JSON.parse(data.split('\n')[0]); } throw new Error(`Worker exited without identity (exit ${child.exitCode}, signal ${child.signalCode}): ${workerErrors.get(child)}`); }));
   assert.equal(new Set(identities.map((item) => item.name)).size, children.length);
   assert.equal(new Set(identities.map((item) => item.sessionId)).size, children.length);
   assert.equal(mailbox.listPeers(room).length, children.length);
@@ -229,7 +250,7 @@ test('stable explicit session resumes its own cursor and same-room rename cancel
 
 test('stdio framing rejects oversized and malformed lines then handles ping', async (t) => {
   const { home } = fixture(t);
-  const child = spawn(process.execPath, [new URL('../agent-chat.mjs', import.meta.url).pathname], { env: { ...process.env, AGENT_CHAT_HOME: home }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../agent-chat.mjs', import.meta.url))], { env: { ...process.env, AGENT_CHAT_HOME: home }, stdio: ['pipe', 'pipe', 'pipe'] });
   t.after(() => { if (child.exitCode === null) child.kill(); });
   let text = ''; child.stdout.setEncoding('utf8'); child.stdout.on('data', (chunk) => { text += chunk; });
   child.stdin.write('x'.repeat(300 * 1024) + '\nnull\n{not-json}\n');
@@ -245,7 +266,7 @@ test('CLI works through an installed symlink', async (t) => {
   if (process.platform === 'win32') return t.skip('Windows bin wrappers do not use file symlinks');
   const { home } = fixture(t);
   const link = path.join(home, 'agent-chat.mjs');
-  fs.symlinkSync(new URL('../agent-chat.mjs', import.meta.url).pathname, link);
+  fs.symlinkSync(fileURLToPath(new URL('../agent-chat.mjs', import.meta.url)), link);
   const child = spawn(process.execPath, [link, '--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
   let output = ''; child.stdout.on('data', (chunk) => { output += chunk; });
   const [code] = await once(child, 'exit');

@@ -6,6 +6,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { fileURLToPath } from 'node:url';
 import { createBroker } from '../lib/broker.mjs';
 import { createMailbox } from '../lib/mailbox.mjs';
 import { createRemoteSession, remoteRpc, acknowledgeRemoteResponse, heartbeatRemoteSession, closeRemoteSession, resumeRemoteSession, inspectRemoteNotifications, canonicalBrokerUrl, validateRemoteRoom } from '../lib/broker-client.mjs';
@@ -122,7 +123,7 @@ test('concurrent reads are rejected without corrupting the first read cursor con
 });
 
 async function proxy(t, f, extra = {}) {
-  const child = spawn(process.execPath, [new URL('../agent-chat.mjs', import.meta.url).pathname], { env: { ...process.env, AGENT_CHAT_BROKER_URL: f.broker.url, AGENT_CHAT_BROKER_TOKEN_FILE: f.tokenFile, AGENT_CHAT_ROOM: 'shared', AGENT_CHAT_BROKER_SESSION_DIR: f.creds, ...extra }, cwd: f.base, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../agent-chat.mjs', import.meta.url))], { env: { ...process.env, AGENT_CHAT_BROKER_URL: f.broker.url, AGENT_CHAT_BROKER_TOKEN_FILE: f.tokenFile, AGENT_CHAT_ROOM: 'shared', AGENT_CHAT_BROKER_SESSION_DIR: f.creds, ...extra }, cwd: f.base, stdio: ['pipe', 'pipe', 'pipe'] });
   t.after(() => { if (child.exitCode === null) child.kill(); });
   let buffer = ''; const waiting = new Map(); let stderr = '';
   child.stderr.on('data', chunk => stderr += chunk); child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { buffer += chunk; let end; while ((end = buffer.indexOf('\n')) >= 0) { const response = JSON.parse(buffer.slice(0, end)); buffer = buffer.slice(end + 1); waiting.get(response.id)?.(response); waiting.delete(response.id); } });

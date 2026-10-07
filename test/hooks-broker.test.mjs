@@ -171,13 +171,19 @@ test('manual bind helper pins normalized broker endpoint without credentials', t
 
 test('additional broker bindings cannot make the notification configuration unreadable', t => {
   const f = fixture(t);
-  const bindings = Array.from({ length: 85 }, (_, index) => ({ ...f.binding, hostSessionId: `${index}-${'h'.repeat(250)}`,
-    room: 'r'.repeat(128), mailboxSessionId: 's'.repeat(128) }));
-  // A compact valid input can exceed the limit once the helper formats its new record.
+  const bindings = [];
+  const added = { ...f.binding, hostSessionId: 'new-host' };
+  const serializedAfter = () => JSON.stringify({ version: 1, bindings: [...bindings, added] }, null, 2) + '\n';
+  // Derive the boundary from actual bytes, including platform-specific cwd length.
+  while (Buffer.byteLength(serializedAfter()) <= 64 * 1024 && bindings.length < 99) {
+    bindings.push({ ...f.binding, hostSessionId: `${bindings.length}-${'h'.repeat(250)}`,
+      room: 'r'.repeat(128), mailboxSessionId: 's'.repeat(128) });
+  }
   const before = JSON.stringify({ version: 1, bindings });
   assert.ok(Buffer.byteLength(before) <= 64 * 1024);
+  assert.ok(Buffer.byteLength(serializedAfter()) > 64 * 1024);
   fs.writeFileSync(f.configFile, before);
-  assert.throws(() => bindNotification({ configFile: f.configFile, binding: { ...f.binding, hostSessionId: 'new-host' } }), /64 KiB/);
+  assert.throws(() => bindNotification({ configFile: f.configFile, binding: added }), /64 KiB/);
   assert.equal(fs.readFileSync(f.configFile, 'utf8'), before);
   assert.equal(fs.existsSync(`${f.configFile}.lock`), false);
 });

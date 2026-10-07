@@ -210,15 +210,17 @@ test('release archives contain one complete plugin and both valid marketplace la
   const output = path.join(temp, 'release');
   run(process.execPath, [path.join(root, 'scripts/release.mjs'), output], { timeout: 60000 });
   const pluginArchive = path.join(output, `agent-chat-plugin-${pkg.version}.tgz`);
-  const listing = run('tar', ['-tzf', pluginArchive]).split('\n').filter(Boolean);
+  const listing = run('tar', ['-tzf', pluginArchive]).split(/\r?\n/).filter(Boolean);
   assert.ok(listing.every(file => file.startsWith('agent-chat/')));
-  assert.ok(listing.includes('agent-chat/.codex-plugin/plugin.json'));
-  assert.ok(listing.includes('agent-chat/.claude-plugin/plugin.json'));
-  assert.ok(listing.includes('agent-chat/integrations/opencode/agent-chat.mjs'));
-  assert.ok(listing.includes('agent-chat/INSTALL.txt'));
-  assert.ok(listing.includes('agent-chat/node_modules/smol-toml/LICENSE'));
-  assert.ok(listing.includes('agent-chat/lib/broker.mjs'));
-  assert.ok(listing.includes('agent-chat/examples/docker/compose.yaml'));
+  const pluginExtracted = path.join(temp, 'plugin-extracted');
+  fs.mkdirSync(pluginExtracted);
+  run('tar', ['-xzf', pluginArchive, '-C', pluginExtracted]);
+  for (const resource of ['.codex-plugin/plugin.json', '.claude-plugin/plugin.json', 'integrations/opencode/agent-chat.mjs',
+    'INSTALL.txt', 'node_modules/smol-toml/LICENSE', 'lib/broker.mjs', 'examples/docker/compose.yaml']) {
+    const archivedPath = `agent-chat/${resource}`;
+    assert.ok(listing.includes(archivedPath), `Missing archive entry: ${archivedPath}`);
+    assert.ok(fs.lstatSync(path.join(pluginExtracted, 'agent-chat', resource)).isFile(), `Missing extracted file: ${resource}`);
+  }
   const checksums = fs.readFileSync(path.join(output, 'SHA256SUMS'), 'utf8').trim().split('\n');
   assert.equal(checksums.length, 3);
   for (const line of checksums) {

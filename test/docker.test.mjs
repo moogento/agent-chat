@@ -27,10 +27,10 @@ test('Docker example creates a private random token without replacing an existin
 });
 
 test('Docker build context excludes private source state and agents have no mailbox mount', () => {
-  const ignore = fs.readFileSync(path.join(root, 'examples/docker/Dockerfile.dockerignore'), 'utf8');
+  const ignore = fs.readFileSync(path.join(root, 'examples/docker/Dockerfile.dockerignore'), 'utf8').replace(/\r\n/g, '\n');
   assert.ok(ignore.startsWith('**\n'));
   assert.doesNotMatch(ignore, /!\.git|!\.env|!\.temp|!node_modules/);
-  const compose = fs.readFileSync(path.join(root, 'examples/docker/compose.yaml'), 'utf8');
+  const compose = fs.readFileSync(path.join(root, 'examples/docker/compose.yaml'), 'utf8').replace(/\r\n/g, '\n');
   const agent = compose.split('  agent:\n')[1].split('\nsecrets:')[0];
   assert.doesNotMatch(agent, /volumes:|\/data|47321:47321/);
   assert.match(agent, /read_only: true/);
