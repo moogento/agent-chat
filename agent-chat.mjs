@@ -36,6 +36,7 @@ function configuredMaxWait() {
 }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const oneLine = value => String(value).replace(/[\x00-\x1f\x7f]/g, ' ');
 const protocolError = (message, code = -32602) => Object.assign(new Error(message), { code });
 export function createServer({ mailbox = createMailbox(), output = (obj) => process.stdout.write(JSON.stringify(obj) + '\n'), maxWait = configuredMaxWait(), waitBudget = envNumber('AGENT_CHAT_WAIT_BUDGET', 300, 0, 3600), ttlDays = envNumber('AGENT_CHAT_TTL_DAYS', 7, 0, 36500), sessionId = process.env.AGENT_CHAT_SESSION || process.env.AGENT_CHAT_SESSION_ID || crypto.randomUUID(), roomSpec = envValue('AGENT_CHAT_ROOM'), nameSpec = envValue('AGENT_CHAT_NAME'), identityExtras = () => ({}) } = {}) {
   maxWait = capMaxWait(maxWait, 'maxWait');
@@ -75,7 +76,7 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
   function whoText() {
     const me = state.identity;
     const meta = mailbox.readMeta(me.room);
-    return [`You are "${me.name}" in room ${me.room.label}`, `Session: ${me.sessionId}`, `Room id: ${me.room.id}`, `Room source: ${/[\\/]/.test(me.room.label) ? 'directory path' : 'named room'}`, `Summary: ${meta.summary || '(none set)'}`, `Room status: ${meta.status || '(none set)'}`, `Active agents:\n${mailbox.listPeers(me.room).map((peer) => formatPeer(peer, me.sessionId)).join('\n') || '(none)'}`].join('\n');
+    return [`You are "${me.name}" in room ${oneLine(me.room.label)}`, `Session: ${me.sessionId}`, `Room id: ${me.room.id}`, `Room source: ${/[\\/]/.test(me.room.label) ? 'directory path' : 'named room'}`, `Summary: ${oneLine(meta.summary || '(none set)')}`, `Room status: ${oneLine(meta.status || '(none set)')}`, `Active agents:\n${mailbox.listPeers(me.room).map((peer) => formatPeer(peer, me.sessionId)).join('\n') || '(none)'}`].join('\n');
   }
   function validateArgs(name, args) {
     const tool = TOOLS.find((item) => item.name === name);
@@ -93,7 +94,7 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
     for (const required of tool.inputSchema.required || []) if (!(required in args)) throw protocolError(`${required} is required`);
     if (name === 'chat_status' && !Object.keys(args).length) throw protocolError('Pass a status field');
     if (name === 'chat_status' && args.availability !== undefined && !['available', 'busy', 'away'].includes(args.availability)) throw protocolError('availability must be available, busy, or away');
-    if (name === 'chat_status' && ['task', 'model', 'effort'].some(key => typeof args[key] === 'string' && /[\x00-\x1f\x7f]/.test(args[key]))) throw protocolError('Profile text cannot contain control characters');
+    if (name === 'chat_status' && ['mine', 'task', 'model', 'effort', 'room_summary', 'room_status'].some(key => typeof args[key] === 'string' && /[\x00-\x1f\x7f]/.test(args[key]))) throw protocolError('Status text cannot contain control characters');
   }
   function join(args) {
     const prev = refreshIdentity();
@@ -200,8 +201,8 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
           return cwd !== null && hosts.some(host => host.cwd === cwd && host.family === family(item.client));
         });
         const pendingIds = new Set(pendingPeers.map(item => item.id));
-        const lines = sessions.filter(item => !pendingIds.has(item.id)).map(item => `- ${item.name} (${item.client || 'unknown'}) [${item.id}] in ${item.room || '(host not linked)'}${item.repo ? `, ${item.room ? 'repo' : 'provisional repo'}: ${item.repo}` : ''}${item.title && item.title !== item.name ? `, title: ${item.title}` : ''}${formatProfile(item)}`);
-        if (pendingPeers.length) lines.push(`Unlinked MCP connections (exact host unknown; call chat_who in each session to link): ${pendingPeers.map(item => `${item.name} [${item.id}] in ${item.room}`).join(', ')}`);
+        const lines = sessions.filter(item => !pendingIds.has(item.id)).map(item => `- ${oneLine(item.name)} (${oneLine(item.client || 'unknown')}) [${item.id}] in ${oneLine(item.room || '(host not linked)')}${item.repo ? `, ${item.room ? 'repo' : 'provisional repo'}: ${oneLine(item.repo)}` : ''}${item.title && item.title !== item.name ? `, title: ${oneLine(item.title)}` : ''}${formatProfile(item)}`);
+        if (pendingPeers.length) lines.push(`Unlinked MCP connections (exact host unknown; call chat_who in each session to link): ${pendingPeers.map(item => `${oneLine(item.name)} [${item.id}] in ${oneLine(item.room)}`).join(', ')}`);
         return lines.length ? lines.join('\n') : 'No recent sessions in this mailbox.';
       }
       case 'chat_invite': {
@@ -287,10 +288,10 @@ function defaultName(client, cwd, sessionId) {
   const repo = safeName(path.basename(cwd || process.cwd()) || 'root').slice(0, 40 - family.length - suffix.length - 2);
   return `${family}-${repo}-${suffix}`;
 }
-function formatProfile(peer) { return `${peer.activity ? `, ${peer.activity}` : ''}${peer.availability ? `, ${peer.availability}` : ''}${peer.task ? `, task: ${peer.task}` : ''}${peer.model ? `, model: ${peer.model}` : ''}${peer.variant ? `, variant: ${peer.variant}` : ''}${peer.effort ? `, effort: ${peer.effort}` : ''}${Number.isSafeInteger(peer.context_remaining_percent) ? `, context left: ${peer.context_remaining_percent}% (self-reported)` : ''}`; }
-function formatPeer(peer, self) { return `- ${peer.name} (${peer.client || 'unknown'})${peer.sessionId === self ? ' [you]' : ''}${peer.status ? `: ${peer.status}` : ''}${formatProfile(peer)}`; }
+function formatProfile(peer) { return `${peer.activity ? `, ${oneLine(peer.activity)}` : ''}${peer.availability ? `, ${oneLine(peer.availability)}` : ''}${peer.task ? `, task: ${oneLine(peer.task)}` : ''}${peer.model ? `, model: ${oneLine(peer.model)}` : ''}${peer.variant ? `, variant: ${oneLine(peer.variant)}` : ''}${peer.effort ? `, effort: ${oneLine(peer.effort)}` : ''}${Number.isSafeInteger(peer.context_remaining_percent) ? `, context left: ${peer.context_remaining_percent}% (self-reported)` : ''}`; }
+function formatPeer(peer, self) { return `- ${oneLine(peer.name)} (${oneLine(peer.client || 'unknown')})${peer.sessionId === self ? ' [you]' : ''}${peer.status ? `: ${oneLine(peer.status)}` : ''}${formatProfile(peer)}`; }
 function formatMessages(messages) { return messages.map((msg) => `${CHAT_LABEL} | [${msg.ts}] ${msg.from} -> ${msg.to}: ${msg.text}`).join('\n'); }
-function formatRooms(mailbox) { return mailbox.listRooms().map((room) => [`## ${room.label} (${room.bytes} transcript bytes, last activity ${room.last ? new Date(room.last).toISOString() : 'never'})`, `   Summary: ${room.summary || '(none set)'}`, ...(room.status ? [`   Status: ${room.status}`] : []), ...mailbox.listPeers(room).map((peer) => `   ${formatPeer(peer)}`)].join('\n')).join('\n'); }
+function formatRooms(mailbox) { return mailbox.listRooms().map((room) => [`## ${oneLine(room.label)} (${room.bytes} transcript bytes, last activity ${room.last ? new Date(room.last).toISOString() : 'never'})`, `   Summary: ${oneLine(room.summary || '(none set)')}`, ...(room.status ? [`   Status: ${oneLine(room.status)}`] : []), ...mailbox.listPeers(room).map((peer) => `   ${formatPeer(peer)}`)].join('\n')).join('\n'); }
 export function serve() {
   const server = createServer();
   const MAX_INPUT_BYTES = 256 * 1024;
@@ -369,14 +370,14 @@ export async function cli(argv) {
     }
     case 'who': {
       const meta = mailbox.readMeta(room);
-      console.log(`Room: ${room.label}\nSummary: ${meta.summary || '(none set)'}\nStatus: ${meta.status || '(none set)'}`);
+      console.log(`Room: ${oneLine(room.label)}\nSummary: ${oneLine(meta.summary || '(none set)')}\nStatus: ${oneLine(meta.status || '(none set)')}`);
       for (const peer of mailbox.listPeers(room)) console.log(formatPeer(peer));
       return;
     }
     case 'set': {
       const changes = {};
-      if (flags.summary !== undefined) { if (flags.summary.length > 500) throw new Error('summary exceeds 500 characters'); changes.summary = flags.summary; }
-      if (flags.status !== undefined) { if (flags.status.length > 200) throw new Error('status exceeds 200 characters'); changes.status = flags.status; }
+      if (flags.summary !== undefined) { if (flags.summary.length > 500 || /[\x00-\x1f\x7f]/.test(flags.summary)) throw new Error('summary must be at most 500 characters without controls'); changes.summary = flags.summary; }
+      if (flags.status !== undefined) { if (flags.status.length > 200 || /[\x00-\x1f\x7f]/.test(flags.status)) throw new Error('status must be at most 200 characters without controls'); changes.status = flags.status; }
       if (!Object.keys(changes).length) throw new Error('Pass --summary or --status');
       const keys = mailbox.updateMeta(room, changes, safeName(flags.as || 'human'));
       return console.log(keys.length ? `Updated ${room.label}` : 'No status changes.');

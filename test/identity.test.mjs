@@ -218,3 +218,22 @@ test('broker-style identity pruning retains idle room history', t => {
   assert.deepEqual(mailbox.tidyRooms({ force: true, ttlDays: 0, pruneOnly: true }), []);
   assert.equal(fs.existsSync(directory), true);
 });
+
+test('broker identity retention can outlast the local alias window', t => {
+  const { mailbox, room } = fixture(t);
+  const peer = mailbox.claimIdentity(room, 'resumable', 'broker', 'retained-session');
+  mailbox.releaseIdentity(peer);
+  const file = path.join(mailbox.roomPath(room), 'identities', `${peer.sessionId}.json`);
+  const ageRecord = days => {
+    const at = new Date(Date.now() - days * 86400000);
+    const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+    fs.writeFileSync(file, JSON.stringify({ ...record, releasedAt: at.getTime() }));
+    fs.utimesSync(file, at, at);
+  };
+  ageRecord(2);
+  mailbox.tidyRooms({ force: true, pruneOnly: true, identityTtlMs: 7 * 86400000 });
+  assert.equal(fs.existsSync(file), true);
+  ageRecord(8);
+  mailbox.tidyRooms({ force: true, pruneOnly: true, identityTtlMs: 7 * 86400000 });
+  assert.equal(fs.existsSync(file), false);
+});
