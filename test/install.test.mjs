@@ -235,6 +235,145 @@ test('repeated install and update are idempotent and restore missing owned files
   assert.ok(readJson(f.project, '.mcp.json').mcpServers['agent-chat']);
 });
 
+test('missing lifecycle hooks can be restored, disabled or uninstalled without trapping ownership', t => {
+  for (const client of ['codex', 'claude']) {
+    for (const missing of ['unrelated-only', 'empty', 'absent-event', 'absent-hooks']) {
+      for (const action of ['update', 'disable', 'uninstall']) {
+        const f = fixture(t, `${client}-${missing}-${action}`);
+        installProject({ ...f, clients: [client], hooks: true });
+        const entries = inspectInstallation(f).receipt.entries.filter(entry => entry.kind === 'json-hook');
+        const relative = entries[0].path;
+        const other = { matcher: 'keep', hooks: [{ type: 'command', command: 'unrelated-hook' }] };
+        const config = { keep: { userSetting: true }, hooks: { CustomEvent: [other] } };
+        for (const entry of entries) {
+          if (missing === 'unrelated-only') config.hooks[entry.keyPath.at(-1)] = [other];
+          if (missing === 'empty') config.hooks[entry.keyPath.at(-1)] = [];
+        }
+        if (missing === 'absent-hooks') delete config.hooks;
+        const before = JSON.stringify(config, null, 4) + '\n';
+        write(f.project, relative, before);
+        for (const entry of entries) assert.equal(inspectManagedEntry({ project: f.project, entry }).status, 'missing');
+        if (action === 'update') {
+          updateProject(f);
+          const restored = readJson(f.project, relative);
+          for (const entry of entries) {
+            const groups = restored.hooks[entry.keyPath.at(-1)];
+            assert.equal(groups.filter(group => JSON.stringify(group) === JSON.stringify(entry.value)).length, 1);
+            assert.deepEqual(groups, missing === 'unrelated-only' ? [other, entry.value] : [entry.value]);
+          }
+          assert.deepEqual(restored.keep, config.keep);
+          if (config.hooks) assert.deepEqual(restored.hooks.CustomEvent, [other]);
+          assert.equal(updateProject(f).changes.length, 0);
+        } else {
+          const result = action === 'disable' ? updateProject({ ...f, hooks: false }) : uninstallProject(f);
+          assert.equal(read(f.project, relative), before, 'Already removed hooks leave the user config byte-for-byte unchanged.');
+          assert.ok(!fs.existsSync(path.join(f.project, `.agent-chat/launchers/${client}.mjs`)));
+          if (action === 'disable') {
+            assert.equal(inspectInstallation(f).receipt.hooks[client], false);
+            assert.equal(inspectInstallation(f).receipt.entries.some(entry => entry.kind === 'json-hook'), false);
+          } else {
+            assert.deepEqual(result.retainedClients, []);
+            assert.equal(inspectInstallation(f).exists, false);
+            assert.ok(!fs.existsSync(path.join(f.project, '.agent-chat/runtime/agent-chat.mjs')));
+          }
+        }
+      }
+    }
+  }
+});
+
+test('edited and duplicated owned launcher references remain conflicts and retain dependencies', t => {
+  for (const client of ['codex', 'claude']) {
+    for (const changed of ['command', 'commandWindows', 'commandWindows-normalized', 'duplicates', 'exact-and-edited']) {
+      for (const action of ['update', 'disable', 'uninstall']) {
+        const f = fixture(t, `${client}-${changed}-${action}`);
+        installProject({ ...f, clients: [client], hooks: true });
+        const entries = inspectInstallation(f).receipt.entries.filter(entry => entry.kind === 'json-hook');
+        const relative = entries[0].path;
+        const config = readJson(f.project, relative);
+        for (const entry of entries) {
+          const edited = structuredClone(entry.value);
+          if (changed.startsWith('commandWindows')) {
+            edited.hooks[0].command = 'unrelated-posix-command';
+            let launcher = path.join(f.project, `.agent-chat/launchers/${client}.mjs`).replaceAll('/', '\\');
+            if (changed === 'commandWindows-normalized') launcher = launcher.toUpperCase().replaceAll('\\', '\\\\');
+            edited.hooks[0].commandWindows = `node "${launcher}" --edited`;
+          } else edited.hooks[0].command += ' --edited';
+          config.hooks[entry.keyPath.at(-1)] = changed === 'duplicates' ? [entry.value, entry.value]
+            : changed === 'exact-and-edited' ? [entry.value, edited] : [edited];
+        }
+        const beforeConfig = JSON.stringify(config, null, 4) + '\n';
+        write(f.project, relative, beforeConfig);
+        for (const entry of entries) assert.equal(inspectManagedEntry({ project: f.project, entry }).status, 'changed');
+        const before = snapshot(f.project);
+        if (action === 'uninstall') {
+          const result = uninstallProject(f);
+          assert.deepEqual(result.retainedClients, [client]);
+          assert.ok(result.warnings.some(warning => /changed or duplicated notification hook/.test(warning)));
+          assert.equal(inspectInstallation(f).receipt.entries.filter(entry => entry.kind === 'json-hook').length, entries.length);
+          assert.ok(fs.existsSync(path.join(f.project, '.agent-chat/runtime/agent-chat.mjs')));
+          assert.ok(fs.existsSync(path.join(f.project, `.agent-chat/launchers/${client}.mjs`)));
+        } else {
+          assert.throws(() => updateProject({ ...f, ...(action === 'disable' ? { hooks: false } : {}) }), /changed|edited|duplicated/);
+          assert.deepEqual(snapshot(f.project), before, 'Conflicting updates do not write any files.');
+        }
+        assert.equal(read(f.project, relative), beforeConfig, 'Conflicting hook groups are preserved byte-for-byte.');
+      }
+    }
+  }
+});
+
+test('initial install rejects unmanaged launcher references with either path separator', t => {
+  for (const client of ['codex', 'claude']) {
+    for (const commandKey of ['command', 'commandWindows']) {
+      const f = fixture(t, `${client}-${commandKey}`);
+      const relative = client === 'codex' ? '.codex/hooks.json' : '.claude/settings.local.json';
+      const launcher = '.agent-chat/launchers/opencode.mjs';
+      write(f.project, relative, { hooks: { SessionStart: [{ hooks: [{ [commandKey]: `node ${commandKey === 'commandWindows' ? launcher.replaceAll('/', '\\') : launcher}` }] }] } });
+      const before = snapshot(f.project);
+      assert.throws(() => installProject({ ...f, clients: [client], hooks: true }), /unmanaged agent-chat notification hook/);
+      assert.deepEqual(snapshot(f.project), before);
+    }
+  }
+});
+
+test('removed Codex MCP blocks restore on update and release ownership on uninstall', t => {
+  for (const action of ['update', 'uninstall']) {
+    const f = fixture(t, action);
+    const unrelated = '# unrelated settings\nmodel = "kept"\n';
+    write(f.project, '.codex/config.toml', unrelated);
+    installProject({ ...f, clients: ['codex'] });
+    const entry = inspectInstallation(f).receipt.entries.find(entry => entry.kind === 'toml-block');
+    write(f.project, entry.path, unrelated);
+    assert.equal(inspectManagedEntry({ project: f.project, entry }).status, 'missing');
+    if (action === 'update') {
+      updateProject(f);
+      assert.equal(inspectManagedEntry({ project: f.project, entry }).status, 'present');
+      assert.ok(read(f.project, entry.path).startsWith(unrelated));
+    } else {
+      assert.deepEqual(uninstallProject(f).retainedClients, []);
+      assert.equal(read(f.project, entry.path), unrelated);
+      assert.equal(inspectInstallation(f).exists, false);
+      assert.ok(!fs.existsSync(path.join(f.project, '.agent-chat/runtime/agent-chat.mjs')));
+    }
+  }
+});
+
+test('an unmarked Codex MCP table is changed and preserves its runtime on uninstall', t => {
+  const f = fixture(t);
+  installProject({ ...f, clients: ['codex'] });
+  const entry = inspectInstallation(f).receipt.entries.find(entry => entry.kind === 'toml-block');
+  const changed = '# user settings\nmodel = "kept"\n[mcp_servers.agent-chat]\ncommand = "custom-node"\n';
+  write(f.project, entry.path, changed);
+  assert.equal(inspectManagedEntry({ project: f.project, entry }).status, 'changed');
+  const before = snapshot(f.project);
+  assert.throws(() => updateProject(f), /managed agent-chat TOML block was changed/);
+  assert.deepEqual(snapshot(f.project), before);
+  assert.deepEqual(uninstallProject(f).retainedClients, ['codex']);
+  assert.equal(read(f.project, entry.path), changed);
+  assert.ok(fs.existsSync(path.join(f.project, '.agent-chat/runtime/agent-chat.mjs')));
+});
+
 test('uninstall preserves user changes elsewhere and removes only its own entries', t => {
   const f = fixture(t); const toml = '# User comment\nmodel = "keep"\n'; write(f.project, '.codex/config.toml', toml);
   const other = { hooks: [{ type: 'command', command: 'keep' }] };

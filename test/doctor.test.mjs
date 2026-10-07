@@ -136,6 +136,53 @@ test('doctor diagnoses optional hooks and pending binding as warnings without cl
   assert.ok(check(await doctorProject({ project }), 'claude.hooks').some(value => value.status === 'error'));
 });
 
+test('doctor distinguishes missing lifecycle hooks from edited or duplicated launcher references', async t => {
+  for (const client of ['codex', 'claude']) {
+    const { project } = fixture(t, { clients: [client], hooks: true });
+    const entry = inspectInstallation({ project }).receipt.entries.find(entry => entry.id === `${client}:hook:UserPromptSubmit`);
+    const file = path.join(project, entry.path);
+    const original = JSON.parse(fs.readFileSync(file, 'utf8'));
+    for (const scenario of ['unrelated-only', 'empty', 'absent-event', 'absent-hooks', 'edited', 'windows-edited', 'duplicates', 'exact-and-edited']) {
+      const config = structuredClone(original);
+      const edited = structuredClone(entry.value);
+      edited.hooks[0].command += ' --custom';
+      if (scenario === 'windows-edited') {
+        edited.hooks[0].command = 'another-command';
+        edited.hooks[0].commandWindows = `node "${path.join(project, `.agent-chat/launchers/${client}.mjs`).replaceAll('/', '\\\\').toUpperCase()}" --custom`;
+      }
+      const event = entry.keyPath.at(-1);
+      if (scenario === 'unrelated-only') config.hooks[event] = [{ hooks: [{ type: 'command', command: 'formatter' }] }];
+      else if (scenario === 'empty') config.hooks[event] = [];
+      else if (scenario === 'absent-event') delete config.hooks[event];
+      else if (scenario === 'absent-hooks') delete config.hooks;
+      else config.hooks[event] = scenario === 'duplicates' ? [entry.value, entry.value]
+        : scenario === 'exact-and-edited' ? [entry.value, edited] : [edited];
+      fs.writeFileSync(file, JSON.stringify(config, null, 4) + '\n');
+      const before = snapshot(project);
+      const result = await doctorProject({ project });
+      const errors = check(result, `${client}.hooks`).filter(value => value.status === 'error');
+      const changed = ['edited', 'windows-edited', 'duplicates', 'exact-and-edited'].includes(scenario);
+      assert.ok(errors.length, `${client}: ${scenario}`);
+      for (const error of errors) {
+        assert.match(error.message, changed ? /differ.*Inspect your changes/ : /missing.*Run agent-chat update/);
+        if (changed) assert.doesNotMatch(error.message, /restore missing/);
+      }
+      assert.deepEqual(snapshot(project), before, `${client}: ${scenario} is read-only`);
+    }
+  }
+});
+
+test('doctor distinguishes a removed Codex MCP block from an unmarked managed table', async t => {
+  const { project } = fixture(t, { clients: ['codex'] });
+  const file = path.join(project, '.codex/config.toml');
+  fs.writeFileSync(file, '# unrelated setting\nmodel = "keep"\n');
+  assert.match(check(await doctorProject({ project }), 'codex.mcp')[0].message, /missing.*Run agent-chat update/);
+  fs.writeFileSync(file, '# unrelated setting\nmodel = "keep"\n[mcp_servers.agent-chat]\ncommand = "custom-node"\n');
+  const before = snapshot(project);
+  assert.match(check(await doctorProject({ project }), 'codex.mcp')[0].message, /differ.*Inspect your changes/);
+  assert.deepEqual(snapshot(project), before);
+});
+
 test('doctor reports binding counts without exposing session IDs or room contents', async t => {
   const { project, paths } = fixture(t, { clients: ['codex'], hooks: true });
   bindNotification({ configFile: paths.notificationConfig, binding: { client: 'codex', hostSessionId: 'private-host-session',
