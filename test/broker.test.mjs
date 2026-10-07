@@ -128,6 +128,40 @@ test('concurrent reads are rejected without corrupting the first read cursor con
   assert.doesNotMatch((await call(bob, 'chat_read')).text, /wake first read/);
 });
 
+test('forty waiting sessions leave bounded capacity for another client to send and inspect identity', async t => {
+  const f = await fixture(t);
+  const sender = await f.make('sender');
+  const readers = await Promise.all(Array.from({ length: 40 }, (_, index) => f.make(`reader-${index}`)));
+  const waiting = readers.map(session => call(session, 'chat_read', { wait_seconds: 20 }).catch(error => ({ error })));
+  const deadline = Date.now() + 10000;
+  while (f.broker.stats().pendingRequests < readers.length && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(f.broker.stats().pendingRequests, readers.length);
+  const stats = f.broker.stats();
+  assert.equal(stats.cacheBudget, 128 * 256 * 1024 * 2);
+  assert.ok(stats.pendingBytes + stats.pendingRequests * 256 * 1024 <= stats.cacheBudget);
+  assert.match((await call(sender, 'chat_who')).text, /sender/);
+  await call(sender, 'chat_send', { to: 'all', text: 'concurrent wait capacity' });
+  const results = await Promise.all(waiting);
+  for (const result of results) { assert.equal(result.error, undefined); assert.match(result.text, /concurrent wait capacity/); }
+  assert.equal(f.broker.stats().pendingBytes, 0);
+});
+
+test('capacity rejection is definite only for a fresh transport ID, not a potentially completed retry', async t => {
+  const f = await fixture(t); const sender = await f.make('sender'); const recipient = await f.make('recipient');
+  const requestId = crypto.randomUUID();
+  const rpc = { jsonrpc: '2.0', id: rpcId++, method: 'tools/call', params: { name: 'chat_send', arguments: { to: 'recipient', text: 'completed before retry' } } };
+  const completed = await remoteRpc(sender, rpc, { requestId }); await acknowledgeRemoteResponse(sender, completed.receipt);
+  const pending = [];
+  for (let index = 0; index < 8; index++) pending.push(await call(sender, 'chat_who', {}, { ack: false }));
+  await assert.rejects(remoteRpc(sender, { ...rpc, id: rpcId++, params: { ...rpc.params, arguments: { to: 'recipient', text: 'rejected before send' } } }),
+    error => error.status === 429 && error.definitelyNotExecuted === true);
+  await assert.rejects(remoteRpc(sender, rpc, { requestId }), error => error.status === 429
+    && error.rejectedBeforeExecution === true && error.definitelyNotExecuted === false);
+  const unread = (await call(recipient, 'chat_read')).text;
+  assert.match(unread, /completed before retry/); assert.doesNotMatch(unread, /rejected before send/);
+  for (const result of pending) await acknowledgeRemoteResponse(sender, result.receipt);
+});
+
 async function proxy(t, f, extra = {}) {
   const child = spawn(process.execPath, [fileURLToPath(new URL('../agent-chat.mjs', import.meta.url))], { env: { ...process.env, AGENT_CHAT_BROKER_URL: f.broker.url, AGENT_CHAT_BROKER_TOKEN_FILE: f.tokenFile, AGENT_CHAT_ROOM: 'shared', AGENT_CHAT_BROKER_SESSION_DIR: f.creds, ...extra }, cwd: f.base, stdio: ['pipe', 'pipe', 'pipe'] });
   t.after(() => { if (child.exitCode === null) child.kill(); });
@@ -144,6 +178,27 @@ test('stdio adapter forwards independent MCP sessions and never prints credentia
   assert.equal(identity.transport, 'broker'); assert.equal(identity.brokerUrl, f.broker.url); assert.equal(identity.clientCwd, f.base);
   assert.doesNotMatch(JSON.stringify(who), /sessionToken|bootstrapHash/);
   p.child.stdin.end(); await once(p.child, 'exit'); assert.equal(f.broker.stats().activeSessions, 0);
+});
+
+test('stdio adapter distinguishes definite capacity refusal from uncertain connection failures', async t => {
+  const f = await fixture(t); const p = await proxy(t, f, { AGENT_CHAT_NAME: 'proxy' });
+  const who = await p.send({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'chat_who' } });
+  const id = who.result.structuredContent.agentChatIdentity.sessionId;
+  const session = JSON.parse(fs.readFileSync(path.join(f.creds, `${id}.json`), 'utf8'));
+  const deadline = Date.now() + 10000;
+  while ((f.broker.stats().pendingBytes || f.broker.stats().pendingRequests) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(f.broker.stats().pendingBytes, 0); assert.equal(f.broker.stats().pendingRequests, 0);
+  const pending = [];
+  for (let index = 0; index < 8; index++) pending.push(await call(session, 'chat_who', {}, { ack: false }));
+  const rejected = await p.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'chat_send', arguments: { text: 'must not execute' } } });
+  assert.equal(rejected.error.code, -32001);
+  assert.deepEqual(rejected.error.data, { retryable: true, execution: 'not-started' });
+  assert.match(rejected.error.message, /rejected before execution/); assert.doesNotMatch(rejected.error.message, /may have completed/);
+  for (const result of pending) await acknowledgeRemoteResponse(session, result.receipt);
+  await f.broker.close();
+  const uncertain = await p.send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'chat_who' } });
+  assert.equal(uncertain.error.code, -32000); assert.match(uncertain.error.message, /may have completed/);
+  p.child.stdin.end(); await once(p.child, 'exit');
 });
 
 test('explicit private session file resumes across adapter restart and rejects sharing', async t => {

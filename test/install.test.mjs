@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parse as parseToml } from 'smol-toml';
 import { installProject, updateProject, uninstallProject, inspectInstallation, inspectManagedEntry, detectClients, RUNTIME_FILES, quotePosix, quoteWindows } from '../lib/install.mjs';
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -20,6 +20,100 @@ function write(project, relative, data) {
 }
 const read = (project, relative) => fs.readFileSync(path.join(project, relative), 'utf8');
 const readJson = (project, relative) => JSON.parse(read(project, relative));
+
+function useLegacyOpenCodeWrapper(f) {
+  const current = '.opencode/plugins/agent-chat.js';
+  const legacy = '.opencode/plugins/agent-chat.mjs';
+  fs.renameSync(path.join(f.project, current), path.join(f.project, legacy));
+  const receipt = inspectInstallation(f).receipt;
+  receipt.files[legacy] = receipt.files[current];
+  delete receipt.files[current];
+  write(f.project, '.agent-chat/install.json', receipt);
+  return { current, legacy };
+}
+
+test('Codex install and update preserve literal dollar patterns in runtime and token paths', t => {
+  for (const pattern of ['$$', '$&']) {
+    const f = fixture(t, `project ${pattern}`);
+    const brokerTokenFile = path.join(f.project, `token ${pattern}`);
+    fs.writeFileSync(brokerTokenFile, 'a'.repeat(64));
+    const original = '# unrelated settings with $$ and $&\nmodel = "kept"\n';
+    write(f.project, '.codex/config.toml', original);
+    installProject({ ...f, clients: ['codex'], brokerUrl: 'http://broker:47321', brokerTokenFile, room: 'task' });
+    assert.equal(updateProject(f).changes.length, 0);
+    const replacementToken = path.join(f.project, `replacement token ${pattern}`);
+    fs.writeFileSync(replacementToken, 'b'.repeat(64));
+    updateProject({ ...f, brokerTokenFile: replacementToken });
+    const text = read(f.project, '.codex/config.toml');
+    const server = parseToml(text).mcp_servers['agent-chat'];
+    const canonicalProject = fs.realpathSync(f.project);
+    assert.equal(server.cwd, canonicalProject);
+    assert.deepEqual(server.args, [path.join(canonicalProject, '.agent-chat/runtime/agent-chat.mjs')]);
+    assert.equal(server.env.AGENT_CHAT_BROKER_TOKEN_FILE, replacementToken);
+    assert.ok(text.startsWith(original));
+    assert.equal(updateProject(f).changes.length, 0);
+    uninstallProject(f);
+    assert.equal(read(f.project, '.codex/config.toml'), original);
+  }
+});
+
+test('OpenCode hooks install a discoverable JavaScript wrapper that loads the shared adapter', async t => {
+  const f = fixture(t);
+  installProject({ ...f, clients: ['opencode'], hooks: true });
+  const relative = '.opencode/plugins/agent-chat.js';
+  assert.ok(inspectInstallation(f).receipt.files[relative]);
+  assert.equal(fs.existsSync(path.join(f.project, '.opencode/plugins/agent-chat.mjs')), false);
+  const wrapper = await import(pathToFileURL(path.join(f.project, relative)).href);
+  const adapter = await wrapper.AgentChat({ client: {}, directory: f.project });
+  assert.equal(typeof adapter['tool.execute.after'], 'function');
+  assert.equal(typeof adapter.event, 'function');
+});
+
+test('update migrates an unchanged legacy OpenCode wrapper and removal owns only the new file', t => {
+  const f = fixture(t);
+  installProject({ ...f, clients: ['opencode'], hooks: true });
+  const { current, legacy } = useLegacyOpenCodeWrapper(f);
+  assert.ok(inspectInstallation(f).receipt.files[legacy], 'Legacy receipts remain readable.');
+  const before = snapshot(f.project);
+  const preview = updateProject({ ...f, dryRun: true });
+  assert.ok(preview.changes.some(change => change.path === legacy && change.action === 'remove'));
+  assert.ok(preview.changes.some(change => change.path === current && change.action === 'create'));
+  assert.deepEqual(snapshot(f.project), before);
+  updateProject(f);
+  assert.equal(fs.existsSync(path.join(f.project, legacy)), false);
+  const receipt = inspectInstallation(f).receipt;
+  assert.ok(receipt.files[current]); assert.equal(receipt.files[legacy], undefined);
+  assert.equal(updateProject(f).changes.length, 0);
+  uninstallProject(f);
+  assert.equal(fs.existsSync(path.join(f.project, current)), false);
+});
+
+test('legacy OpenCode migration preserves edited wrappers and unmanaged destination files', t => {
+  for (const kind of ['edited-legacy', 'unmanaged-destination']) {
+    const f = fixture(t, kind);
+    installProject({ ...f, clients: ['opencode'], hooks: true });
+    const { current, legacy } = useLegacyOpenCodeWrapper(f);
+    write(f.project, kind === 'edited-legacy' ? legacy : current, '// user-owned plugin edits\n');
+    const before = snapshot(f.project);
+    assert.throws(() => updateProject(f), /edited|outside this installation/);
+    assert.deepEqual(snapshot(f.project), before);
+  }
+});
+
+test('legacy OpenCode receipts support disabling hooks and direct uninstall before migration', t => {
+  for (const action of ['disable', 'uninstall']) {
+    const f = fixture(t, action);
+    installProject({ ...f, clients: ['opencode'], hooks: true });
+    const { current, legacy } = useLegacyOpenCodeWrapper(f);
+    if (action === 'disable') updateProject({ ...f, hooks: false });
+    else uninstallProject(f);
+    assert.equal(fs.existsSync(path.join(f.project, legacy)), false);
+    assert.equal(fs.existsSync(path.join(f.project, current)), false);
+    if (action === 'disable') assert.equal(inspectInstallation(f).receipt.hooks.opencode, false);
+    else assert.equal(inspectInstallation(f).exists, false);
+  }
+});
+
 test('broker install shares connection settings with hooks, preserves them on update, and supports returning to local', t => {
   const f = fixture(t);
   const brokerTokenFile = path.join(f.base, 'token');
@@ -36,7 +130,7 @@ test('broker install shares connection settings with hooks, preserves them on up
     assert.equal(env.AGENT_CHAT_BROKER_TOKEN_FILE, brokerTokenFile);
     assert.equal(env.AGENT_CHAT_BROKER_SESSION_DIR, path.join(fs.realpathSync(f.project), '.agent-chat/broker-sessions'));
   }
-  for (const file of ['.agent-chat/launchers/codex.mjs', '.agent-chat/launchers/claude.mjs', '.opencode/plugins/agent-chat.mjs']) {
+  for (const file of ['.agent-chat/launchers/codex.mjs', '.agent-chat/launchers/claude.mjs', '.opencode/plugins/agent-chat.js']) {
     assert.match(read(f.project, file), /AGENT_CHAT_BROKER_URL/);
     assert.match(read(f.project, file), /test-task/);
   }
@@ -118,13 +212,13 @@ test('hooks are opt-in and update preserves choice unless explicitly changed', t
   installProject({ ...f, clients: ['codex', 'claude', 'opencode'] });
   assert.ok(!fs.existsSync(path.join(f.project, '.codex/hooks.json')));
   assert.ok(!fs.existsSync(path.join(f.project, '.claude/settings.local.json')));
-  assert.ok(!fs.existsSync(path.join(f.project, '.opencode/plugins/agent-chat.mjs')));
+  assert.ok(!fs.existsSync(path.join(f.project, '.opencode/plugins/agent-chat.js')));
   updateProject({ ...f, hooks: true });
   assert.equal(inspectInstallation(f).receipt.hooks.codex, true);
   updateProject(f); assert.equal(inspectInstallation(f).receipt.hooks.codex, true);
   updateProject({ ...f, hooks: false });
   assert.ok(!fs.existsSync(path.join(f.project, '.codex/hooks.json')));
-  assert.ok(!fs.existsSync(path.join(f.project, '.opencode/plugins/agent-chat.mjs')));
+  assert.ok(!fs.existsSync(path.join(f.project, '.opencode/plugins/agent-chat.js')));
   assert.equal(inspectInstallation(f).receipt.hooks.codex, false);
 });
 

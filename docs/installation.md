@@ -52,7 +52,7 @@ The installer adds a marked `/.agent-chat/` block to the project's `.gitignore`,
 | --- | --- | --- | --- |
 | Codex | `.codex/config.toml` | `.agents/skills/agent-chat/` | `.codex/hooks.json` |
 | Claude Code | `.mcp.json` | `.claude/skills/agent-chat/` | `.claude/settings.local.json` |
-| OpenCode | `opencode.json` | `.opencode/skills/agent-chat/` | `.opencode/plugins/agent-chat.mjs` |
+| OpenCode | `opencode.json` | `.opencode/skills/agent-chat/` | `.opencode/plugins/agent-chat.js` |
 
 Existing strict JSON is merged while unrelated values are preserved; its whitespace can be reformatted. JSON comments, trailing commas, or duplicate keys are refused. The installer also refuses an existing OpenCode JSONC configuration rather than silently replacing it with a separate JSON file. Resolve the reported configuration conflict before retrying.
 
@@ -92,6 +92,8 @@ agent-chat doctor
 The filename above is the current development version; use the actual filename of the release you received. `update` preserves the installed client selection and hook setting unless you provide an explicit selection. `--clients codex,claude` targets those clients, `--hooks` enables their hooks, and `--no-hooks` disables them. It performs no background update check or download.
 
 Restart affected clients after updating, and review hook trust if prompted. You can run maintenance commands through `node .agent-chat/runtime/agent-chat.mjs` if the original executable is unavailable. That runtime's `update` reapplies its own version; adopting a newer release requires running the newer trusted package executable.
+
+OpenCode automatically discovers `.js` and `.ts` plugins. Updating an older managed OpenCode installation migrates its unmodified `.opencode/plugins/agent-chat.mjs` wrapper to `agent-chat.js`; edited wrappers or an existing unmanaged destination require manual resolution. The shared runtime implementation remains an `.mjs` module. See [OpenCode's loader](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/config/plugin.ts) for the discovery pattern.
 
 ## Remove the managed installation
 

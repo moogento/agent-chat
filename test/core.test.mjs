@@ -54,6 +54,27 @@ test('new identities use fresh cursors; long handles preserve suffix ownership',
   assert.throws(() => mailbox.claimIdentity(room, 'all'), /reserved/);
 });
 
+test('reconnecting a stable session removes its stale handles while preserving other sessions', (t) => {
+  const { mailbox, room } = fixture(t); const sessionId = 'stable-reconnect';
+  const stale = mailbox.claimIdentity(room, 'old', 'test', sessionId);
+  const oldFile = path.join(mailbox.roomPath(room), 'peers', stale.name + '.json');
+  const oldPeer = JSON.parse(fs.readFileSync(oldFile, 'utf8')); oldPeer.pid = process.ppid;
+  fs.writeFileSync(oldFile, JSON.stringify(oldPeer));
+  assert.throws(() => mailbox.claimIdentity(room, 'new', 'test', sessionId), /already active in another process/);
+  assert.equal(JSON.parse(fs.readFileSync(oldFile, 'utf8')).pid, process.ppid);
+  oldPeer.pid = 999999999; fs.writeFileSync(oldFile, JSON.stringify(oldPeer));
+  const other = mailbox.claimIdentity(room, 'new');
+  const otherFile = path.join(mailbox.roomPath(room), 'peers', other.name + '.json');
+  const otherBytes = fs.readFileSync(otherFile, 'utf8');
+  const resumed = mailbox.claimIdentity(room, 'new', 'test', sessionId);
+  assert.equal(resumed.name, 'new-2'); assert.ok(!fs.existsSync(oldFile));
+  assert.deepEqual(mailbox.listPeers(room).filter(peer => peer.sessionId === sessionId).map(peer => peer.name), ['new-2']);
+  assert.equal(fs.readFileSync(otherFile, 'utf8'), otherBytes);
+  mailbox.claimIdentity(room, 'renamed', 'test', sessionId);
+  assert.deepEqual(mailbox.listPeers(room).filter(peer => peer.sessionId === sessionId).map(peer => peer.name), ['renamed']);
+  assert.equal(fs.readFileSync(otherFile, 'utf8'), otherBytes);
+});
+
 test('bounded Unicode pages retain every undelivered message', (t) => {
   const { mailbox, room } = fixture(t);
   const reader = mailbox.claimIdentity(room, 'reader');
@@ -83,6 +104,22 @@ test('first read scans a bounded tail and returns latest eligible messages', (t)
   assert.equal(result.messages[0].id, '1980');
   assert.equal(result.messages.at(-1).id, '1999');
   assert.ok(result.earliestOffset > 0);
+});
+
+test('an oversized incomplete first-read tail never replays older history', (t) => {
+  const { mailbox, room } = fixture(t);
+  for (let i = 0; i < 5; i++) mailbox.appendMessage(room, 'sender', 'reader', `old history ${i}`);
+  const file = path.join(mailbox.roomPath(room), 'messages.jsonl');
+  fs.appendFileSync(file, JSON.stringify({ id: 'legacy', ts: 'now', from: 'sender', to: 'reader', text: 'x'.repeat(LIMITS.scanBytes + 100) }));
+  const reader = mailbox.claimIdentity(room, 'reader');
+  const first = mailbox.takeUnread(reader);
+  assert.equal(first.nextOffset, fs.statSync(file).size); assert.equal(first.hasMore, false);
+  assert.match(first.blocked, /initial cursor starts at transcript end/);
+  assert.deepEqual(mailbox.takeUnread(reader).messages, []);
+  fs.appendFileSync(file, '\n');
+  const fresh = mailbox.appendMessage(room, 'sender', 'reader', 'new message after legacy tail');
+  assert.deepEqual(mailbox.takeUnread(reader).messages.map(message => message.id), [fresh.id]);
+  assert.deepEqual(mailbox.takeUnread(reader).messages, []);
 });
 
 test('partial trailing Unicode append is not consumed until newline', (t) => {
@@ -240,7 +277,10 @@ test('Windows exclusive lock opens retry transient deletion errors without steal
   const { home } = fixture(t); const mailbox = createMailbox({ home, lockTimeoutMs: 100 });
   const room = mailbox.resolveRoom('windows-open'); const file = path.join(home, 'locks', 'windows-open.lock');
   const platform = Object.getOwnPropertyDescriptor(process, 'platform'); const open = fs.openSync;
-  let attempts = 0;
+  const realNow = Date.now; const wait = Atomics.wait;
+  let now = 0; let attempts = 0; const delays = [];
+  Date.now = () => now;
+  Atomics.wait = (array, index, value, timeout) => { delays.push(timeout); now += timeout; return 'timed-out'; };
   Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
   fs.openSync = function(target, flags, ...args) {
     if (target === file && flags === 'wx' && ++attempts <= 2) throw Object.assign(new Error('pending deletion'), { code: attempts === 1 ? 'EPERM' : 'EACCES' });
@@ -249,26 +289,29 @@ test('Windows exclusive lock opens retry transient deletion errors without steal
   try {
     const identity = mailbox.claimIdentity(room, 'reader');
     assert.equal(identity.name, 'reader'); assert.equal(attempts, 3);
+    assert.deepEqual(delays, [10, 10]); assert.equal(now, 20);
     assert.ok(!fs.existsSync(file));
-  } finally { fs.openSync = open; Object.defineProperty(process, 'platform', platform); }
+  } finally { fs.openSync = open; Date.now = realNow; Atomics.wait = wait; Object.defineProperty(process, 'platform', platform); }
 });
 
 test('Windows persistent lock permission failures stop at the configured deadline', (t) => {
   const { home } = fixture(t); const mailbox = createMailbox({ home, lockTimeoutMs: 30 });
   const room = mailbox.resolveRoom('windows-denied'); const file = path.join(home, 'locks', 'windows-denied.lock');
   const platform = Object.getOwnPropertyDescriptor(process, 'platform'); const open = fs.openSync;
-  let attempts = 0;
+  const realNow = Date.now; const wait = Atomics.wait;
+  let now = 0; let attempts = 0; const delays = [];
+  Date.now = () => now;
+  Atomics.wait = (array, index, value, timeout) => { delays.push(timeout); now += timeout; return 'timed-out'; };
   Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
   fs.openSync = function(target, flags, ...args) {
     if (target === file && flags === 'wx') { attempts++; throw Object.assign(new Error('permission denied'), { code: 'EACCES' }); }
     return open.call(this, target, flags, ...args);
   };
-  const started = Date.now();
   try {
     assert.throws(() => mailbox.claimIdentity(room, 'reader'), error => error.code === 'EACCES');
-    assert.ok(attempts > 1); assert.ok(Date.now() - started < 500);
+    assert.equal(attempts, 3); assert.deepEqual(delays, [10, 10, 10]); assert.equal(now, 30);
     assert.ok(!fs.existsSync(file));
-  } finally { fs.openSync = open; Object.defineProperty(process, 'platform', platform); }
+  } finally { fs.openSync = open; Date.now = realNow; Atomics.wait = wait; Object.defineProperty(process, 'platform', platform); }
 });
 
 test('abandoned reclaim lock fails within a bounded timeout', (t) => {
