@@ -66,7 +66,7 @@ test('new identities use fresh cursors; long handles preserve suffix ownership',
   mailbox.releaseIdentity(first);
   const restart = mailbox.claimIdentity(room, base);
   assert.notEqual(first.sessionId, restart.sessionId);
-  assert.equal(mailbox.takeUnread(restart).messages.length, 1);
+  assert.equal(mailbox.takeUnread(restart).messages.length, 0);
   assert.throws(() => mailbox.claimIdentity(room, 'all'), /reserved/);
 });
 
@@ -231,7 +231,7 @@ test('legacy AGENT_CHAT_MAX_WAIT initializes MCP with a capped schema and stderr
   const deadline = Date.now() + 10000;
   while (client.responses.length < 3 && client.child.exitCode === null && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(client.responses.length, 3, client.stderr());
-  assert.equal(client.responses.find(response => response.id === 1).result.serverInfo.version, '0.3.0');
+  assert.equal(client.responses.find(response => response.id === 1).result.serverInfo.version, '0.4.0');
   const read = client.responses.find(response => response.id === 2).result.tools.find(tool => tool.name === 'chat_read');
   assert.equal(read.inputSchema.properties.wait_seconds.maximum, 50); assert.match(read.description, /up to 50s/);
   assert.equal(client.responses.find(response => response.id === 3).error.code, -32602);
@@ -355,6 +355,49 @@ test('repeated joins preserve a suffixed identity, status and pending read', asy
   assert.equal(await server.callTool('chat_read'), 'No new messages.');
   server.stop();
   assert.deepEqual(mailbox.listPeers(room).map(peer => peer.sessionId), [builder.sessionId]);
+});
+
+test('explicitly joining with the current handle pins it against later title changes', async t => {
+  const { mailbox, room } = fixture(t);
+  const { server } = serverFor(t, mailbox, { roomSpec: room.id, nameSpec: 'claude' });
+  server.state.client = 'claude-mcp-client';
+  await server.callTool('chat_who');
+  assert.equal(server.state.identity.nameSource, 'configured');
+  await server.callTool('chat_join', { name: 'claude' });
+  assert.equal(server.state.identity.nameSource, 'explicit');
+  mailbox.syncSessionTitle({ room, sessionId: server.state.identity.sessionId, title: 'New host title', client: server.state.client, cwd: server.state.identity.cwd });
+  assert.match(await server.callTool('chat_who'), /You are "claude"/);
+});
+
+test('stopping after a host title rename removes the current peer record', async t => {
+  const { mailbox, room } = fixture(t);
+  const { server } = serverFor(t, mailbox, { roomSpec: room.id, nameSpec: 'claude' });
+  server.state.client = 'claude-mcp-client';
+  await server.callTool('chat_who');
+  mailbox.syncSessionTitle({ room, sessionId: server.state.identity.sessionId, title: 'New host title', client: server.state.client, cwd: server.state.identity.cwd });
+  assert.equal(mailbox.listPeers(room).length, 1);
+  server.stop();
+  assert.equal(mailbox.listPeers(room).length, 0);
+});
+
+test('a departed recipient produces a delivery warning even when its old handle resolves', async t => {
+  const { mailbox, room } = fixture(t);
+  const departed = mailbox.claimIdentity(room, 'reviewer', 'codex', 'departed-session');
+  mailbox.releaseIdentity(departed);
+  const { server } = serverFor(t, mailbox, { roomSpec: room.id });
+  const receipt = await server.callTool('chat_send', { to: 'reviewer', text: 'Please review' });
+  assert.match(receipt, /not active/);
+  assert.match(receipt, /new session using that handle will not receive/);
+});
+
+test('chat_join refreshes the current handle after a hook title rename', async t => {
+  const { mailbox, room } = fixture(t);
+  const { server } = serverFor(t, mailbox, { roomSpec: room.id, nameSpec: 'claude' });
+  server.state.client = 'claude-mcp-client';
+  await server.callTool('chat_who');
+  mailbox.syncSessionTitle({ room, sessionId: server.state.identity.sessionId, title: 'renamed-title', client: server.state.client, cwd: server.state.identity.cwd });
+  assert.match(await server.callTool('chat_join', {}), /You are "renamed-title"/);
+  assert.equal(server.state.identity.name, 'renamed-title');
 });
 
 test('cancelled pending read does not consume messages', async (t) => {
@@ -498,7 +541,7 @@ test('CLI works through an installed symlink', async (t) => {
   const child = spawn(process.execPath, [link, '--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
   let output = ''; child.stdout.on('data', (chunk) => { output += chunk; });
   const [code] = await once(child, 'exit');
-  assert.equal(code, 0); assert.equal(output.trim(), '0.3.0');
+  assert.equal(code, 0); assert.equal(output.trim(), '0.4.0');
 });
 
 test('waiting stops immediately when only a crashed peer remains', async (t) => {

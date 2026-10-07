@@ -415,6 +415,53 @@ test('incomplete or unsafe broker install settings fail before project mutation'
     assert.deepEqual(fs.readdirSync(f.project), []);
   }
 });
+test('named local defaults share hook settings and survive update, relocation and transport changes', t => {
+  const f = fixture(t, 'm2-moo');
+  installProject({ ...f, clients: 'codex,claude,opencode', hooks: true, room: 'm2-moo' });
+  for (const client of ['codex', 'claude', 'opencode']) assert.equal(inspectInstallation(f).receipt.localRooms[client], 'm2-moo');
+  const environments = () => [parseToml(read(f.project, '.codex/config.toml')).mcp_servers['agent-chat'].env,
+    readJson(f.project, '.mcp.json').mcpServers['agent-chat'].env, readJson(f.project, 'opencode.json').mcp['agent-chat'].environment];
+  for (const env of environments()) { assert.equal(env.AGENT_CHAT_ROOM, 'm2-moo'); assert.equal(env.AGENT_CHAT_BROKER_URL, ''); }
+  for (const file of ['.agent-chat/launchers/codex.mjs', '.agent-chat/launchers/claude.mjs', '.opencode/plugins/agent-chat.js']) assert.match(read(f.project, file), /AGENT_CHAT_ROOM.*m2-moo/);
+  assert.equal(updateProject(f).changes.length, 0);
+  const moved = path.join(f.base, 'renamed-project');
+  fs.renameSync(f.project, moved); f.project = moved;
+  updateProject(f);
+  for (const env of environments()) assert.equal(env.AGENT_CHAT_ROOM, 'm2-moo');
+  updateProject({ ...f, clients: 'claude', brokerUrl: 'http://broker:47321', brokerTokenFile: path.join(f.base, 'token'), room: 'broker-room' });
+  updateProject({ ...f, clients: 'claude', local: true });
+  assert.equal(readJson(f.project, '.mcp.json').mcpServers['agent-chat'].env.AGENT_CHAT_ROOM, 'm2-moo');
+  updateProject({ ...f, clients: 'claude', local: true, room: 'other-local-room' });
+  assert.equal(readJson(f.project, '.mcp.json').mcpServers['agent-chat'].env.AGENT_CHAT_ROOM, 'other-local-room');
+  assert.equal(inspectInstallation(f).receipt.localRooms.codex, 'm2-moo');
+  uninstallProject({ ...f, clients: 'claude' });
+  assert.equal(inspectInstallation(f).receipt.localRooms.claude, undefined);
+});
+test('invalid local room options and edits fail before project mutation', t => {
+  const f = fixture(t);
+  for (const room of ['', ' ', '../outside', '.', 'a'.repeat(129)]) {
+    assert.throws(() => installProject({ ...f, clients: 'claude', room }), /named local room/);
+    assert.deepEqual(fs.readdirSync(f.project), []);
+  }
+  installProject({ ...f, clients: 'claude', room: 'm2-moo' });
+  const config = readJson(f.project, '.mcp.json');
+  config.mcpServers['agent-chat'].env.AGENT_CHAT_ROOM = 'user-edit';
+  write(f.project, '.mcp.json', config);
+  const before = snapshot(f.project);
+  assert.throws(() => updateProject({ ...f, room: 'new-room' }), /changed|edited/);
+  assert.deepEqual(snapshot(f.project), before);
+});
+test('new clients inherit one existing local named default without changing existing client settings', t => {
+  const f = fixture(t);
+  installProject({ ...f, clients: 'codex', room: 'm2-moo' });
+  const codex = read(f.project, '.codex/config.toml');
+  installProject({ ...f, clients: 'claude' });
+  assert.equal(readJson(f.project, '.mcp.json').mcpServers['agent-chat'].env.AGENT_CHAT_ROOM, 'm2-moo');
+  assert.equal(read(f.project, '.codex/config.toml'), codex);
+  updateProject({ ...f, clients: 'claude', room: 'different' });
+  installProject({ ...f, clients: 'opencode' });
+  assert.equal(readJson(f.project, 'opencode.json').mcp['agent-chat'].environment.AGENT_CHAT_ROOM, canonical(f.project));
+});
 function snapshot(project) {
   const result = {};
   const walk = relative => {
@@ -461,7 +508,7 @@ test('installs all clients, preserves unrelated settings and provides a self-con
   for (const entry of inspection.receipt.entries) assert.equal(inspectManagedEntry({ project: f.project, entry }).status, 'present');
   for (const relative of RUNTIME_FILES) assert.ok(fs.existsSync(path.join(f.project, '.agent-chat/runtime', relative)), relative);
   const run = spawnSync(process.execPath, [path.join(f.project, '.agent-chat/runtime/agent-chat.mjs'), '--version'], { encoding: 'utf8' });
-  assert.equal(run.status, 0, run.stderr); assert.equal(run.stdout.trim(), '0.3.0');
+  assert.equal(run.status, 0, run.stderr); assert.equal(run.stdout.trim(), '0.4.0');
   const diagnostic = spawnSync(process.execPath, [path.join(f.project, '.agent-chat/runtime/agent-chat.mjs'), 'doctor', '--project', f.project, '--json'], { encoding: 'utf8' });
   assert.equal(diagnostic.status, 0, diagnostic.stderr + diagnostic.stdout);
   assert.equal(JSON.parse(diagnostic.stdout).ok, true);

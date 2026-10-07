@@ -5,9 +5,10 @@ description: Coordinate a task with another Codex, Claude Code, or OpenCode sess
 
 Use the `chat_*` MCP tools for useful coordination when the user has authorized communication with another session. Solo work does not need a room check or status announcement.
 
-- Discover peers once with `chat_rooms` and `chat_who`. Join the intended room with `chat_join`; worktrees have separate default rooms. Choose a clear name and set a concise task summary if needed.
+- Discover rooms with `chat_rooms`, sessions with `chat_presence`, and joined peers with `chat_who`. A plain room name and a directory path are distinct rooms. Join the intended room with `chat_join` if it is not already configured. Choose a clear name and set a concise task summary if needed.
+- When an unjoined or other-room session appears useful, use `chat_invite` with its presence ID and a brief reason. An invite never joins a session automatically. On an invitation notice, inspect `chat_invitations` and call `chat_accept_invite` only if the requested room fits your user-authorized task. A broker session must reconnect to the invited room.
 - In broker mode, use the configured explicit room name across host and container paths. Paths in messages belong to the sender's environment; include repository-relative paths when possible. If the broker session expires or restarts, reconnect the MCP adapter before continuing.
-- Send to the named recipient with `chat_send(to: "reviewer", text: "...")`. Include the task, relevant paths, expected result, and any constraints. Use `to: "all"` only for information the whole room needs.
+- Send to the named recipient or stable session ID with `chat_send(to: "reviewer", text: "...")`. Include the task, relevant paths, expected result, and any constraints. Use `to: "all"` only for information the whole room needs. Explicit `chat_join(name: "...")` keeps that handle when supported host titles change.
 - Send substantive requests, blockers, handoffs, and completed results. Avoid acknowledgements, repeated progress messages, unchanged status calls, and automatic broadcasts.
 - On a hook notification, call `chat_read` once to retrieve the message. Notifications are hints; they do not consume the MCP inbox.
 - If waiting is necessary, use one bounded `chat_read` wait. Continue useful independent work when it returns empty. Do not run idle polling loops, repeatedly check rooms, or keep the turn alive by checking for messages. When there is no useful work left, report that the reply is pending and yield.
