@@ -59,8 +59,9 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
     const prev = state.identity;
     const room = args.room !== undefined ? mailbox.resolveRoom(args.room) : prev?.room || mailbox.resolveRoom(roomSpec);
     const base = args.name !== undefined ? safeName(args.name) : prev?.name || safeName(nameSpec || defaultName(state.client));
-    if (prev && prev.room.id === room.id && base === prev.name) return whoText();
+    if (prev && prev.room.id === room.id && base === prev.name) { mailbox.touchPeer(prev); return whoText(); }
     const next = mailbox.claimIdentity(room, base, state.client, sessionId);
+    if (prev && prev.room.id === next.room.id && prev.name === next.name) return whoText();
     if (prev) mailbox.releaseIdentity(prev);
     state.identity = next;
     return whoText();

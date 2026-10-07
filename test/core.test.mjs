@@ -170,6 +170,24 @@ test('pending reads retain old identity and stop safely on rename and join', asy
   assert.equal((await server.callTool('chat_read')).includes('old room only'), false);
 });
 
+test('repeated joins preserve a suffixed identity, status and pending read', async (t) => {
+  const { mailbox, room } = fixture(t); const { server } = serverFor(t, mailbox);
+  const builder = mailbox.claimIdentity(room, 'builder');
+  await server.callTool('chat_join', { name: 'builder', room: room.id });
+  const identity = server.state.identity; assert.equal(identity.name, 'builder-2');
+  await server.callTool('chat_status', { mine: 'working' });
+  const pending = server.callTool('chat_read', { wait_seconds: 2 });
+  await server.callTool('chat_join', { name: 'builder', room: room.id });
+  assert.equal(server.state.identity, identity);
+  const ownPeers = mailbox.listPeers(room).filter(peer => peer.sessionId === identity.sessionId);
+  assert.equal(ownPeers.length, 1); assert.equal(ownPeers[0].status, 'working');
+  mailbox.appendMessage(room, builder.name, identity.name, 'continue pending read', builder.sessionId);
+  assert.match(await pending, /continue pending read/);
+  assert.equal(await server.callTool('chat_read'), 'No new messages.');
+  server.stop();
+  assert.deepEqual(mailbox.listPeers(room).map(peer => peer.sessionId), [builder.sessionId]);
+});
+
 test('cancelled pending read does not consume messages', async (t) => {
   const { mailbox, room } = fixture(t); const { server, responses } = serverFor(t, mailbox);
   await server.callTool('chat_join', { name: 'reader', room: room.id }); mailbox.claimIdentity(room, 'peer');
