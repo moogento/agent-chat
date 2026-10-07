@@ -20,7 +20,7 @@ function write(project, relative, data) {
 }
 const read = (project, relative) => fs.readFileSync(path.join(project, relative), 'utf8');
 const readJson = (project, relative) => JSON.parse(read(project, relative));
-const canonical = project => (process.platform === 'win32' ? fs.realpathSync.native : fs.realpathSync)(project);
+const canonical = project => (process.platform === 'win32' || process.platform === 'darwin' ? fs.realpathSync.native : fs.realpathSync)(project);
 const crlf = text => text.replace(/\r?\n/g, '\r\n');
 
 function useLegacyOpenCodeWrapper(f) {
@@ -139,6 +139,40 @@ test('Windows project drive casing and legacy short-name receipt aliases resolve
   assert.equal(readJson(f.project, '.agent-chat/install.json').project, expected);
   assert.deepEqual(uninstallProject({ ...f, project: lowerDrive }).retainedClients, []);
   assert.equal(inspectInstallation({ project: upperDrive }).exists, false);
+});
+
+test('case-insensitive macOS aliases allow partial updates and normalize legacy receipts', { skip: process.platform !== 'darwin' }, t => {
+  const f = fixture(t, 'Project Mixed Case');
+  const alias = path.join(f.base, 'pROJECT mIXED cASE');
+  if (!fs.existsSync(alias)) return t.skip('Temporary volume is case-sensitive.');
+  const originalStat = fs.statSync(f.project); const aliasStat = fs.statSync(alias);
+  if (originalStat.dev !== aliasStat.dev || originalStat.ino !== aliasStat.ino) return t.skip('Opposite-case paths are distinct directories.');
+  const expected = fs.realpathSync.native(f.project);
+  installProject({ ...f, project: alias, clients: ['codex', 'claude'], hooks: true });
+  assert.equal(inspectInstallation({ project: alias }).receipt.project, expected);
+  assert.equal(inspectInstallation({ project: alias }).relocated, null);
+  assert.equal(updateProject({ ...f, project: alias, clients: ['claude'] }).changes.length, 0);
+  const receipt = inspectInstallation(f).receipt;
+  receipt.project = fs.realpathSync(alias);
+  assert.notEqual(receipt.project, expected, 'The fixture reproduces the legacy non-native case spelling.');
+  write(f.project, '.agent-chat/install.json', receipt);
+  assert.equal(inspectInstallation({ project: alias }).relocated, null);
+  assert.deepEqual(updateProject({ ...f, project: alias, clients: ['claude'] }).clients, ['claude']);
+  assert.equal(readJson(f.project, '.agent-chat/install.json').project, expected);
+  uninstallProject({ ...f, project: alias, clients: ['claude'] });
+  assert.deepEqual(inspectInstallation(f).receipt.clients, ['codex']);
+});
+
+test('distinct directories on case-sensitive volumes remain relocation candidates', t => {
+  const f = fixture(t, 'ProjectMixedCase');
+  const other = path.join(f.base, 'projectmixedcase');
+  if (fs.existsSync(other)) return t.skip('Temporary volume is case-insensitive.');
+  installProject({ ...f, clients: ['codex', 'claude'] });
+  fs.cpSync(f.project, other, { recursive: true });
+  assert.notEqual(canonical(f.project), canonical(other));
+  assert.deepEqual(inspectInstallation({ project: other }).relocated, { from: canonical(f.project), to: canonical(other) });
+  assert.throws(() => updateProject({ ...f, project: other, clients: ['claude'] }), /all installed clients/);
+  assert.equal(inspectInstallation(f).relocated, null);
 });
 
 function moveInstalledProject(f) {

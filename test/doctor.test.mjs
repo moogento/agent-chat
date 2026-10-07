@@ -10,7 +10,7 @@ import { bindNotification } from '../hooks/bind.mjs';
 import { NOTIFICATION_LIMITS } from '../hooks/notifications.mjs';
 
 function fixture(t, options = {}) {
-  const project = (process.platform === 'win32' ? fs.realpathSync.native : fs.realpathSync)(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-doctor-')));
+  const project = (process.platform === 'win32' || process.platform === 'darwin' ? fs.realpathSync.native : fs.realpathSync)(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-doctor-')));
   t.after(() => fs.rmSync(project, { recursive: true, force: true }));
   if (options.install !== false) installProject({ project, clients: options.clients || ['codex', 'claude', 'opencode'], hooks: Boolean(options.hooks) });
   return { project, paths: installationPaths(project) };
@@ -234,6 +234,24 @@ test('doctor accepts alternate Windows drive casing and a legacy receipt path', 
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.equal(result.project, fs.realpathSync.native(project));
   }
+  assert.deepEqual(snapshot(project), before);
+});
+
+test('doctor recognizes case-insensitive macOS project aliases and legacy receipt spelling read-only', { skip: process.platform !== 'darwin' }, async t => {
+  const { project, paths } = fixture(t, { clients: ['codex', 'claude'] });
+  const basename = path.basename(project);
+  const alias = path.join(path.dirname(project), [...basename].map(letter => letter === letter.toUpperCase() ? letter.toLowerCase() : letter.toUpperCase()).join(''));
+  if (!fs.existsSync(alias)) return t.skip('Temporary volume is case-sensitive.');
+  const originalStat = fs.statSync(project); const aliasStat = fs.statSync(alias);
+  if (originalStat.dev !== aliasStat.dev || originalStat.ino !== aliasStat.ino) return t.skip('Opposite-case paths are distinct directories.');
+  const receipt = JSON.parse(fs.readFileSync(paths.receipt, 'utf8'));
+  receipt.project = fs.realpathSync(alias);
+  fs.writeFileSync(paths.receipt, JSON.stringify(receipt));
+  const before = snapshot(project);
+  const result = await doctorProject({ project: alias });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.project, fs.realpathSync.native(project));
+  assert.equal(check(result, 'installation.location').length, 0);
   assert.deepEqual(snapshot(project), before);
 });
 

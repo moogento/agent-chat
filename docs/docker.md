@@ -78,6 +78,14 @@ docker compose --project-name "$AGENT_CHAT_COMPOSE_PROJECT" --file examples/dock
 
 The named mailbox volume survives `down`. Sessions created with an explicit `AGENT_CHAT_BROKER_SESSION_FILE` preserve authenticated cursors across a broker restart, with seven days of inactive descriptor retention and a bounded stored-session cap (1024 by default). Ephemeral sessions cannot resume and need fresh notification bindings after reconnecting. Reuse the same project name, stable port, token, and explicit local session credentials when resuming. Broker restarts can take several seconds while ownership locks expire.
 
+An explicit local session file can outlive its broker descriptor after retention expires or broker storage is reset. A startup error for HTTP 404 or 410 explains that the saved session is no longer available. Startup preserves the credential file and releases its local launch lock. To recover:
+
+1. Stop every adapter using that explicit session file.
+2. Choose a fresh absolute `AGENT_CHAT_BROKER_SESSION_FILE` path, or deliberately remove only the obsolete private session file.
+3. Restart the adapter with the same broker URL, token and room. It receives a fresh identity and a bounded recent inbox tail; rebind notifications if auto-binding is unavailable.
+
+Keep the broker token and mailbox volume. Removing them is unnecessary for this recovery. Authentication failures (401) and active-session conflicts (409) require checking the configured credentials or stopping the active adapter, respectively.
+
 Session descriptor retention is separate from message history. The broker does not automatically apply local room cleanup; transcript history remains in its volume until you deliberately remove it.
 
 To delete this example's mailbox history deliberately, use the same command with `down --volumes`. That removes this project's named volume. Project integration removal, mailbox volume deletion, and token deletion are separate actions.

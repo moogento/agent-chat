@@ -27,14 +27,14 @@ function readJson(file, maxBytes) {
 
 function canonicalCwd(cwd) {
   if (typeof cwd !== 'string' || !path.isAbsolute(cwd)) return null;
-  try { return fs.statSync(cwd).isDirectory() ? (process.platform === 'win32' ? fs.realpathSync.native(cwd) : fs.realpathSync(cwd)) : null; } catch { return null; }
+  try { return fs.statSync(cwd).isDirectory() ? (['win32', 'darwin'].includes(process.platform) ? fs.realpathSync.native(cwd) : fs.realpathSync(cwd)) : null; } catch { return null; }
 }
 
 export function sameBindingCwd(left, right) {
   if (typeof left !== 'string' || typeof right !== 'string') return false;
   if (left === right) return true;
-  if (process.platform !== 'win32') return false;
-  // Old canonical paths may retain Windows 8.3 aliases. Reject replacement links
+  if (!['win32', 'darwin'].includes(process.platform)) return false;
+  // Old canonical paths may retain case variants or Windows 8.3 aliases. Reject replacement links
   // on either side before resolving aliases into the same native directory.
   const linkFree = cwd => {
     if (!path.isAbsolute(cwd)) return false;

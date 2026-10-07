@@ -10,7 +10,7 @@ import { findBinding, readConfig, runCommandHook, notifySession, sameBindingCwd,
 
 function fixture(t) {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-binding-lifecycle-'));
-  const cwd = process.platform === 'win32' ? fs.realpathSync.native(temporary) : fs.realpathSync(temporary);
+  const cwd = ['win32', 'darwin'].includes(process.platform) ? fs.realpathSync.native(temporary) : fs.realpathSync(temporary);
   t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
   const configFile = path.join(cwd, 'notifications.json');
   const binding = { client: 'codex', hostSessionId: 'host', cwd, room: 'room', mailboxSessionId: 'session' };
@@ -110,6 +110,32 @@ test('successful identity auto-binding refreshes retention at most once per hour
   await runCommandHook(input);
   assert.equal(readConfig(f.configFile).bindings[0].boundAt, refreshed);
   assert.equal(fs.statSync(f.configFile).mtimeMs, past.getTime());
+});
+
+test('macOS legacy case bindings resolve and deduplicate without combining distinct directories', { skip: process.platform !== 'darwin' }, t => {
+  const f = fixture(t);
+  const actual = path.join(f.cwd, 'MixedCaseWorktree'); const variant = path.join(f.cwd, 'mixedcaseworktree');
+  fs.mkdirSync(actual);
+  if (!fs.existsSync(variant)) {
+    fs.mkdirSync(variant);
+    assert.equal(sameBindingCwd(actual, variant), false);
+    bindNotification({ configFile: f.configFile, binding: { ...f.binding, cwd: actual } });
+    bindNotification({ configFile: f.configFile, binding: { ...f.binding, cwd: variant } });
+    assert.equal(readConfig(f.configFile).bindings.length, 2);
+    return;
+  }
+  assert.equal(fs.statSync(actual).ino, fs.statSync(variant).ino);
+  const native = fs.realpathSync.native(actual);
+  fs.writeFileSync(f.configFile, JSON.stringify({ version: 1, bindings: [{ ...f.binding, cwd: fs.realpathSync(variant) }] }));
+  assert.equal(sameBindingCwd(variant, native), true);
+  assert.equal(sameBindingCwd(native, variant), true);
+  assert.equal(f.lookup({}, { cwd: actual }).mailboxSessionId, f.binding.mailboxSessionId);
+  bindNotification({ configFile: f.configFile, binding: { ...f.binding, cwd: variant } });
+  assert.equal(readConfig(f.configFile).bindings.length, 1);
+  assert.equal(readConfig(f.configFile).bindings[0].cwd, native);
+  const other = path.join(f.cwd, 'OtherWorktree'); fs.mkdirSync(other);
+  assert.equal(f.lookup({}, { cwd: other }), null);
+  assert.equal(sameBindingCwd(actual, other), false);
 });
 
 test('Windows path case variants share one native canonical binding', { skip: process.platform !== 'win32' }, t => {

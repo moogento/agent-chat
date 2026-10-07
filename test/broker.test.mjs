@@ -167,7 +167,7 @@ async function proxy(t, f, extra = {}) {
   t.after(() => { if (child.exitCode === null) child.kill(); });
   let buffer = ''; const waiting = new Map(); const responses = []; let stderr = '';
   child.stderr.on('data', chunk => stderr += chunk); child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { buffer += chunk; let end; while ((end = buffer.indexOf('\n')) >= 0) { const response = JSON.parse(buffer.slice(0, end)); responses.push(response); buffer = buffer.slice(end + 1); waiting.get(response.id)?.(response); waiting.delete(response.id); } });
-  const send = rpc => new Promise((resolve, reject) => { const timer = setTimeout(() => reject(new Error(`Proxy timed out: ${stderr}`)), 5000); waiting.set(rpc.id, value => { clearTimeout(timer); resolve(value); }); child.stdin.write(JSON.stringify(rpc) + '\n'); });
+  const send = (rpc, timeoutMs = 5000) => new Promise((resolve, reject) => { const timer = setTimeout(() => reject(new Error(`Proxy timed out: ${stderr}`)), timeoutMs); waiting.set(rpc.id, value => { clearTimeout(timer); resolve(value); }); child.stdin.write(JSON.stringify(rpc) + '\n'); });
   return { child, send, responses, stderr: () => stderr };
 }
 
@@ -243,6 +243,57 @@ test('stdio proxy recovers lost cached reads and sends with the same transport I
   const cursor = JSON.parse(fs.readFileSync(path.join(f.home, 'rooms/shared/cursors', `${sessionId}.json`), 'utf8'));
   assert.ok(cursor.offset > 0);
   p.child.stdin.end(); await once(p.child, 'exit'); assert.equal(f.broker.stats().pendingBytes, 0);
+});
+
+test('a dropped connection during a pending read retries the original wait instead of cancelling it', async t => {
+  const f = await fixture(t); const sender = await f.make('sender'); const p = await proxy(t, f, { AGENT_CHAT_NAME: 'proxy' });
+  await p.send({ jsonrpc: '2.0', id: 600001, method: 'tools/call', params: { name: 'chat_who' } });
+  const requests = []; let firstResponse;
+  const observe = (req, res) => {
+    if (!req.url.endsWith('/rpc')) return;
+    let body = ''; req.on('data', chunk => { body += chunk; });
+    req.on('end', () => { const value = JSON.parse(body); if (value.rpc.id === 600002) { requests.push(value); firstResponse ??= res; } });
+  };
+  f.broker.server.prependListener('request', observe); t.after(() => f.broker.server.removeListener('request', observe));
+  const waiting = p.send({ jsonrpc: '2.0', id: 600002, method: 'tools/call', params: { name: 'chat_read', arguments: { wait_seconds: 20 } } }, 20000);
+  void waiting.catch(() => {});
+  const deadline = Date.now() + 10000;
+  while ((!firstResponse || f.broker.stats().pendingRequests !== 1) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(firstResponse); assert.equal(f.broker.stats().pendingRequests, 1);
+  firstResponse.socket.destroy();
+  while (requests.length < 2 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(requests.length, 2); assert.deepEqual(requests[0], requests[1]);
+  await call(sender, 'chat_send', { to: 'proxy', text: 'message after interrupted transport' });
+  const delivered = await waiting;
+  assert.match(delivered.result.content[0].text, /message after interrupted transport/);
+  assert.doesNotMatch(delivered.result.content[0].text, /cancelled/);
+  const next = await p.send({ jsonrpc: '2.0', id: 600003, method: 'tools/call', params: { name: 'chat_read' } });
+  assert.match(next.result.content[0].text, /No new messages/);
+  assert.equal(p.responses.filter(response => response.id === 600002).length, 1);
+  p.child.stdin.end(); await once(p.child, 'exit'); assert.equal(f.broker.stats().pendingBytes, 0);
+});
+
+test('explicit MCP cancellation and session closure still stop pending broker reads', async t => {
+  const f = await fixture(t); const sender = await f.make('sender');
+  for (const action of ['cancel', 'close']) {
+    const reader = await f.make(`reader-${action}`); const id = action === 'cancel' ? 610001 : 610002;
+    const waiting = remoteRpc(reader, { jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'chat_read', arguments: { wait_seconds: 20 } } });
+    void waiting.catch(() => {});
+    const deadline = Date.now() + 10000;
+    while (f.broker.stats().pendingRequests !== 1 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(f.broker.stats().pendingRequests, 1);
+    if (action === 'cancel') await remoteRpc(reader, { jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: id } });
+    else await closeRemoteSession(reader);
+    const stopped = await waiting; assert.match(stopped.responses[0].result.content[0].text, /Read stopped: (request cancelled|server is shutting down)/);
+    assert.equal(f.broker.stats().pendingRequests, 0);
+    if (action === 'cancel') {
+      await acknowledgeRemoteResponse(reader, stopped.receipt);
+      await call(sender, 'chat_send', { to: reader.peer.name, text: 'still unread after explicit cancellation' });
+      assert.match((await call(reader, 'chat_read')).text, /still unread after explicit cancellation/);
+      await closeRemoteSession(reader);
+    } else await assert.rejects(call(reader, 'chat_read'), error => error.status === 404);
+  }
+  assert.equal(f.broker.stats().activeSessions, 1); assert.equal(f.broker.stats().pendingBytes, 0);
 });
 
 test('stdio proxy preserves uncertainty after both cached response deliveries are lost', async t => {
