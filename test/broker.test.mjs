@@ -104,12 +104,17 @@ test('broker retains only reply-match metadata while a read awaits acknowledgeme
   await call(bob, 'chat_send', { to: 'alice', text: 'private answer' });
   const read = await call(alice, 'chat_read', {}, { ack: false });
   const remove = fs.rmSync;
+  let cleanupFailed = false;
   fs.rmSync = (file, ...args) => {
-    if (String(file).endsWith(`/reply-waits/${alice.sessionId}.json`)) throw new Error('simulated broker watch cleanup failure');
+    if (path.basename(String(file)) === `${alice.sessionId}.json` && path.basename(path.dirname(String(file))) === 'reply-waits') {
+      cleanupFailed = true;
+      throw new Error('simulated broker watch cleanup failure');
+    }
     return remove(file, ...args);
   };
   try { await acknowledgeRemoteResponse(alice, read.receipt); }
   finally { fs.rmSync = remove; }
+  assert.equal(cleanupFailed, true, 'broker cleanup failure was actually simulated');
   assert.match((await call(alice, 'chat_read')).text, /No new messages/);
 });
 

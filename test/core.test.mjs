@@ -132,8 +132,12 @@ test('a reply-watch cleanup failure cannot hide a committed read', t => {
   mailbox.beginReplyWait(alice, bob.sessionId, 2);
   mailbox.appendMessage(room, bob.name, alice.name, 'answer survives cleanup failure', bob.sessionId, alice.sessionId);
   const remove = fs.rmSync;
+  let cleanupFailed = false;
   fs.rmSync = (file, ...args) => {
-    if (String(file).endsWith(`/reply-waits/${alice.sessionId}.json`)) throw new Error('simulated watch cleanup failure');
+    if (path.basename(String(file)) === `${alice.sessionId}.json` && path.basename(path.dirname(String(file))) === 'reply-waits') {
+      cleanupFailed = true;
+      throw new Error('simulated watch cleanup failure');
+    }
     return remove(file, ...args);
   };
   try {
@@ -141,6 +145,7 @@ test('a reply-watch cleanup failure cannot hide a committed read', t => {
     assert.deepEqual(first.messages.map(message => message.text), ['answer survives cleanup failure']);
     assert.deepEqual(mailbox.takeUnread(alice).messages, []);
   } finally { fs.rmSync = remove; }
+  assert.equal(cleanupFailed, true, 'cleanup failure was actually simulated');
 });
 
 test('watched sends require an active peer and preserve an earlier watch', async t => {
