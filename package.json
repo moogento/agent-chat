@@ -1,6 +1,6 @@
 {
   "name": "agent-chat",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Local agent messaging for Codex, Claude Code, and OpenCode through one shared MCP server.",
   "type": "module",
   "bin": {

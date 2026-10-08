@@ -187,6 +187,121 @@ test('subagents, stop and notification events cannot consume main-session notice
   assert.equal(delivered, 1);
 });
 
+for (const client of ['codex', 'claude-code']) {
+  test(`${client} Stop holds only an exact directed reply watch, then wakes once without reading peer text`, async t => {
+    const f = fixture(t, client);
+    const sender = f.mailbox.claimIdentity(f.room, 'awaited-sender', 'peer', crypto.randomUUID());
+    const other = f.mailbox.claimIdentity(f.room, 'other-sender', 'peer', crypto.randomUUID());
+    f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+    const payload = { session_id: f.binding.hostSessionId, cwd: f.cwd, hook_event_name: 'Stop' };
+    const stop = async () => {
+      const output = [];
+      await runCommandHook({ client, payload, env: f.env, mailbox: f.mailbox,
+        stopWaitOptions: { sliceMs: 20, pollMs: 5 }, write: value => output.push(value) });
+      assert.equal(output.length, 1);
+      return output[0];
+    };
+    f.mailbox.appendMessage(f.room, other.name, f.peer.name, 'wrong sender secret', other.sessionId, f.peer.sessionId);
+    f.mailbox.appendMessage(f.room, sender.name, 'all', 'broadcast secret', sender.sessionId);
+    const pending = await stop();
+    assert.equal(JSON.parse(pending).decision, 'block');
+    assert.match(pending, /chat_wait_status/);
+    assert.doesNotMatch(pending, /secret/);
+    assert.equal(f.mailbox.replyWaitStatus(f.peer).state, 'waiting');
+    f.mailbox.appendMessage(f.room, sender.name, f.peer.name, 'actual private reply', sender.sessionId, f.peer.sessionId);
+    const received = await stop();
+    assert.equal(JSON.parse(received).decision, 'block');
+    assert.match(received, /chat_read/);
+    assert.doesNotMatch(received, /actual private reply/);
+    assert.equal(f.mailbox.replyWaitStatus(f.peer).state, 'replied');
+    assert.equal(await stop(), '{}\n');
+    const unread = f.mailbox.takeUnread(f.peer);
+    assert.ok(unread.messages.some(message => message.text === 'actual private reply'));
+    assert.equal(f.mailbox.replyWaitStatus(f.peer).state, 'none');
+    f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+    f.mailbox.appendMessage(f.room, sender.name, f.peer.name, 'second private reply', sender.sessionId, f.peer.sessionId);
+    const nextWatch = await stop();
+    assert.equal(JSON.parse(nextWatch).decision, 'block');
+    assert.match(nextWatch, /chat_read/);
+    assert.doesNotMatch(nextWatch, /second private reply/);
+  });
+}
+
+test('Stop reply watch ends on cancellation or deadline, and survives a sender reconnect', async t => {
+  const f = fixture(t);
+  const sender = f.mailbox.claimIdentity(f.room, 'awaited-sender', 'peer', crypto.randomUUID());
+  const payload = { session_id: f.binding.hostSessionId, cwd: f.cwd, hook_event_name: 'Stop' };
+  const stop = async stopWaitOptions => {
+    const output = [];
+    await runCommandHook({ client: 'codex', payload, env: f.env, mailbox: f.mailbox, stopWaitOptions,
+      write: value => output.push(value) });
+    return JSON.parse(output.join(''));
+  };
+  f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+  assert.deepEqual(await stop({ sliceMs: 20, sleep: async () => { f.mailbox.cancelReplyWait(f.peer); } }), {});
+  const wait = f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+  const expired = await stop({ now: () => wait.deadlineAt, sliceMs: 20 });
+  assert.equal(expired.decision, 'block');
+  assert.match(expired.reason, /deadline/);
+  assert.match(expired.reason, /chat_cancel_wait/);
+  assert.deepEqual(await stop({ now: () => wait.deadlineAt, sliceMs: 20 }), {});
+  f.mailbox.cancelReplyWait(f.peer);
+  f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+  f.mailbox.releaseIdentity(sender);
+  const absent = await stop({ sliceMs: 20, pollMs: 5 });
+  assert.equal(absent.decision, 'block');
+  assert.match(absent.reason, /still pending/);
+});
+
+test('Stop rechecks a watch before continuing after cancellation or replacement', async t => {
+  const f = fixture(t);
+  const sender = f.mailbox.claimIdentity(f.room, 'awaited-sender', 'peer', crypto.randomUUID());
+  const payload = { session_id: f.binding.hostSessionId, cwd: f.cwd, hook_event_name: 'Stop' };
+  const originalStatus = f.mailbox.replyWaitStatus;
+  const stop = async () => {
+    const output = [];
+    await runCommandHook({ client: 'codex', payload, env: f.env, mailbox: f.mailbox,
+      stopWaitOptions: { sliceMs: 0 }, write: value => output.push(value) });
+    return JSON.parse(output.join(''));
+  };
+  f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+  let checks = 0;
+  f.mailbox.replyWaitStatus = identity => {
+    const result = originalStatus(identity);
+    if (++checks === 1) f.mailbox.cancelReplyWait(f.peer);
+    return result;
+  };
+  assert.deepEqual(await stop(), {});
+  f.mailbox.replyWaitStatus = originalStatus;
+
+  f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+  f.mailbox.appendMessage(f.room, sender.name, f.peer.name, 'old reply', sender.sessionId, f.peer.sessionId);
+  checks = 0;
+  f.mailbox.replyWaitStatus = identity => {
+    const result = originalStatus(identity);
+    if (++checks === 1) f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+    return result;
+  };
+  const replacement = await stop();
+  assert.equal(replacement.decision, 'block');
+  assert.match(replacement.reason, /chat_wait_status/);
+  assert.doesNotMatch(replacement.reason, /chat_read/);
+});
+
+test('SessionEnd cancels only its verified reply watch', async t => {
+  const f = fixture(t, 'claude-code');
+  const sender = f.mailbox.claimIdentity(f.room, 'awaited-sender', 'peer', crypto.randomUUID());
+  f.mailbox.beginReplyWait(f.peer, sender.sessionId, 2);
+  await runCommandHook({ client: 'claude-code', payload: { session_id: 'different-host', cwd: f.cwd,
+    hook_event_name: 'SessionEnd' }, env: f.env, mailbox: f.mailbox,
+  write: () => assert.fail('SessionEnd must be silent') });
+  assert.equal(f.mailbox.replyWaitStatus(f.peer).state, 'waiting');
+  await runCommandHook({ client: 'claude-code', payload: { session_id: f.binding.hostSessionId, cwd: f.cwd,
+    hook_event_name: 'SessionEnd' }, env: f.env, mailbox: f.mailbox,
+  write: () => assert.fail('SessionEnd must be silent') });
+  assert.equal(f.mailbox.replyWaitStatus(f.peer).state, 'none');
+});
+
 test('conflicting bindings fail closed and bind helper replaces one exact match', async t => {
   const f = fixture(t);
   fs.writeFileSync(f.configFile, JSON.stringify({ version: 1, bindings: [f.binding, { ...f.binding, room: 'other' }] }));

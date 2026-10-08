@@ -8,9 +8,9 @@ Agent Chat has one CLI/MCP entrypoint, `agent-chat.mjs`, and a mailbox library i
 
 | Archive | Layout and use |
 | --- | --- |
-| `agent-chat-0.5.0.tgz` | npm `package/` layout, for installation from a local tarball and `agent-chat install` |
-| `agent-chat-plugin-0.5.0.tgz` | One `agent-chat/` directory with a direct executable, `INSTALL.txt`, portable and client manifests |
-| `agent-chat-marketplace-0.5.0.tgz` | One `agent-chat-marketplace/` directory with both marketplace manifests and `plugins/agent-chat/` |
+| `agent-chat-0.6.0.tgz` | npm `package/` layout, for installation from a local tarball and `agent-chat install` |
+| `agent-chat-plugin-0.6.0.tgz` | One `agent-chat/` directory with a direct executable, `INSTALL.txt`, portable and client manifests |
+| `agent-chat-marketplace-0.6.0.tgz` | One `agent-chat-marketplace/` directory with both marketplace manifests and `plugins/agent-chat/` |
 | `SHA256SUMS` | SHA-256 checksums of the three archives |
 
 One npm allowlist feeds all archives, with a generated `INSTALL.txt` added to the plugin copies. The MCP core uses only Node built-ins. The installer bundles one pinned `smol-toml` parser and its BSD-3-Clause license for safe Codex configuration validation and offline installation. Other dependency directories are excluded. There are no automatic npm install scripts. Release construction needs Node.js, npm, and `tar`, and uses temporary staging outside the source tree. Archives include the MIT license and README. `.temp/`, tests, private fixtures, `.env` files, `.git`, and generated archives are excluded.
