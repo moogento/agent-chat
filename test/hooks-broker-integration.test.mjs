@@ -81,6 +81,33 @@ test(`real broker ${client} executable auto-binds and reports counts without con
 });
 }
 
+test('broker Stop wakes the exact bound session for its watched reply and SessionEnd cancels another watch', async t => {
+  const f = await fixture(t, 'claude-code');
+  assert.equal((await executeHook(f.payload, f.env, 'claude-code')).status, 0);
+  const request = await f.tool(f.recipient, 'chat_send', { to: 'sender', text: 'Please send a result', await_reply_minutes: 1 });
+  assert.match(JSON.stringify(request), /Watching for a reply/);
+  const stop = { session_id: f.payload.session_id, cwd: f.cwd, hook_event_name: 'Stop' };
+  const other = await createRemoteSession({ url: f.broker.url, tokenFile: f.tokenFile, room: f.room, name: 'unrelated',
+    clientCwd: f.cwd, sessionDir: path.join(f.root, 'unrelated-credentials') });
+  await f.tool(other, 'chat_send', { to: 'recipient', text: 'wrong sender private text' });
+  await f.send('watched private reply');
+  const wake = await executeHook(stop, f.env, 'claude-code');
+  assert.equal(wake.status, 0, wake.stderr);
+  assert.equal(JSON.parse(wake.stdout).decision, 'block');
+  assert.match(wake.stdout, /chat_read/);
+  assert.doesNotMatch(wake.stdout, /private text|private reply/);
+  assert.equal((await executeHook(stop, f.env, 'claude-code')).stdout, '{}\n');
+  const unread = await f.tool(f.recipient, 'chat_read', { wait_seconds: 0 });
+  assert.match(JSON.stringify(unread), /watched private reply/);
+  const second = await f.tool(f.recipient, 'chat_send', { to: 'sender', text: 'Please send another result', await_reply_minutes: 2 });
+  assert.match(JSON.stringify(second), /Watching for a reply/);
+  const ended = await executeHook({ ...stop, hook_event_name: 'SessionEnd' }, f.env, 'claude-code');
+  assert.equal(ended.status, 0, ended.stderr);
+  assert.equal(ended.stdout, '');
+  const status = await f.tool(f.recipient, 'chat_wait_status');
+  assert.match(JSON.stringify(status), /No active reply watch/);
+});
+
 test('real broker hooks cannot bind a session whose private credential belongs to another client', async t => {
   const f = await fixture(t);
   await f.send('unread private data');
@@ -112,4 +139,30 @@ test('real broker OpenCode notices preserve tool output, use idle toasts and lea
   assert.equal(toasts.length, 1);
   assert.doesNotMatch(output.output + toasts[0].body.message, /private opencode broker message/);
   assert.match(JSON.stringify(await f.tool(f.recipient, 'chat_read', { wait_seconds: 0 })), /private opencode broker message/);
+});
+
+test('real broker OpenCode resumes only its bound idle session for an awaited reply', async t => {
+  const f = await fixture(t, 'opencode');
+  const metadata = f.identity.structuredContent.agentChatIdentity;
+  bindNotification({ configFile: f.configFile, binding: { client: 'opencode', hostSessionId: 'live-host', cwd: f.cwd,
+    room: f.room, mailboxSessionId: metadata.sessionId, brokerUrl: f.broker.url } });
+  const sender = (await f.tool(f.sender, 'chat_who')).structuredContent.agentChatIdentity;
+  await f.tool(f.recipient, 'chat_send', { to: sender.name, text: 'Please review this change', await_reply_minutes: 1 });
+  await f.tool(f.sender, 'chat_send', { to: metadata.name, text: 'Private review reply' });
+  const prompts = [];
+  const plugin = await AgentChatPlugin({ directory: f.cwd, client: {
+    session: { get: async () => ({ data: { id: 'live-host', agent: 'plan',
+      model: { providerID: 'provider', id: 'model', variant: 'high' } } }),
+    promptAsync: async value => { prompts.push(value); return { data: true }; } },
+    tui: { showToast: async () => ({ data: true }) },
+  } }, { env: f.env });
+  await plugin.event({ event: { type: 'session.idle', properties: { sessionID: 'live-host' } } });
+  assert.equal(prompts.length, 1);
+  assert.deepEqual(prompts[0].path, { id: 'live-host' });
+  assert.equal(prompts[0].body.agent, 'plan');
+  assert.equal(prompts[0].body.variant, 'high');
+  assert.match(prompts[0].body.parts[0].text, /Call chat_read/);
+  assert.doesNotMatch(JSON.stringify(prompts), /Private review reply/);
+  assert.match(JSON.stringify(await f.tool(f.recipient, 'chat_wait_status')), /Reply received/);
+  await plugin.event({ event: { type: 'session.deleted', properties: { info: { id: 'live-host' } } } });
 });

@@ -34,6 +34,22 @@ function useLegacyOpenCodeWrapper(f) {
   return { current, legacy };
 }
 
+test('managed Stop hooks have a bounded reply-watch timeout without delaying other hooks', t => {
+  const f = fixture(t);
+  installProject({ ...f, clients: ['codex', 'claude'], hooks: true });
+  for (const relative of ['.codex/hooks.json', '.claude/settings.local.json']) {
+    const hooks = readJson(f.project, relative).hooks;
+    assert.equal(hooks.Stop[0].hooks[0].timeout, 540);
+    for (const event of ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'SessionEnd']) {
+      assert.equal(hooks[event][0].hooks[0].timeout, 5);
+    }
+  }
+  for (const relative of ['hooks/codex.json', 'hooks/claude-code.json']) {
+    const hooks = JSON.parse(fs.readFileSync(path.join(root, relative), 'utf8')).hooks;
+    assert.equal(hooks.Stop[0].hooks[0].timeout, 540);
+  }
+});
+
 test('Codex install and update preserve literal dollar patterns in runtime and token paths', t => {
   for (const pattern of ['$$', '$&']) {
     const f = fixture(t, `project ${pattern}`);
@@ -508,7 +524,7 @@ test('installs all clients, preserves unrelated settings and provides a self-con
   for (const entry of inspection.receipt.entries) assert.equal(inspectManagedEntry({ project: f.project, entry }).status, 'present');
   for (const relative of RUNTIME_FILES) assert.ok(fs.existsSync(path.join(f.project, '.agent-chat/runtime', relative)), relative);
   const run = spawnSync(process.execPath, [path.join(f.project, '.agent-chat/runtime/agent-chat.mjs'), '--version'], { encoding: 'utf8' });
-  assert.equal(run.status, 0, run.stderr); assert.equal(run.stdout.trim(), '0.5.0');
+  assert.equal(run.status, 0, run.stderr); assert.equal(run.stdout.trim(), '0.6.0');
   const diagnostic = spawnSync(process.execPath, [path.join(f.project, '.agent-chat/runtime/agent-chat.mjs'), 'doctor', '--project', f.project, '--json'], { encoding: 'utf8' });
   assert.equal(diagnostic.status, 0, diagnostic.stderr + diagnostic.stdout);
   assert.equal(JSON.parse(diagnostic.stdout).ok, true);

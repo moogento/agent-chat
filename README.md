@@ -10,6 +10,7 @@ The messaging server and optional broker use only Node built-ins. The installer 
 - Keep conversations scoped to task rooms, with named recipients and independent unread-message cursors.
 - Limit message pages and wait budgets, with quiet unchanged status checks to reduce context and polling overhead.
 - Show optional **💬 Agent Chat** inbox hints through client-specific notification hooks.
+- Await a specific peer's reply for up to two hours with an opt-in, session-bound watch.
 - Install, diagnose, update, and remove project integrations while preserving unrelated settings.
 - Connect agents in separate Docker containers through an optional authenticated broker.
 
@@ -76,15 +77,17 @@ For native plugin and marketplace installation, conflicts, broker options, and r
 
 ## Coordinate a task
 
-Ask each session to use agent-chat and join a shared room, such as `checkout-refactor`. Send a focused request to a specific peer, then continue independent work. Read a reply when notified or at a useful checkpoint.
+Ask each session to use agent-chat and join a shared room, such as `checkout-refactor`. Send a focused request to a specific peer, then continue independent work. Read a reply when notified or at a useful checkpoint. To avoid repeatedly prompting a waiting agent, add `await_reply_minutes: 120` to a directed `chat_send` call and bind the host conversation with `chat_who`. See [bounded reply waits](docs/reply-waits.md) for client behavior and limits.
 
 | MCP tool | Purpose |
 | --- | --- |
 | `chat_rooms()` | Find rooms and summaries |
 | `chat_join(name?, room?)` | Pick a name or join a shared room |
 | `chat_who()` | See active peers and statuses |
-| `chat_send(text, to?)` | Message a named peer; omitted `to` broadcasts to the room |
+| `chat_send(text, to?, await_reply_minutes?)` | Message a named peer; optionally watch for that peer's directed reply for 1 to 120 minutes |
 | `chat_read(wait_seconds?, limit?, max_bytes?)` | Read a bounded batch of unread messages, optionally waiting |
+| `chat_wait_status()` | Inspect your active reply watch without consuming the inbox |
+| `chat_cancel_wait()` | Stop an active reply watch |
 | `chat_status(mine?, task?, availability?, model?, effort?, context_remaining_percent?, room_summary?, room_status?)` | Publish your task and routing profile or update room status |
 | `chat_presence()` | Find recent sessions in this mailbox, including sessions that have not joined a room |
 | `chat_invite(to_id, note?)` | Invite a listed session to your room |
@@ -95,7 +98,7 @@ The bundled [skill](skills/agent-chat/SKILL.md) prefers targeted messages and bo
 
 Messages, inbox hints, and toast titles use the **💬 Agent Chat** label so they stand out from other tool output.
 
-MCP is pull-based. Hooks surface an inbox hint at supported client lifecycle events, then the agent calls `chat_read`. Hooks do not acknowledge MCP messages and cannot promise to interrupt an idle session or wake a finished turn. Without hooks, the agent explicitly checks its inbox. Adapter tests simulate host events; passing those tests does not establish live acceptance by every client version.
+MCP is pull-based. Hooks surface an inbox hint at supported client lifecycle events, then the agent calls `chat_read`. The opt-in reply watch can keep a Codex or Claude turn waiting through bounded `Stop` continuations, or ask an idle OpenCode session to resume through its plugin. It cannot restart a closed client or interrupted turn. Without these adapters, the agent explicitly checks its inbox. Adapter tests simulate host events; passing those tests does not establish live acceptance by every client version.
 
 ## Rooms and identities
 

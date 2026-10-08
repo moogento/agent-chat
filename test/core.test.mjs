@@ -61,6 +61,134 @@ test('identity output keeps stored legacy control characters on one line', async
   assert.doesNotMatch(who, /\nSession: forged|\nRoom id: forged/);
 });
 
+test('directed reply watches match exact sessions without reading the inbox', async t => {
+  const { mailbox, room } = fixture(t);
+  const alice = serverFor(t, mailbox, { roomSpec: room.id, nameSpec: 'alice', sessionId: 'watch-alice' });
+  const bob = serverFor(t, mailbox, { roomSpec: room.id, nameSpec: 'bob', sessionId: 'watch-bob' });
+  const impostor = serverFor(t, mailbox, { roomSpec: room.id, nameSpec: 'bob', sessionId: 'watch-impostor' });
+  await alice.server.callTool('chat_who'); await bob.server.callTool('chat_who'); await impostor.server.callTool('chat_who');
+  await assert.rejects(alice.server.callTool('chat_send', { text: 'request', await_reply_minutes: 5 }), /resolved directed peer/);
+  await assert.rejects(alice.server.callTool('chat_send', { to: 'missing', text: 'request', await_reply_minutes: 5 }), /resolved directed peer/);
+  await assert.rejects(alice.server.callTool('chat_send', { to: 'bob', text: 'request', await_reply_minutes: 121 }), /out of range/);
+  await assert.rejects(alice.server.callTool('chat_send', { to: 'bob', text: '', await_reply_minutes: 5 }), /text is required/);
+  assert.equal(await alice.server.callTool('chat_wait_status'), 'No active reply watch.');
+  assert.match(await alice.server.callTool('chat_send', { to: 'bob', text: 'request', await_reply_minutes: 5 }), /Watching for a reply/);
+  assert.match(await alice.server.callTool('chat_wait_status'), /No matching reply yet/);
+  await impostor.server.callTool('chat_send', { to: 'alice', text: 'wrong sender' });
+  await bob.server.callTool('chat_send', { to: 'all', text: 'broadcast' });
+  assert.match(await alice.server.callTool('chat_wait_status'), /No matching reply yet/);
+  await bob.server.callTool('chat_send', { to: 'alice', text: 'the answer' });
+  assert.match(await alice.server.callTool('chat_wait_status'), /Reply received from session watch-bob/);
+  assert.match(await alice.server.callTool('chat_wait_status'), /Reply received/);
+  assert.match(await alice.server.callTool('chat_read'), /the answer/);
+  assert.equal(await alice.server.callTool('chat_wait_status'), 'No active reply watch.');
+  assert.equal(await alice.server.callTool('chat_cancel_wait'), 'No active reply watch.');
+});
+
+test('reply watch is durable, cancelled explicitly, and clears on expiry', t => {
+  const { mailbox, room } = fixture(t);
+  const alice = mailbox.claimIdentity(room, 'alice', 'test', 'durable-alice');
+  const bob = mailbox.claimIdentity(room, 'bob', 'test', 'durable-bob');
+  mailbox.beginReplyWait(alice, bob.sessionId, 1);
+  const reopened = createMailbox({ home: mailbox.home });
+  const first = reopened.replyWaitStatus(alice);
+  assert.equal(first.state, 'waiting');
+  assert.match(first.watchId, /^[a-f0-9-]{36}$/);
+  assert.equal(reopened.cancelReplyWait(alice), true);
+  assert.equal(mailbox.replyWaitStatus(alice).state, 'none');
+  mailbox.beginReplyWait(alice, bob.sessionId, 1);
+  assert.notEqual(reopened.replyWaitStatus(alice).watchId, first.watchId);
+  const file = path.join(mailbox.roomPath(room), 'reply-waits', `${alice.sessionId}.json`);
+  const wait = JSON.parse(fs.readFileSync(file, 'utf8'));
+  fs.writeFileSync(file, JSON.stringify({ ...wait, deadlineAt: Date.now() - 1 }));
+  const expired = reopened.replyWaitStatus(alice);
+  assert.equal(expired.state, 'expired');
+  assert.equal(expired.watchId, wait.id);
+  assert.equal(reopened.replyWaitStatus(alice).state, 'expired', 'expiry remains inspectable for wake revalidation');
+  assert.equal(fs.existsSync(file), true);
+  fs.writeFileSync(file, JSON.stringify({ ...wait, deadlineAt: Date.now() - 60 * 60 * 1000 - 1 }));
+  assert.equal(reopened.replyWaitStatus(alice).state, 'none');
+  assert.equal(fs.existsSync(file), false);
+});
+
+test('reply watch recovers a sent reply after watch metadata update was interrupted', t => {
+  const { mailbox, room } = fixture(t);
+  const alice = mailbox.claimIdentity(room, 'alice', 'test', 'recover-alice');
+  const bob = mailbox.claimIdentity(room, 'bob', 'test', 'recover-bob');
+  mailbox.beginReplyWait(alice, bob.sessionId, 2);
+  const file = path.join(mailbox.roomPath(room), 'messages.jsonl');
+  const reply = { id: crypto.randomUUID(), ts: new Date().toISOString(), from: bob.name, to: alice.name,
+    fromSessionId: bob.sessionId, toSessionId: alice.sessionId, text: 'recovered answer' };
+  fs.appendFileSync(file, JSON.stringify(reply) + '\n');
+  assert.equal(mailbox.replyWaitStatus(alice).state, 'replied');
+  assert.equal(mailbox.takeUnread(alice).messages.some(message => message.id === reply.id), true);
+  assert.equal(mailbox.replyWaitStatus(alice).state, 'none');
+});
+
+test('a reply-watch cleanup failure cannot hide a committed read', t => {
+  const { mailbox, room } = fixture(t);
+  const alice = mailbox.claimIdentity(room, 'alice', 'test', 'cleanup-alice');
+  const bob = mailbox.claimIdentity(room, 'bob', 'test', 'cleanup-bob');
+  mailbox.beginReplyWait(alice, bob.sessionId, 2);
+  mailbox.appendMessage(room, bob.name, alice.name, 'answer survives cleanup failure', bob.sessionId, alice.sessionId);
+  const remove = fs.rmSync;
+  let cleanupFailed = false;
+  fs.rmSync = (file, ...args) => {
+    if (path.basename(String(file)) === `${alice.sessionId}.json` && path.basename(path.dirname(String(file))) === 'reply-waits') {
+      cleanupFailed = true;
+      throw new Error('simulated watch cleanup failure');
+    }
+    return remove(file, ...args);
+  };
+  try {
+    const first = mailbox.takeUnread(alice);
+    assert.deepEqual(first.messages.map(message => message.text), ['answer survives cleanup failure']);
+    assert.deepEqual(mailbox.takeUnread(alice).messages, []);
+  } finally { fs.rmSync = remove; }
+  assert.equal(cleanupFailed, true, 'cleanup failure was actually simulated');
+});
+
+test('watched sends require an active peer and preserve an earlier watch', async t => {
+  const { mailbox, room } = fixture(t);
+  const alice = serverFor(t, mailbox, { roomSpec: room.id, nameSpec: 'alice', sessionId: 'active-alice' });
+  const bob = serverFor(t, mailbox, { roomSpec: room.id, nameSpec: 'bob', sessionId: 'active-bob' });
+  const gone = serverFor(t, mailbox, { roomSpec: room.id, nameSpec: 'gone', sessionId: 'inactive-gone' });
+  await bob.server.callTool('chat_who');
+  await gone.server.callTool('chat_who');
+  gone.server.stop();
+  await alice.server.callTool('chat_send', { to: 'bob', text: 'first request', await_reply_minutes: 10 });
+  const previous = mailbox.replyWaitStatus(alice.server.state.identity);
+  await assert.rejects(alice.server.callTool('chat_send', { to: 'gone', text: 'unreachable request', await_reply_minutes: 120 }), /active directed peer/);
+  assert.equal(mailbox.replyWaitStatus(alice.server.state.identity).watchId, previous.watchId);
+  assert.match(await alice.server.callTool('chat_send', { to: 'gone', text: 'ordinary send' }), /not active/);
+  bob.server.stop();
+  assert.equal(mailbox.replyWaitStatus(alice.server.state.identity).state, 'waiting', 'a later disconnect does not cancel an existing watch');
+});
+
+test('failed watched send restores the previous watch', async t => {
+  const { mailbox, room } = fixture(t);
+  const alice = serverFor(t, mailbox, { roomSpec: room.id, nameSpec: 'alice', sessionId: 'rollback-alice' });
+  const bob = serverFor(t, mailbox, { roomSpec: room.id, nameSpec: 'bob', sessionId: 'rollback-bob' });
+  await bob.server.callTool('chat_who');
+  await alice.server.callTool('chat_send', { to: 'bob', text: 'first request', await_reply_minutes: 10 });
+  const before = mailbox.replyWaitStatus(alice.server.state.identity);
+  const append = fs.appendFileSync;
+  fs.appendFileSync = (file, ...args) => {
+    if (String(file).endsWith('messages.jsonl')) throw new Error('simulated append failure');
+    return append(file, ...args);
+  };
+  try {
+    await assert.rejects(alice.server.callTool('chat_send', { to: 'bob', text: 'second request', await_reply_minutes: 1 }),
+      /simulated append failure/);
+  } finally { fs.appendFileSync = append; }
+  const after = mailbox.replyWaitStatus(alice.server.state.identity);
+  assert.equal(after.watchId, before.watchId);
+  assert.equal(after.deadlineAt, before.deadlineAt);
+  assert.equal(after.state, 'waiting');
+  await bob.server.callTool('chat_send', { to: 'alice', text: 'reply to first request' });
+  assert.equal(mailbox.replyWaitStatus(alice.server.state.identity).state, 'replied');
+});
+
 test('CLI room status refuses multiline identity-like text', t => {
   const { home } = fixture(t);
   const executable = fileURLToPath(new URL('../agent-chat.mjs', import.meta.url));
@@ -278,7 +406,7 @@ test('legacy AGENT_CHAT_MAX_WAIT initializes MCP with a capped schema and stderr
   const deadline = Date.now() + 10000;
   while (client.responses.length < 3 && client.child.exitCode === null && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(client.responses.length, 3, client.stderr());
-  assert.equal(client.responses.find(response => response.id === 1).result.serverInfo.version, '0.5.0');
+  assert.equal(client.responses.find(response => response.id === 1).result.serverInfo.version, '0.6.0');
   const read = client.responses.find(response => response.id === 2).result.tools.find(tool => tool.name === 'chat_read');
   assert.equal(read.inputSchema.properties.wait_seconds.maximum, 50); assert.match(read.description, /up to 50s/);
   assert.equal(client.responses.find(response => response.id === 3).error.code, -32602);
@@ -588,7 +716,7 @@ test('CLI works through an installed symlink', async (t) => {
   const child = spawn(process.execPath, [link, '--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
   let output = ''; child.stdout.on('data', (chunk) => { output += chunk; });
   const [code] = await once(child, 'exit');
-  assert.equal(code, 0); assert.equal(output.trim(), '0.5.0');
+  assert.equal(code, 0); assert.equal(output.trim(), '0.6.0');
 });
 
 test('waiting stops immediately when only a crashed peer remains', async (t) => {

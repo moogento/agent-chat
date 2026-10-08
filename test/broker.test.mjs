@@ -7,9 +7,9 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
-import { createBroker } from '../lib/broker.mjs';
+import { createBroker, replyReadMetadata } from '../lib/broker.mjs';
 import { createMailbox } from '../lib/mailbox.mjs';
-import { createRemoteSession, remoteRpc, acknowledgeRemoteResponse, heartbeatRemoteSession, closeRemoteSession, resumeRemoteSession, inspectRemoteNotifications, canonicalBrokerUrl, validateRemoteRoom } from '../lib/broker-client.mjs';
+import { createRemoteSession, remoteRpc, acknowledgeRemoteResponse, heartbeatRemoteSession, closeRemoteSession, resumeRemoteSession, inspectRemoteNotifications, inspectRemoteReplyWait, cancelRemoteReplyWait, canonicalBrokerUrl, validateRemoteRoom } from '../lib/broker-client.mjs';
 
 async function fixture(t, options = {}) {
   const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-broker-')));
@@ -59,6 +59,63 @@ test('unique session credentials isolate directed messages and notification insp
   assert.doesNotMatch((await call(bob2, 'chat_read')).text, /PRIVATE PAYLOAD/);
   assert.equal((await inspectRemoteNotifications({ url: f.broker.url, tokenFile: f.tokenFile, room: 'shared', sessionId: bob.sessionId, sessionDir: f.creds })).messages.length, 0);
   assert.throws(() => createMailbox({ home: f.home }), /belongs to a broker/);
+});
+
+test('broker reply watch inspection is session authenticated and clears after read acknowledgement', async t => {
+  const f = await fixture(t);
+  const alice = await f.make('alice'); const bob = await f.make('bob');
+  await call(alice, 'chat_send', { to: 'bob', text: 'Can you review?', await_reply_minutes: 10 });
+  const inspect = () => inspectRemoteReplyWait({ url: f.broker.url, tokenFile: f.tokenFile,
+    room: 'shared', sessionId: alice.sessionId, sessionDir: f.creds });
+  assert.equal((await inspect()).wait.state, 'waiting');
+  assert.equal((await inspect()).wait.expectedPeerActive, true);
+  const endpoint = `/v1/sessions/${alice.sessionId}/reply-wait/status`;
+  assert.equal((await raw(f.broker.url, endpoint, bob.sessionToken, { room: 'shared' })).status, 401);
+  assert.equal((await raw(f.broker.url, endpoint, alice.sessionToken, { room: 'other' })).status, 403);
+  await call(bob, 'chat_send', { to: 'all', text: 'general update' });
+  assert.equal((await inspect()).wait.state, 'waiting');
+  await call(bob, 'chat_send', { to: 'alice', text: 'Review done' });
+  assert.equal((await inspect()).wait.state, 'replied');
+  assert.doesNotMatch(JSON.stringify(await inspect()), /Review done/);
+  const read = await call(alice, 'chat_read', {}, { ack: false });
+  assert.match(read.text, /Review done/);
+  assert.equal((await inspect()).wait.state, 'replied');
+  await acknowledgeRemoteResponse(alice, read.receipt);
+  assert.equal((await inspect()).wait.state, 'none');
+  await call(alice, 'chat_send', { to: 'bob', text: 'Another request', await_reply_minutes: 10 });
+  const cancelEndpoint = `/v1/sessions/${alice.sessionId}/reply-wait/cancel`;
+  assert.equal((await raw(f.broker.url, cancelEndpoint, bob.sessionToken, { room: 'shared' })).status, 401);
+  assert.equal((await raw(f.broker.url, cancelEndpoint, alice.sessionToken, { room: 'other' })).status, 403);
+  assert.equal((await cancelRemoteReplyWait({ url: f.broker.url, tokenFile: f.tokenFile,
+    room: 'shared', sessionId: alice.sessionId, sessionDir: f.creds })).cancelled, true);
+  assert.equal((await inspect()).wait.state, 'none');
+  await closeRemoteSession(bob);
+  const inactive = await call(alice, 'chat_send', { to: 'bob', text: 'cannot await a departed peer', await_reply_minutes: 120 });
+  assert.equal(inactive.response.result.isError, true);
+  assert.match(inactive.text, /active directed peer/);
+  assert.equal((await inspect()).wait.state, 'none');
+});
+
+test('broker retains only reply-match metadata while a read awaits acknowledgement', async t => {
+  assert.deepEqual(replyReadMetadata([{ id: 'private-id', text: 'private body', fromSessionId: 'sender', toSessionId: 'receiver', ts: '2026-01-01T00:00:00.000Z' }]),
+    [{ fromSessionId: 'sender', toSessionId: 'receiver', ts: '2026-01-01T00:00:00.000Z' }]);
+  const f = await fixture(t); const alice = await f.make('alice'); const bob = await f.make('bob');
+  await call(alice, 'chat_send', { to: 'bob', text: 'request', await_reply_minutes: 10 });
+  await call(bob, 'chat_send', { to: 'alice', text: 'private answer' });
+  const read = await call(alice, 'chat_read', {}, { ack: false });
+  const remove = fs.rmSync;
+  let cleanupFailed = false;
+  fs.rmSync = (file, ...args) => {
+    if (path.basename(String(file)) === `${alice.sessionId}.json` && path.basename(path.dirname(String(file))) === 'reply-waits') {
+      cleanupFailed = true;
+      throw new Error('simulated broker watch cleanup failure');
+    }
+    return remove(file, ...args);
+  };
+  try { await acknowledgeRemoteResponse(alice, read.receipt); }
+  finally { fs.rmSync = remove; }
+  assert.equal(cleanupFailed, true, 'broker cleanup failure was actually simulated');
+  assert.match((await call(alice, 'chat_read')).text, /No new messages/);
 });
 
 test('read cursor commits only after response acknowledgement', async t => {

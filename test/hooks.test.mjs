@@ -9,7 +9,8 @@ import { pathToFileURL } from 'node:url';
 import { createMailbox } from '../lib/mailbox.mjs';
 import { createPresence } from '../lib/presence.mjs';
 import { bindNotification } from '../hooks/bind.mjs';
-import { notifySession, runCommandHook, readConfig, commandSessionTitle, syncBoundSessionTitle } from '../hooks/notifications.mjs';
+import { notifySession, runCommandHook, readConfig, commandSessionTitle, syncBoundSessionTitle,
+  waitForReplyAtStop } from '../hooks/notifications.mjs';
 import { AgentChatPlugin } from '../integrations/opencode/agent-chat.mjs';
 
 function fixture(t, client = 'codex') {
@@ -185,6 +186,218 @@ test('subagents, stop and notification events cannot consume main-session notice
   let delivered = 0;
   await notifySession({ ...f.input, deliver: () => delivered++ });
   assert.equal(delivered, 1);
+});
+
+for (const client of ['codex', 'claude-code']) {
+  test(`${client} Stop holds only an exact directed reply watch, then wakes once without reading peer text`, async t => {
+    const f = fixture(t, client);
+    const sender = f.mailbox.claimIdentity(f.room, 'awaited-sender', 'peer', crypto.randomUUID());
+    const other = f.mailbox.claimIdentity(f.room, 'other-sender', 'peer', crypto.randomUUID());
+    f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+    const payload = { session_id: f.binding.hostSessionId, cwd: f.cwd, hook_event_name: 'Stop' };
+    const stop = async () => {
+      const output = [];
+      await runCommandHook({ client, payload, env: f.env, mailbox: f.mailbox,
+        stopWaitOptions: { sliceMs: 20, pollMs: 5 }, write: value => output.push(value) });
+      assert.equal(output.length, 1);
+      return output[0];
+    };
+    f.mailbox.appendMessage(f.room, other.name, f.peer.name, 'wrong sender secret', other.sessionId, f.peer.sessionId);
+    f.mailbox.appendMessage(f.room, sender.name, 'all', 'broadcast secret', sender.sessionId);
+    const pending = await stop();
+    assert.equal(JSON.parse(pending).decision, 'block');
+    assert.match(pending, /chat_wait_status/);
+    assert.doesNotMatch(pending, /secret/);
+    assert.equal(f.mailbox.replyWaitStatus(f.peer).state, 'waiting');
+    f.mailbox.appendMessage(f.room, sender.name, f.peer.name, 'actual private reply', sender.sessionId, f.peer.sessionId);
+    const received = await stop();
+    assert.equal(JSON.parse(received).decision, 'block');
+    assert.match(received, /chat_read/);
+    assert.doesNotMatch(received, /actual private reply/);
+    assert.equal(f.mailbox.replyWaitStatus(f.peer).state, 'replied');
+    assert.equal(await stop(), '{}\n');
+    const unread = f.mailbox.takeUnread(f.peer);
+    assert.ok(unread.messages.some(message => message.text === 'actual private reply'));
+    assert.equal(f.mailbox.replyWaitStatus(f.peer).state, 'none');
+    f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+    f.mailbox.appendMessage(f.room, sender.name, f.peer.name, 'second private reply', sender.sessionId, f.peer.sessionId);
+    const nextWatch = await stop();
+    assert.equal(JSON.parse(nextWatch).decision, 'block');
+    assert.match(nextWatch, /chat_read/);
+    assert.doesNotMatch(nextWatch, /second private reply/);
+  });
+}
+
+test('Stop reply watch ends on cancellation or deadline, and survives a sender reconnect', async t => {
+  const f = fixture(t);
+  const sender = f.mailbox.claimIdentity(f.room, 'awaited-sender', 'peer', crypto.randomUUID());
+  const payload = { session_id: f.binding.hostSessionId, cwd: f.cwd, hook_event_name: 'Stop' };
+  const stop = async stopWaitOptions => {
+    const output = [];
+    await runCommandHook({ client: 'codex', payload, env: f.env, mailbox: f.mailbox, stopWaitOptions,
+      write: value => output.push(value) });
+    return JSON.parse(output.join(''));
+  };
+  f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+  assert.deepEqual(await stop({ sliceMs: 20, sleep: async () => { f.mailbox.cancelReplyWait(f.peer); } }), {});
+  f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+  const originalStatus = f.mailbox.replyWaitStatus;
+  f.mailbox.replyWaitStatus = identity => ({ ...originalStatus(identity), state: 'expired' });
+  const expired = await stop({ sliceMs: 20 });
+  assert.equal(expired.decision, 'block');
+  assert.match(expired.reason, /deadline/);
+  assert.match(expired.reason, /chat_cancel_wait/);
+  assert.deepEqual(await stop({ sliceMs: 20 }), {});
+  f.mailbox.replyWaitStatus = originalStatus;
+  f.mailbox.cancelReplyWait(f.peer);
+  f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+  f.mailbox.releaseIdentity(sender);
+  const absent = await stop({ sliceMs: 20, pollMs: 5 });
+  assert.equal(absent.decision, 'block');
+  assert.match(absent.reason, /still pending/);
+});
+
+test('Stop retries transient local reply-status errors within its bounded slice', async t => {
+  const f = fixture(t);
+  const sender = f.mailbox.claimIdentity(f.room, 'awaited-sender', 'peer', crypto.randomUUID());
+  f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+  const originalStatus = f.mailbox.replyWaitStatus;
+  let inspections = 0;
+  f.mailbox.replyWaitStatus = identity => {
+    if (++inspections === 1) throw new Error('temporary mailbox read failure');
+    return originalStatus(identity);
+  };
+  const output = [];
+  await runCommandHook({ client: 'codex', payload: { session_id: f.binding.hostSessionId, cwd: f.cwd,
+    hook_event_name: 'Stop' }, env: f.env, mailbox: f.mailbox,
+  stopWaitOptions: { sliceMs: 50, pollMs: 5,
+    sleep: async () => f.mailbox.appendMessage(f.room, sender.name, f.peer.name, 'private reply', sender.sessionId, f.peer.sessionId) },
+  write: value => output.push(value) });
+  assert.ok(inspections >= 3);
+  assert.match(JSON.parse(output.join('')).reason, /chat_read/);
+  assert.doesNotMatch(output.join(''), /private reply/);
+});
+
+test('Stop keeps a verified watch alive when the final status check fails', async t => {
+  const f = fixture(t);
+  const sender = f.mailbox.claimIdentity(f.room, 'awaited-sender', 'peer', crypto.randomUUID());
+  f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+  const originalStatus = f.mailbox.replyWaitStatus;
+  let inspections = 0;
+  f.mailbox.replyWaitStatus = identity => {
+    if (++inspections > 1) throw new Error('temporary mailbox read failure');
+    return originalStatus(identity);
+  };
+  const output = [];
+  const result = await waitForReplyAtStop({ identity: { client: 'codex', hostSessionId: f.binding.hostSessionId,
+    cwd: f.cwd }, env: f.env, mailbox: f.mailbox, sliceMs: 0, write: value => output.push(value) });
+  assert.equal(result.state, 'waiting');
+  assert.equal(result.continued, true);
+  assert.match(JSON.parse(output.join('')).reason, /chat_wait_status/);
+});
+
+test('Stop exits promptly when broker checks fail before any watch is verified', async t => {
+  const f = fixture(t);
+  const brokerUrl = 'http://127.0.0.1:49999';
+  bindNotification({ configFile: f.configFile, binding: { ...f.binding, brokerUrl } });
+  const env = { ...f.env, AGENT_CHAT_BROKER_URL: brokerUrl, AGENT_CHAT_BROKER_TOKEN_FILE: path.join(f.root, 'token'),
+    AGENT_CHAT_BROKER_SESSION_DIR: path.join(f.root, 'remote'), AGENT_CHAT_ROOM: f.room.id };
+  let inspections = 0;
+  const output = [];
+  const result = await waitForReplyAtStop({ identity: { client: 'codex', hostSessionId: f.binding.hostSessionId,
+    cwd: f.cwd }, env, remoteInspector: async () => { inspections++; throw new Error('broker unavailable'); },
+  sliceMs: 480000, pollMs: 1, sleep: async () => {}, write: value => output.push(value) });
+  assert.equal(inspections, 3);
+  assert.equal(result.state, 'unverified');
+  assert.deepEqual(output, []);
+});
+
+test('Stop trusts broker expiry status and notices a later reply to the same watch', async t => {
+  const f = fixture(t);
+  const brokerUrl = 'http://127.0.0.1:49999';
+  bindNotification({ configFile: f.configFile, binding: { ...f.binding, brokerUrl } });
+  const env = { ...f.env, AGENT_CHAT_BROKER_URL: brokerUrl, AGENT_CHAT_BROKER_TOKEN_FILE: path.join(f.root, 'token'),
+    AGENT_CHAT_BROKER_SESSION_DIR: path.join(f.root, 'remote'), AGENT_CHAT_ROOM: f.room.id };
+  const expectedSenderSessionId = crypto.randomUUID();
+  const deadlineAt = Date.now() - 1000;
+  const wait = { state: 'waiting', watchId: crypto.randomUUID(), expectedSenderSessionId,
+    startedAt: deadlineAt - 60000, deadlineAt, replyCount: 0 };
+  let inspections = 0;
+  const remoteInspector = async () => {
+    if (++inspections === 1) throw new Error('temporary broker failure');
+    return { peer: { sessionId: f.peer.sessionId, room: f.room.id, clientCwd: f.cwd }, wait: { ...wait } };
+  };
+  const stop = async sliceMs => {
+    const output = [];
+    const result = await waitForReplyAtStop({ identity: { client: 'codex', hostSessionId: f.binding.hostSessionId,
+      cwd: f.cwd }, env, remoteInspector, sliceMs, pollMs: 1,
+    write: value => output.push(value) });
+    return { result, output: output.join('') };
+  };
+  const pending = await stop(20);
+  assert.ok(inspections >= 3);
+  assert.equal(pending.result.state, 'waiting');
+  assert.match(JSON.parse(pending.output).reason, /chat_wait_status/);
+  assert.doesNotMatch(pending.output, /reached its deadline/);
+  wait.state = 'expired';
+  const expired = await stop(0);
+  assert.equal(expired.result.state, 'expired');
+  assert.match(JSON.parse(expired.output).reason, /deadline/);
+  assert.equal((await stop(0)).result.continued, false);
+  wait.state = 'replied'; wait.replyCount = 1;
+  const replied = await stop(0);
+  assert.equal(replied.result.state, 'replied');
+  assert.match(JSON.parse(replied.output).reason, /chat_read/);
+  assert.equal((await stop(0)).result.continued, false);
+});
+
+test('Stop rechecks a watch before continuing after cancellation or replacement', async t => {
+  const f = fixture(t);
+  const sender = f.mailbox.claimIdentity(f.room, 'awaited-sender', 'peer', crypto.randomUUID());
+  const payload = { session_id: f.binding.hostSessionId, cwd: f.cwd, hook_event_name: 'Stop' };
+  const originalStatus = f.mailbox.replyWaitStatus;
+  const stop = async () => {
+    const output = [];
+    await runCommandHook({ client: 'codex', payload, env: f.env, mailbox: f.mailbox,
+      stopWaitOptions: { sliceMs: 0 }, write: value => output.push(value) });
+    return JSON.parse(output.join(''));
+  };
+  f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+  let checks = 0;
+  f.mailbox.replyWaitStatus = identity => {
+    const result = originalStatus(identity);
+    if (++checks === 1) f.mailbox.cancelReplyWait(f.peer);
+    return result;
+  };
+  assert.deepEqual(await stop(), {});
+  f.mailbox.replyWaitStatus = originalStatus;
+
+  f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+  f.mailbox.appendMessage(f.room, sender.name, f.peer.name, 'old reply', sender.sessionId, f.peer.sessionId);
+  checks = 0;
+  f.mailbox.replyWaitStatus = identity => {
+    const result = originalStatus(identity);
+    if (++checks === 1) f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+    return result;
+  };
+  const replacement = await stop();
+  assert.equal(replacement.decision, 'block');
+  assert.match(replacement.reason, /chat_wait_status/);
+  assert.doesNotMatch(replacement.reason, /chat_read/);
+});
+
+test('SessionEnd cancels only its verified reply watch', async t => {
+  const f = fixture(t, 'claude-code');
+  const sender = f.mailbox.claimIdentity(f.room, 'awaited-sender', 'peer', crypto.randomUUID());
+  f.mailbox.beginReplyWait(f.peer, sender.sessionId, 2);
+  await runCommandHook({ client: 'claude-code', payload: { session_id: 'different-host', cwd: f.cwd,
+    hook_event_name: 'SessionEnd' }, env: f.env, mailbox: f.mailbox,
+  write: () => assert.fail('SessionEnd must be silent') });
+  assert.equal(f.mailbox.replyWaitStatus(f.peer).state, 'waiting');
+  await runCommandHook({ client: 'claude-code', payload: { session_id: f.binding.hostSessionId, cwd: f.cwd,
+    hook_event_name: 'SessionEnd' }, env: f.env, mailbox: f.mailbox,
+  write: () => assert.fail('SessionEnd must be silent') });
+  assert.equal(f.mailbox.replyWaitStatus(f.peer).state, 'none');
 });
 
 test('conflicting bindings fail closed and bind helper replaces one exact match', async t => {
