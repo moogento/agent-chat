@@ -22,14 +22,16 @@ function fixture(t) {
   const env = { AGENT_CHAT_HOME: home, AGENT_CHAT_NOTIFY_CONFIG: configFile };
   const prompts = [];
   const toasts = [];
-  const client = { session: { promptAsync: async args => { prompts.push(args); return { data: true }; } },
+  const sessionInfo = { id: 'host-opencode', agent: 'plan', model: { providerID: 'provider', id: 'model', variant: 'high' } };
+  const client = { session: { get: async () => ({ data: sessionInfo }),
+    promptAsync: async args => { prompts.push(args); return { data: true }; } },
     tui: { showToast: async args => { toasts.push(args); return { data: true }; } } };
   const cleanup = async adapter => {
     await adapter?.event({ event: { type: 'session.deleted', properties: { info: { id: 'host-opencode' } } } });
     fs.rmSync(root, { recursive: true, force: true });
   };
   t.after(async () => cleanup(t.adapter));
-  return { mailbox, room, receiver, sender, cwd, env, client, prompts, toasts };
+  return { mailbox, room, receiver, sender, cwd, env, client, sessionInfo, prompts, toasts };
 }
 
 async function until(predicate, timeoutMs = 1000) {
@@ -50,6 +52,8 @@ test('OpenCode resumes only the exact idle session for an explicitly awaited pee
     'private peer reply, do not put this into a wake prompt', f.sender.sessionId, f.receiver.sessionId);
   await until(() => f.prompts.length === 1);
   assert.deepEqual(f.prompts[0].path, { id: 'host-opencode' });
+  assert.equal(f.prompts[0].body.agent, 'plan');
+  assert.equal(f.prompts[0].body.variant, 'high');
   assert.match(f.prompts[0].body.parts[0].text, /Call chat_read/);
   assert.doesNotMatch(JSON.stringify(f.prompts), /private peer reply/);
   assert.equal(f.mailbox.replyWaitStatus(f.receiver).state, 'replied', 'wake does not acknowledge the inbox');
@@ -95,6 +99,38 @@ test('OpenCode ignores other senders and falls back to a toast if async wake is 
   assert.equal(f.prompts.length, 1, 'an unconfirmed 204 does not create repeated prompts');
 });
 
+test('OpenCode shows a toast instead of changing agent when the current agent is unknown', async t => {
+  const f = fixture(t);
+  delete f.sessionInfo.agent;
+  const adapter = await AgentChatPlugin({ client: f.client, directory: f.cwd },
+    { env: f.env, mailbox: f.mailbox, watchPollMs: 10, wakeConfirmMs: 25 });
+  t.adapter = adapter;
+  f.mailbox.beginReplyWait(f.receiver, f.sender.sessionId, 1);
+  f.mailbox.appendMessage(f.room, f.sender.name, f.receiver.name, 'awaited reply',
+    f.sender.sessionId, f.receiver.sessionId);
+  assert.equal(f.mailbox.replyWaitStatus(f.receiver).state, 'replied');
+  await adapter.event({ event: { type: 'session.idle', properties: { sessionID: 'host-opencode' } } });
+  await until(() => f.toasts.some(toast => /reply is ready/.test(toast.body.message)));
+  assert.equal(f.prompts.length, 0);
+});
+
+test('OpenCode expiry fallback reports no reply instead of prompting chat_read', async t => {
+  const f = fixture(t);
+  const adapter = await AgentChatPlugin({ client: f.client, directory: f.cwd },
+    { env: f.env, mailbox: f.mailbox, watchPollMs: 10, wakeConfirmMs: 25 });
+  t.adapter = adapter;
+  f.mailbox.beginReplyWait(f.receiver, f.sender.sessionId, 1);
+  const waitFile = path.join(f.mailbox.roomDir(f.room), 'reply-waits', `${f.receiver.sessionId}.json`);
+  const wait = JSON.parse(fs.readFileSync(waitFile, 'utf8'));
+  fs.writeFileSync(waitFile, JSON.stringify({ ...wait, deadlineAt: Date.now() - 1 }));
+  delete f.client.session.promptAsync;
+  await adapter.event({ event: { type: 'session.idle', properties: { sessionID: 'host-opencode' } } });
+  await until(() => f.toasts.length === 1);
+  assert.equal(f.prompts.length, 0);
+  assert.match(f.toasts[0].body.message, /expired without a reply/);
+  assert.doesNotMatch(f.toasts[0].body.message, /reply is ready/);
+});
+
 test('OpenCode retries a transient watch inspection failure without waking the wrong session', async t => {
   const f = fixture(t);
   let inspections = 0;
@@ -134,6 +170,22 @@ test('OpenCode does not wake from a stale reply result after the watch was cance
   await adapter.event({ event: { type: 'session.idle', properties: { sessionID: 'host-opencode' } } });
   await new Promise(resolve => setTimeout(resolve, 40));
   assert.equal(inspections, 2);
+  assert.equal(f.prompts.length, 0);
+});
+
+test('OpenCode rechecks the watch after fetching the session profile', async t => {
+  const f = fixture(t);
+  f.mailbox.beginReplyWait(f.receiver, f.sender.sessionId, 1);
+  f.mailbox.appendMessage(f.room, f.sender.name, f.receiver.name, 'reply being cancelled',
+    f.sender.sessionId, f.receiver.sessionId);
+  f.client.session.get = async () => {
+    f.mailbox.cancelReplyWait(f.receiver);
+    return { data: f.sessionInfo };
+  };
+  const adapter = await AgentChatPlugin({ client: f.client, directory: f.cwd },
+    { env: f.env, mailbox: f.mailbox, watchPollMs: 10, wakeConfirmMs: 25 });
+  t.adapter = adapter;
+  await adapter.event({ event: { type: 'session.idle', properties: { sessionID: 'host-opencode' } } });
   assert.equal(f.prompts.length, 0);
 });
 

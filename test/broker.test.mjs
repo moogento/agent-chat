@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
-import { createBroker } from '../lib/broker.mjs';
+import { createBroker, replyReadMetadata } from '../lib/broker.mjs';
 import { createMailbox } from '../lib/mailbox.mjs';
 import { createRemoteSession, remoteRpc, acknowledgeRemoteResponse, heartbeatRemoteSession, closeRemoteSession, resumeRemoteSession, inspectRemoteNotifications, inspectRemoteReplyWait, cancelRemoteReplyWait, canonicalBrokerUrl, validateRemoteRoom } from '../lib/broker-client.mjs';
 
@@ -89,6 +89,28 @@ test('broker reply watch inspection is session authenticated and clears after re
   assert.equal((await cancelRemoteReplyWait({ url: f.broker.url, tokenFile: f.tokenFile,
     room: 'shared', sessionId: alice.sessionId, sessionDir: f.creds })).cancelled, true);
   assert.equal((await inspect()).wait.state, 'none');
+  await closeRemoteSession(bob);
+  const inactive = await call(alice, 'chat_send', { to: 'bob', text: 'cannot await a departed peer', await_reply_minutes: 120 });
+  assert.equal(inactive.response.result.isError, true);
+  assert.match(inactive.text, /active directed peer/);
+  assert.equal((await inspect()).wait.state, 'none');
+});
+
+test('broker retains only reply-match metadata while a read awaits acknowledgement', async t => {
+  assert.deepEqual(replyReadMetadata([{ id: 'private-id', text: 'private body', fromSessionId: 'sender', toSessionId: 'receiver', ts: '2026-01-01T00:00:00.000Z' }]),
+    [{ fromSessionId: 'sender', toSessionId: 'receiver', ts: '2026-01-01T00:00:00.000Z' }]);
+  const f = await fixture(t); const alice = await f.make('alice'); const bob = await f.make('bob');
+  await call(alice, 'chat_send', { to: 'bob', text: 'request', await_reply_minutes: 10 });
+  await call(bob, 'chat_send', { to: 'alice', text: 'private answer' });
+  const read = await call(alice, 'chat_read', {}, { ack: false });
+  const remove = fs.rmSync;
+  fs.rmSync = (file, ...args) => {
+    if (String(file).endsWith(`/reply-waits/${alice.sessionId}.json`)) throw new Error('simulated broker watch cleanup failure');
+    return remove(file, ...args);
+  };
+  try { await acknowledgeRemoteResponse(alice, read.receipt); }
+  finally { fs.rmSync = remove; }
+  assert.match((await call(alice, 'chat_read')).text, /No new messages/);
 });
 
 test('read cursor commits only after response acknowledgement', async t => {

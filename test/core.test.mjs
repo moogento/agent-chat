@@ -125,6 +125,41 @@ test('reply watch recovers a sent reply after watch metadata update was interrup
   assert.equal(mailbox.replyWaitStatus(alice).state, 'none');
 });
 
+test('a reply-watch cleanup failure cannot hide a committed read', t => {
+  const { mailbox, room } = fixture(t);
+  const alice = mailbox.claimIdentity(room, 'alice', 'test', 'cleanup-alice');
+  const bob = mailbox.claimIdentity(room, 'bob', 'test', 'cleanup-bob');
+  mailbox.beginReplyWait(alice, bob.sessionId, 2);
+  mailbox.appendMessage(room, bob.name, alice.name, 'answer survives cleanup failure', bob.sessionId, alice.sessionId);
+  const remove = fs.rmSync;
+  fs.rmSync = (file, ...args) => {
+    if (String(file).endsWith(`/reply-waits/${alice.sessionId}.json`)) throw new Error('simulated watch cleanup failure');
+    return remove(file, ...args);
+  };
+  try {
+    const first = mailbox.takeUnread(alice);
+    assert.deepEqual(first.messages.map(message => message.text), ['answer survives cleanup failure']);
+    assert.deepEqual(mailbox.takeUnread(alice).messages, []);
+  } finally { fs.rmSync = remove; }
+});
+
+test('watched sends require an active peer and preserve an earlier watch', async t => {
+  const { mailbox, room } = fixture(t);
+  const alice = serverFor(t, mailbox, { roomSpec: room.id, nameSpec: 'alice', sessionId: 'active-alice' });
+  const bob = serverFor(t, mailbox, { roomSpec: room.id, nameSpec: 'bob', sessionId: 'active-bob' });
+  const gone = serverFor(t, mailbox, { roomSpec: room.id, nameSpec: 'gone', sessionId: 'inactive-gone' });
+  await bob.server.callTool('chat_who');
+  await gone.server.callTool('chat_who');
+  gone.server.stop();
+  await alice.server.callTool('chat_send', { to: 'bob', text: 'first request', await_reply_minutes: 10 });
+  const previous = mailbox.replyWaitStatus(alice.server.state.identity);
+  await assert.rejects(alice.server.callTool('chat_send', { to: 'gone', text: 'unreachable request', await_reply_minutes: 120 }), /active directed peer/);
+  assert.equal(mailbox.replyWaitStatus(alice.server.state.identity).watchId, previous.watchId);
+  assert.match(await alice.server.callTool('chat_send', { to: 'gone', text: 'ordinary send' }), /not active/);
+  bob.server.stop();
+  assert.equal(mailbox.replyWaitStatus(alice.server.state.identity).state, 'waiting', 'a later disconnect does not cancel an existing watch');
+});
+
 test('failed watched send restores the previous watch', async t => {
   const { mailbox, room } = fixture(t);
   const alice = serverFor(t, mailbox, { roomSpec: room.id, nameSpec: 'alice', sessionId: 'rollback-alice' });

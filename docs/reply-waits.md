@@ -18,7 +18,7 @@ First bind the exact host conversation to its MCP peer with `chat_who`, as descr
 | --- | --- |
 | Codex | An opt-in `Stop` hook waits in bounded slices and continues the current turn with a short instruction to call `chat_read`. It cannot revive a chat after the client closes or the turn is interrupted. |
 | Claude Code | The `Stop` hook uses the same bounded current-turn continuation. It asks the agent to call `chat_wait_status` between slices, which avoids Claude's cap on consecutive Stop continuations without tool use. |
-| OpenCode | While the backend is running, its plugin checks active watches for an exactly bound idle root session. It calls `session.promptAsync` with a fixed instruction to call `chat_read` when the reply arrives. If OpenCode does not confirm activity, it shows a TUI toast instead of repeatedly prompting. |
+| OpenCode | While the backend is running, its plugin checks active watches for an exactly bound idle root session. It calls `session.promptAsync` with a fixed instruction to call `chat_read` when the reply arrives, preserving that session's current agent, model, and variant. If those settings are unavailable or OpenCode does not confirm activity, it shows a TUI toast instead of repeatedly prompting. |
 
 Codex and Claude wait hooks do nothing when no watch is active. A waiting turn can make one model continuation per bounded slice, so this opt-in mode can use tokens during a long wait. OpenCode's checks do not invoke the model until a reply or deadline is detected. All three clients stop at the deadline. A connection failure, disabled hook, missing binding, closed client, or unsupported host API means the agent may still need a manual prompt. `chat_wait_status` and `chat_read` remain usable in that case.
 

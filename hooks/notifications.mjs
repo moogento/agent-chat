@@ -206,7 +206,7 @@ function stopNoticeFile({ binding, client, hostSessionId, mailbox, remote, env }
   return path.join(directory, `${key}.json`);
 }
 
-async function writeStopDecision({ reason, watch, identity, binding, env, write, once = false }) {
+async function writeStopDecision({ reason, decision, watch, identity, binding, env, write, once = false }) {
   if (!once) { await write(JSON.stringify({ decision: 'block', reason }) + '\n'); return true; }
   const file = stopNoticeFile({ binding, ...identity, mailbox: watch.mailbox, remote: watch.remote, env });
   const lock = `${file}.lock`;
@@ -214,7 +214,9 @@ async function writeStopDecision({ reason, watch, identity, binding, env, write,
   try {
     let previous;
     try { previous = readJson(file, 1024); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-    const fingerprint = watch.wait.watchId;
+    // An expired notice can precede a broker-verified reply when host and broker
+    // clocks differ. Each terminal outcome needs its own one-shot notice.
+    const fingerprint = `${watch.wait.watchId}:${decision}`;
     if (previous?.fingerprint === fingerprint) return false;
     await write(JSON.stringify({ decision: 'block', reason }) + '\n');
     const temporary = `${file}.${process.pid}.tmp`;
@@ -233,32 +235,56 @@ export async function waitForReplyAtStop({ identity, env = process.env, mailbox,
   if (!binding) return { state: 'unbound' };
   const started = now();
   const sliceEnds = started + Math.min(STOP_WAIT_SLICE_MS, Math.max(0, sliceMs));
+  const inspect = async () => {
+    try { return { watch: await boundReplyWatch({ binding, cwd: identity.cwd, env, mailbox, remoteInspector }) }; }
+    catch { return { error: true }; }
+  };
+  let lastSeenWatch;
+  const continueAfterCheckFailure = async () => {
+    if (!lastSeenWatch) return { state: 'unverified' };
+    const continued = await writeStopDecision({ reason: STOP_PENDING_REASON, decision: 'waiting',
+      watch: lastSeenWatch, identity, binding, env, write });
+    return { state: 'waiting', continued };
+  };
   for (;;) {
-    const watch = await boundReplyWatch({ binding, cwd: identity.cwd, env, mailbox, remoteInspector });
+    const inspected = await inspect();
+    if (inspected.error) {
+      if (now() >= sliceEnds) return continueAfterCheckFailure();
+      await sleep(Math.max(1, Math.min(Math.max(1, pollMs), sliceEnds - now())));
+      continue;
+    }
+    const { watch } = inspected;
     if (!watch) return { state: 'unverified' };
     const { wait } = watch;
     if (wait.state === 'none') return { state: 'none' };
+    lastSeenWatch = watch;
     const decision = wait.state === 'replied' ? 'replied'
-      : wait.state === 'expired' || now() >= wait.deadlineAt ? 'expired'
+      : wait.state === 'expired' ? 'expired'
         : now() >= sliceEnds ? 'waiting' : null;
     if (decision) {
       // The broker request or elapsed slice may have yielded while this watch was
       // cancelled or replaced. Verify the same watch immediately before emitting.
-      const fresh = await boundReplyWatch({ binding, cwd: identity.cwd, env, mailbox, remoteInspector });
+      const checked = await inspect();
+      if (checked.error) {
+        if (now() >= sliceEnds) return continueAfterCheckFailure();
+        await sleep(Math.max(1, Math.min(Math.max(1, pollMs), sliceEnds - now())));
+        continue;
+      }
+      const fresh = checked.watch;
       if (!fresh) return { state: 'unverified' };
       if (fresh.wait.state === 'none') return { state: 'none' };
       if (fresh.wait.watchId !== wait.watchId) continue;
       const currentDecision = fresh.wait.state === 'replied' ? 'replied'
-        : fresh.wait.state === 'expired' || now() >= fresh.wait.deadlineAt ? 'expired'
+        : fresh.wait.state === 'expired' ? 'expired'
           : now() >= sliceEnds ? 'waiting' : null;
       if (currentDecision !== decision) continue;
       const reason = decision === 'replied' ? STOP_REPLY_REASON
         : decision === 'expired' ? STOP_EXPIRED_REASON : STOP_PENDING_REASON;
-      const continued = await writeStopDecision({ reason, watch: fresh, identity, binding, env, write,
+      const continued = await writeStopDecision({ reason, decision, watch: fresh, identity, binding, env, write,
         once: decision !== 'waiting' });
       return { state: decision, continued };
     }
-    await sleep(Math.max(1, Math.min(Math.max(1, pollMs), sliceEnds - now(), wait.deadlineAt - now())));
+    await sleep(Math.max(1, Math.min(Math.max(1, pollMs), sliceEnds - now())));
   }
 }
 

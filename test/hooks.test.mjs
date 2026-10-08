@@ -9,7 +9,8 @@ import { pathToFileURL } from 'node:url';
 import { createMailbox } from '../lib/mailbox.mjs';
 import { createPresence } from '../lib/presence.mjs';
 import { bindNotification } from '../hooks/bind.mjs';
-import { notifySession, runCommandHook, readConfig, commandSessionTitle, syncBoundSessionTitle } from '../hooks/notifications.mjs';
+import { notifySession, runCommandHook, readConfig, commandSessionTitle, syncBoundSessionTitle,
+  waitForReplyAtStop } from '../hooks/notifications.mjs';
 import { AgentChatPlugin } from '../integrations/opencode/agent-chat.mjs';
 
 function fixture(t, client = 'codex') {
@@ -239,18 +240,99 @@ test('Stop reply watch ends on cancellation or deadline, and survives a sender r
   };
   f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
   assert.deepEqual(await stop({ sliceMs: 20, sleep: async () => { f.mailbox.cancelReplyWait(f.peer); } }), {});
-  const wait = f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
-  const expired = await stop({ now: () => wait.deadlineAt, sliceMs: 20 });
+  f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+  const originalStatus = f.mailbox.replyWaitStatus;
+  f.mailbox.replyWaitStatus = identity => ({ ...originalStatus(identity), state: 'expired' });
+  const expired = await stop({ sliceMs: 20 });
   assert.equal(expired.decision, 'block');
   assert.match(expired.reason, /deadline/);
   assert.match(expired.reason, /chat_cancel_wait/);
-  assert.deepEqual(await stop({ now: () => wait.deadlineAt, sliceMs: 20 }), {});
+  assert.deepEqual(await stop({ sliceMs: 20 }), {});
+  f.mailbox.replyWaitStatus = originalStatus;
   f.mailbox.cancelReplyWait(f.peer);
   f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
   f.mailbox.releaseIdentity(sender);
   const absent = await stop({ sliceMs: 20, pollMs: 5 });
   assert.equal(absent.decision, 'block');
   assert.match(absent.reason, /still pending/);
+});
+
+test('Stop retries transient local reply-status errors within its bounded slice', async t => {
+  const f = fixture(t);
+  const sender = f.mailbox.claimIdentity(f.room, 'awaited-sender', 'peer', crypto.randomUUID());
+  f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+  const originalStatus = f.mailbox.replyWaitStatus;
+  let inspections = 0;
+  f.mailbox.replyWaitStatus = identity => {
+    if (++inspections === 1) throw new Error('temporary mailbox read failure');
+    return originalStatus(identity);
+  };
+  const output = [];
+  await runCommandHook({ client: 'codex', payload: { session_id: f.binding.hostSessionId, cwd: f.cwd,
+    hook_event_name: 'Stop' }, env: f.env, mailbox: f.mailbox,
+  stopWaitOptions: { sliceMs: 50, pollMs: 5,
+    sleep: async () => f.mailbox.appendMessage(f.room, sender.name, f.peer.name, 'private reply', sender.sessionId, f.peer.sessionId) },
+  write: value => output.push(value) });
+  assert.ok(inspections >= 3);
+  assert.match(JSON.parse(output.join('')).reason, /chat_read/);
+  assert.doesNotMatch(output.join(''), /private reply/);
+});
+
+test('Stop keeps a verified watch alive when the final status check fails', async t => {
+  const f = fixture(t);
+  const sender = f.mailbox.claimIdentity(f.room, 'awaited-sender', 'peer', crypto.randomUUID());
+  f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+  const originalStatus = f.mailbox.replyWaitStatus;
+  let inspections = 0;
+  f.mailbox.replyWaitStatus = identity => {
+    if (++inspections > 1) throw new Error('temporary mailbox read failure');
+    return originalStatus(identity);
+  };
+  const output = [];
+  const result = await waitForReplyAtStop({ identity: { client: 'codex', hostSessionId: f.binding.hostSessionId,
+    cwd: f.cwd }, env: f.env, mailbox: f.mailbox, sliceMs: 0, write: value => output.push(value) });
+  assert.equal(result.state, 'waiting');
+  assert.equal(result.continued, true);
+  assert.match(JSON.parse(output.join('')).reason, /chat_wait_status/);
+});
+
+test('Stop trusts broker expiry status and notices a later reply to the same watch', async t => {
+  const f = fixture(t);
+  const brokerUrl = 'http://127.0.0.1:49999';
+  bindNotification({ configFile: f.configFile, binding: { ...f.binding, brokerUrl } });
+  const env = { ...f.env, AGENT_CHAT_BROKER_URL: brokerUrl, AGENT_CHAT_BROKER_TOKEN_FILE: path.join(f.root, 'token'),
+    AGENT_CHAT_BROKER_SESSION_DIR: path.join(f.root, 'remote'), AGENT_CHAT_ROOM: f.room.id };
+  const expectedSenderSessionId = crypto.randomUUID();
+  const deadlineAt = Date.now() - 1000;
+  const wait = { state: 'waiting', watchId: crypto.randomUUID(), expectedSenderSessionId,
+    startedAt: deadlineAt - 60000, deadlineAt, replyCount: 0 };
+  let inspections = 0;
+  const remoteInspector = async () => {
+    if (++inspections === 1) throw new Error('temporary broker failure');
+    return { peer: { sessionId: f.peer.sessionId, room: f.room.id, clientCwd: f.cwd }, wait: { ...wait } };
+  };
+  const stop = async sliceMs => {
+    const output = [];
+    const result = await waitForReplyAtStop({ identity: { client: 'codex', hostSessionId: f.binding.hostSessionId,
+      cwd: f.cwd }, env, remoteInspector, sliceMs, pollMs: 1,
+    write: value => output.push(value) });
+    return { result, output: output.join('') };
+  };
+  const pending = await stop(20);
+  assert.ok(inspections >= 3);
+  assert.equal(pending.result.state, 'waiting');
+  assert.match(JSON.parse(pending.output).reason, /chat_wait_status/);
+  assert.doesNotMatch(pending.output, /reached its deadline/);
+  wait.state = 'expired';
+  const expired = await stop(0);
+  assert.equal(expired.result.state, 'expired');
+  assert.match(JSON.parse(expired.output).reason, /deadline/);
+  assert.equal((await stop(0)).result.continued, false);
+  wait.state = 'replied'; wait.replyCount = 1;
+  const replied = await stop(0);
+  assert.equal(replied.result.state, 'replied');
+  assert.match(JSON.parse(replied.output).reason, /chat_read/);
+  assert.equal((await stop(0)).result.continued, false);
 });
 
 test('Stop rechecks a watch before continuing after cancellation or replacement', async t => {

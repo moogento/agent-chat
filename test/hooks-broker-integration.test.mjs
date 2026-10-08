@@ -140,3 +140,29 @@ test('real broker OpenCode notices preserve tool output, use idle toasts and lea
   assert.doesNotMatch(output.output + toasts[0].body.message, /private opencode broker message/);
   assert.match(JSON.stringify(await f.tool(f.recipient, 'chat_read', { wait_seconds: 0 })), /private opencode broker message/);
 });
+
+test('real broker OpenCode resumes only its bound idle session for an awaited reply', async t => {
+  const f = await fixture(t, 'opencode');
+  const metadata = f.identity.structuredContent.agentChatIdentity;
+  bindNotification({ configFile: f.configFile, binding: { client: 'opencode', hostSessionId: 'live-host', cwd: f.cwd,
+    room: f.room, mailboxSessionId: metadata.sessionId, brokerUrl: f.broker.url } });
+  const sender = (await f.tool(f.sender, 'chat_who')).structuredContent.agentChatIdentity;
+  await f.tool(f.recipient, 'chat_send', { to: sender.name, text: 'Please review this change', await_reply_minutes: 1 });
+  await f.tool(f.sender, 'chat_send', { to: metadata.name, text: 'Private review reply' });
+  const prompts = [];
+  const plugin = await AgentChatPlugin({ directory: f.cwd, client: {
+    session: { get: async () => ({ data: { id: 'live-host', agent: 'plan',
+      model: { providerID: 'provider', id: 'model', variant: 'high' } } }),
+    promptAsync: async value => { prompts.push(value); return { data: true }; } },
+    tui: { showToast: async () => ({ data: true }) },
+  } }, { env: f.env });
+  await plugin.event({ event: { type: 'session.idle', properties: { sessionID: 'live-host' } } });
+  assert.equal(prompts.length, 1);
+  assert.deepEqual(prompts[0].path, { id: 'live-host' });
+  assert.equal(prompts[0].body.agent, 'plan');
+  assert.equal(prompts[0].body.variant, 'high');
+  assert.match(prompts[0].body.parts[0].text, /Call chat_read/);
+  assert.doesNotMatch(JSON.stringify(prompts), /Private review reply/);
+  assert.match(JSON.stringify(await f.tool(f.recipient, 'chat_wait_status')), /Reply received/);
+  await plugin.event({ event: { type: 'session.deleted', properties: { info: { id: 'live-host' } } } });
+});

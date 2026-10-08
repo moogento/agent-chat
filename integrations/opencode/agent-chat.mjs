@@ -62,6 +62,23 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
       body: { title: CHAT_LABEL, message: text, variant: 'info', duration: 6000 } });
     if (result?.error || result?.data === false || result === false) throw new Error('OpenCode rejected reply-watch toast');
   };
+  const wakeFallbackText = status => status.state === 'replied'
+    ? 'An awaited Agent Chat reply is ready. Ask your agent to call chat_read.'
+    : 'An Agent Chat reply wait expired without a reply. Ask your agent to call chat_wait_status.';
+  const currentProfile = async sessionID => {
+    if (typeof client?.session?.get !== 'function') return null;
+    const result = await client.session.get({ path: { id: sessionID } });
+    const info = result?.data || result;
+    if (result?.error || info?.id !== sessionID || typeof info.agent !== 'string' || !info.agent.trim()) return null;
+    const saved = models.get(sessionID);
+    const model = info.model?.providerID && info.model?.id
+      ? { providerID: info.model.providerID, modelID: info.model.id }
+      : saved?.providerID && saved?.modelID
+        ? { providerID: saved.providerID, modelID: saved.modelID } : null;
+    if (!model) return null;
+    const variant = info.model?.variant || saved?.variant;
+    return { agent: info.agent, model, ...(variant ? { variant } : {}) };
+  };
   const wakeSession = async (sessionID, status) => {
     if (!idleSessions.has(sessionID) || childSessions.has(sessionID) || closedSessions.has(sessionID)) return;
     const key = `${status.watchId || status.startedAt || status.deadlineAt}:${status.state}`;
@@ -73,20 +90,34 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
       : '💬 Agent Chat reply wait reached its deadline. Call chat_wait_status, then report the missing reply and stop waiting.';
     try {
       if (typeof client?.session?.promptAsync !== 'function') throw new Error('OpenCode session.promptAsync unavailable');
-      const model = models.get(sessionID);
+      const profile = await currentProfile(sessionID);
+      if (!profile) throw new Error('OpenCode session agent or model unavailable');
+      if (!idleSessions.has(sessionID) || closedSessions.has(sessionID)) return;
+      let latest;
+      try { latest = await waitStatus(sessionID); }
+      catch (error) {
+        wakeAttempts.delete(sessionID);
+        ensureWatchTimer(sessionID);
+        if (env.AGENT_CHAT_NOTIFY_DEBUG === '1') console.error(`agent-chat OpenCode wake recheck: ${error.message}`);
+        return;
+      }
+      if (latest.watchId !== status.watchId || latest.state !== status.state) {
+        if (latest.state !== 'none') ensureWatchTimer(sessionID);
+        return;
+      }
+      if (!idleSessions.has(sessionID) || closedSessions.has(sessionID)) return;
       const result = await client.session.promptAsync({ path: { id: sessionID },
-        body: { parts: [{ type: 'text', text }], ...(model ? { model } : {}) } });
+        body: { parts: [{ type: 'text', text }], ...profile } });
       if (result?.error || result?.data === false || result === false) throw new Error('OpenCode rejected reply-watch prompt');
       const timer = setTimeout(() => {
         wakeConfirmTimers.delete(sessionID);
         if (idleSessions.has(sessionID)) void safely(() => showWakeFallback(sessionID,
-          'An awaited Agent Chat reply is ready, but OpenCode did not confirm a resumed turn. Ask your agent to call chat_read.'));
+          `${wakeFallbackText(status)} OpenCode did not confirm a resumed turn.`));
       }, wakeConfirmMs);
       timer.unref?.();
       wakeConfirmTimers.set(sessionID, timer);
     } catch (error) {
-      await safely(() => showWakeFallback(sessionID,
-        'An awaited Agent Chat reply is ready. Ask your agent to call chat_read.'));
+      await safely(() => showWakeFallback(sessionID, wakeFallbackText(status)));
       if (env.AGENT_CHAT_NOTIFY_DEBUG === '1') console.error(`agent-chat OpenCode wake: ${error.message}`);
     }
   };
@@ -191,13 +222,12 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
         const info = event.properties?.info;
         const sessionID = event.properties?.sessionID || info?.sessionID;
         if (typeof sessionID === 'string' && !childSessions.has(sessionID) && info?.role === 'assistant') {
-          idleSessions.delete(sessionID);
-          stopWatch(sessionID);
           const confirm = wakeConfirmTimers.get(sessionID);
           if (confirm) clearTimeout(confirm);
           wakeConfirmTimers.delete(sessionID);
           if (typeof info.providerID === 'string' && typeof info.modelID === 'string') {
-            models.set(sessionID, { providerID: info.providerID, modelID: info.modelID });
+            models.set(sessionID, { providerID: info.providerID, modelID: info.modelID,
+              ...(typeof info.variant === 'string' ? { variant: info.variant } : {}) });
             if (models.size > 100) models.delete(models.keys().next().value);
             await registerHostPresence({ client: 'opencode', hostSessionId: sessionID, cwd: directory,
               model: `${info.providerID}/${info.modelID}`, variant: info.variant, activity: 'working', env, mailbox });
