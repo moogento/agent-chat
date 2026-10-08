@@ -92,7 +92,10 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
       if (typeof client?.session?.promptAsync !== 'function') throw new Error('OpenCode session.promptAsync unavailable');
       const profile = await currentProfile(sessionID);
       if (!profile) throw new Error('OpenCode session agent or model unavailable');
-      if (!idleSessions.has(sessionID) || closedSessions.has(sessionID)) return;
+      if (!idleSessions.has(sessionID) || closedSessions.has(sessionID)) {
+        wakeAttempts.delete(sessionID);
+        return;
+      }
       let latest;
       try { latest = await waitStatus(sessionID); }
       catch (error) {
@@ -102,10 +105,14 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
         return;
       }
       if (latest.watchId !== status.watchId || latest.state !== status.state) {
+        wakeAttempts.delete(sessionID);
         if (latest.state !== 'none') ensureWatchTimer(sessionID);
         return;
       }
-      if (!idleSessions.has(sessionID) || closedSessions.has(sessionID)) return;
+      if (!idleSessions.has(sessionID) || closedSessions.has(sessionID)) {
+        wakeAttempts.delete(sessionID);
+        return;
+      }
       const result = await client.session.promptAsync({ path: { id: sessionID },
         body: { parts: [{ type: 'text', text }], ...profile } });
       if (result?.error || result?.data === false || result === false) throw new Error('OpenCode rejected reply-watch prompt');

@@ -240,6 +240,7 @@ export async function waitForReplyAtStop({ identity, env = process.env, mailbox,
     catch { return { error: true }; }
   };
   let lastSeenWatch;
+  let checksBeforeWatch = 0;
   const continueAfterCheckFailure = async () => {
     if (!lastSeenWatch) return { state: 'unverified' };
     const continued = await writeStopDecision({ reason: STOP_PENDING_REASON, decision: 'waiting',
@@ -249,6 +250,7 @@ export async function waitForReplyAtStop({ identity, env = process.env, mailbox,
   for (;;) {
     const inspected = await inspect();
     if (inspected.error) {
+      if (!lastSeenWatch && ++checksBeforeWatch >= 3) return { state: 'unverified' };
       if (now() >= sliceEnds) return continueAfterCheckFailure();
       await sleep(Math.max(1, Math.min(Math.max(1, pollMs), sliceEnds - now())));
       continue;
@@ -257,6 +259,7 @@ export async function waitForReplyAtStop({ identity, env = process.env, mailbox,
     if (!watch) return { state: 'unverified' };
     const { wait } = watch;
     if (wait.state === 'none') return { state: 'none' };
+    checksBeforeWatch = 0;
     lastSeenWatch = watch;
     const decision = wait.state === 'replied' ? 'replied'
       : wait.state === 'expired' ? 'expired'

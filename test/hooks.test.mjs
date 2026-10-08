@@ -296,6 +296,22 @@ test('Stop keeps a verified watch alive when the final status check fails', asyn
   assert.match(JSON.parse(output.join('')).reason, /chat_wait_status/);
 });
 
+test('Stop exits promptly when broker checks fail before any watch is verified', async t => {
+  const f = fixture(t);
+  const brokerUrl = 'http://127.0.0.1:49999';
+  bindNotification({ configFile: f.configFile, binding: { ...f.binding, brokerUrl } });
+  const env = { ...f.env, AGENT_CHAT_BROKER_URL: brokerUrl, AGENT_CHAT_BROKER_TOKEN_FILE: path.join(f.root, 'token'),
+    AGENT_CHAT_BROKER_SESSION_DIR: path.join(f.root, 'remote'), AGENT_CHAT_ROOM: f.room.id };
+  let inspections = 0;
+  const output = [];
+  const result = await waitForReplyAtStop({ identity: { client: 'codex', hostSessionId: f.binding.hostSessionId,
+    cwd: f.cwd }, env, remoteInspector: async () => { inspections++; throw new Error('broker unavailable'); },
+  sliceMs: 480000, pollMs: 1, sleep: async () => {}, write: value => output.push(value) });
+  assert.equal(inspections, 3);
+  assert.equal(result.state, 'unverified');
+  assert.deepEqual(output, []);
+});
+
 test('Stop trusts broker expiry status and notices a later reply to the same watch', async t => {
   const f = fixture(t);
   const brokerUrl = 'http://127.0.0.1:49999';

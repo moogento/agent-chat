@@ -189,6 +189,32 @@ test('OpenCode rechecks the watch after fetching the session profile', async t =
   assert.equal(f.prompts.length, 0);
 });
 
+test('OpenCode can wake on a later idle event after becoming busy during profile lookup', async t => {
+  const f = fixture(t);
+  f.mailbox.beginReplyWait(f.receiver, f.sender.sessionId, 1);
+  f.mailbox.appendMessage(f.room, f.sender.name, f.receiver.name, 'awaited reply',
+    f.sender.sessionId, f.receiver.sessionId);
+  const adapter = await AgentChatPlugin({ client: f.client, directory: f.cwd },
+    { env: f.env, mailbox: f.mailbox, watchPollMs: 10, wakeConfirmMs: 25 });
+  t.adapter = adapter;
+  let first = true;
+  f.client.session.get = async () => {
+    if (first) {
+      first = false;
+      await adapter.event({ event: { type: 'session.status', properties: {
+        sessionID: 'host-opencode', status: { type: 'busy' },
+      } } });
+    }
+    return { data: f.sessionInfo };
+  };
+  await adapter.event({ event: { type: 'session.idle', properties: { sessionID: 'host-opencode' } } });
+  assert.equal(f.prompts.length, 0);
+  await adapter.event({ event: { type: 'session.status', properties: {
+    sessionID: 'host-opencode', status: { type: 'idle' },
+  } } });
+  assert.equal(f.prompts.length, 1);
+});
+
 test('OpenCode waits for a confirmed idle status before prompting the session', async t => {
   const f = fixture(t);
   const adapter = await AgentChatPlugin({ client: f.client, directory: f.cwd },
