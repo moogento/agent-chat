@@ -870,3 +870,11 @@ test('failed first install leaves all private backup snapshots ignored by Git', 
   assert.equal(ignored.status, 0, ignored.stderr); assert.match(ignored.stdout, /0.before/);
   assert.equal(read(f.project, '.agent-chat/.gitignore'), '*\n');
 });
+
+test('the managed runtime includes every hook and library module', () => {
+  for (const directory of ['hooks', 'lib']) {
+    for (const name of fs.readdirSync(path.join(root, directory)).filter(name => name.endsWith('.mjs'))) {
+      assert.ok(RUNTIME_FILES.includes(`${directory}/${name}`), `${directory}/${name} is missing from RUNTIME_FILES`);
+    }
+  }
+});

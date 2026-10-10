@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { createMailbox } from '../lib/mailbox.mjs';
 import { bindNotification } from '../hooks/bind.mjs';
 import { runCommandHook, notifySession } from '../hooks/notifications.mjs';
-import { codexLoadedThreads, queueCodexWake, startCodexIdleWatch, CODEX_WAKE_PREFIX } from '../hooks/codex-wake.mjs';
+import { codexLoadedThreads, queueCodexWake, startCodexIdleWatch, codexWakeSupported, CODEX_WAKE_PREFIX } from '../hooks/codex-wake.mjs';
 
 function fixture(t) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-codex-wake-')));
@@ -29,7 +29,7 @@ function fixture(t) {
 }
 
 // A minimal app-server control socket: answers the WebSocket upgrade, initialize, and thread/loaded/list.
-async function fakeDaemon(t, codexHome, threads) {
+async function fakeDaemon(t, codexHome, threads, pages = [threads]) {
   const dir = path.join(codexHome, 'app-server-control'); fs.mkdirSync(dir, { recursive: true });
   const socket = path.join(dir, 'app-server-control.sock');
   const methods = [];
@@ -53,7 +53,10 @@ async function fakeDaemon(t, codexHome, threads) {
         const message = JSON.parse(body.toString('utf8'));
         methods.push(message.method);
         if (message.method === 'initialize') reply({ id: message.id, result: { userAgent: 'fake' } });
-        if (message.method === 'thread/loaded/list') reply({ id: message.id, result: { data: threads } });
+        if (message.method === 'thread/loaded/list') {
+          const index = message.params?.cursor ? Number(message.params.cursor) : 0;
+          reply({ id: message.id, result: { data: pages[index], nextCursor: index + 1 < pages.length ? String(index + 1) : null } });
+        }
       }
     });
   });
@@ -70,12 +73,20 @@ test('loaded-thread query speaks the app-server control protocol and fails close
   assert.equal(await codexLoadedThreads({ socket: path.join(f.root, 'missing.sock') }), null);
 });
 
+test('loaded-thread query follows page cursors', async t => {
+  const f = fixture(t);
+  const daemon = await fakeDaemon(t, f.codexHome, null, [['a'], ['b'], [f.hostSessionId]]);
+  assert.deepEqual([...await codexLoadedThreads({ socket: daemon.socket })], ['a', 'b', f.hostSessionId]);
+});
+
 test('Codex wake queues fixed text only for a daemon-hosted thread', async t => {
   const f = fixture(t);
   const calls = [];
   const run = async (file, args) => { calls.push([file, ...args]); };
   await assert.rejects(queueCodexWake({ threadId: f.hostSessionId, text: 'notice', env: f.env, run,
-    loadedThreads: async () => new Set(['other']) }), /not hosted/);
+    loadedThreads: async () => new Set(['other']) }), error => error.code === 'IDLE_WAKE_UNREACHABLE');
+  await assert.rejects(queueCodexWake({ threadId: f.hostSessionId, text: 'notice', env: f.env, loadedThreads: async () => new Set([f.hostSessionId]),
+    run: async () => { throw Object.assign(new Error('spawn codex ENOENT'), { code: 'ENOENT' }); } }), error => error.code === 'IDLE_WAKE_UNREACHABLE');
   await assert.rejects(queueCodexWake({ threadId: f.hostSessionId, text: 'notice', env: f.env, run, loadedThreads: async () => null }), /not hosted/);
   assert.equal(calls.length, 0);
   await queueCodexWake({ threadId: f.hostSessionId, text: 'notice\n', env: { ...f.env, AGENT_CHAT_CODEX_BIN: '/bin/codex' }, run,
@@ -86,7 +97,7 @@ test('Codex wake queues fixed text only for a daemon-hosted thread', async t => 
 test('Codex Stop starts a detached watcher only for a bound session with a control socket', async t => {
   const f = fixture(t);
   const spawned = [];
-  const codexWake = { startCodexIdleWatch: options => startCodexIdleWatch({ ...options, spawnChild: (file, args, options) => {
+  const codexWake = { codexWakeSupported, startCodexIdleWatch: options => startCodexIdleWatch({ ...options, spawnChild: (file, args, options) => {
     spawned.push({ file, args, options }); return { unref() {}, on() {} };
   } }) };
   const stop = async payload => { const output = []; await runCommandHook({ client: 'codex', payload, env: f.env, mailbox: f.mailbox,
@@ -102,6 +113,15 @@ test('Codex Stop starts a detached watcher only for a bound session with a contr
   assert.equal(spawned[0].options.detached, true);
   assert.equal(spawned[0].options.stdio, 'ignore');
   assert.deepEqual(JSON.parse(spawned[0].options.env.AGENT_CHAT_IDLE_WATCH_PAYLOAD), f.payload);
+  assert.equal(spawned[0].options.cwd, os.homedir());
+  assert.equal(spawned[0].options.env.AGENT_CHAT_NOTIFY_CONFIG, f.configFile);
+  const generation = spawned[0].options.env.AGENT_CHAT_IDLE_WATCH_GENERATION;
+  assert.match(generation, /^[0-9a-f-]{36}$/);
+  const stateDir = path.join(path.dirname(f.configFile), 'notification-state');
+  const watchFile = fs.readdirSync(stateDir).find(name => name.startsWith('idle-watch-'));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(stateDir, watchFile), 'utf8')).generation, generation);
+  await runCommandHook({ client: 'codex', payload: { ...f.payload, hook_event_name: 'UserPromptSubmit' }, env: f.env, mailbox: f.mailbox, write: () => {} });
+  assert.equal(fs.existsSync(path.join(stateDir, watchFile)), false);
 });
 
 test('Codex idle watcher exits for an unhosted thread and wakes a hosted one once per directed message', async t => {
@@ -128,7 +148,11 @@ test('Codex idle watcher exits for an unhosted thread and wakes a hosted one onc
   assert.match(queued[0][1], /1 new message/);
   assert.doesNotMatch(queued[0][1], /private request/);
   assert.equal((await watch()).reason, 'idle-timeout');
+  f.send('second request');
+  codexWake.queueCodexWake = async () => { throw Object.assign(new Error('gone'), { code: 'IDLE_WAKE_UNREACHABLE' }); };
+  assert.equal((await watch()).reason, 'idle-unreachable');
   const notices = [];
   await notifySession({ client: 'codex', hostSessionId: f.hostSessionId, cwd: f.cwd, env: f.env, mailbox: f.mailbox, deliver: text => notices.push(text) });
-  assert.equal(notices.length, 0);
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /1 new message/);
 });

@@ -316,6 +316,13 @@ function writeIdleState(file, value) {
   } finally { fs.rmSync(temporary, { force: true }); }
 }
 
+/** Marks a new idle watcher as current; any older watcher for the host session exits at its next poll. */
+export function claimIdleWatch(identity, env = process.env) {
+  const generation = crypto.randomUUID();
+  writeIdleState(idleStateFile('idle-watch', identity, env), { generation });
+  return generation;
+}
+
 /** Host activity retires an idle watcher; session end also drops its wake history. */
 export function retireIdleWatch(identity, env = process.env, { ended = false } = {}) {
   if (!env.AGENT_CHAT_NOTIFY_CONFIG) return;
@@ -335,12 +342,11 @@ function recentWakes(identity, env, now) {
 
 /** Runs as a Claude asyncRewake Stop hook. Wakes an idle session once per new directed message or finished reply watch. */
 export async function idleWatch({ identity, env = process.env, mailbox, remoteInspector, wake, maxMs = IDLE_WATCH_MS,
-  pollMs = IDLE_POLL_MS, now = () => Date.now(), sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
+  pollMs = IDLE_POLL_MS, now = () => Date.now(), sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), generation }) {
   const binding = findBinding({ ...identity, env });
   if (!binding) return { state: 'unbound' };
   if (remoteMode(binding, env) === false) mailbox ??= createMailbox({ home: env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat'), cwd: identity.cwd });
-  const generation = crypto.randomUUID();
-  writeIdleState(idleStateFile('idle-watch', identity, env), { generation });
+  generation ??= claimIdleWatch(identity, env);
   const ends = now() + Math.min(IDLE_WATCH_MS, Math.max(0, maxMs));
   const woke = state => {
     writeIdleState(idleStateFile('idle-wakes', identity, env), { times: [...recentWakes(identity, env, now()), now()] });
@@ -356,7 +362,10 @@ export async function idleWatch({ identity, env = process.env, mailbox, remoteIn
         const finished = { replied: STOP_REPLY_REASON, expired: STOP_EXPIRED_REASON }[watch?.wait.state];
         if (finished && await writeStopDecision({ reason: finished, decision: watch.wait.state, watch, identity, binding, env,
           write: wake, once: true, render: text => text + '\n' })) return woke(`woke-${watch.wait.state}`);
-      } catch { /* Transient mailbox or broker failure; stderr is reserved for the wake prompt. */ }
+      } catch (error) {
+        if (error?.code === 'IDLE_WAKE_UNREACHABLE') return { state: 'unreachable' };
+        // Other mailbox or broker failures are retried; stderr is reserved for the wake prompt.
+      }
     }
     if (now() >= ends) return { state: 'timeout' };
     await sleep(Math.max(1, Math.min(pollMs, ends - now())));
@@ -651,8 +660,8 @@ export async function runCommandHook({ client, payload, env = process.env, mailb
     codexWake ??= await import('./codex-wake.mjs');
     const hosted = await codexWake.codexLoadedThreads({ socket: codexWake.codexControlSocket(env) });
     if (!hosted?.has(identity.hostSessionId)) return { delivered: false, reason: 'idle-not-hosted' };
-    const result = await idleWatch({ identity, env, mailbox, remoteInspector, ...idleWatchOptions,
-      wake: text => codexWake.queueCodexWake({ threadId: identity.hostSessionId, text, env }) });
+    const result = await idleWatch({ identity, env, mailbox, remoteInspector, generation: env.AGENT_CHAT_IDLE_WATCH_GENERATION,
+      ...idleWatchOptions, wake: text => codexWake.queueCodexWake({ threadId: identity.hostSessionId, text, env }) });
     return { delivered: result.state.startsWith('woke'), reason: `idle-${result.state}` };
   }
   if (payload.hook_event_name === 'SessionEnd') {
@@ -676,7 +685,10 @@ export async function runCommandHook({ client, payload, env = process.env, mailb
       if (outputAttempted) return { delivered: false, reason: 'reply-wait-output-failed' };
     }
     if (client === 'codex' && findBinding({ ...identity, env })) {
-      try { (codexWake ?? await import('./codex-wake.mjs')).startCodexIdleWatch({ identity, env }); }
+      try {
+        codexWake ??= await import('./codex-wake.mjs');
+        if (codexWake.codexWakeSupported(env)) codexWake.startCodexIdleWatch({ identity, env, generation: claimIdleWatch(identity, env) });
+      }
       catch (error) { if (env.AGENT_CHAT_NOTIFY_DEBUG === '1') console.error(`agent-chat codex idle watch: ${error.message}`); }
     }
     await write('{}\n');
