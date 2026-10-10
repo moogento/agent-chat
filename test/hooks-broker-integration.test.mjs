@@ -40,6 +40,7 @@ async function fixture(t, client = 'codex') {
     AGENT_CHAT_NOTIFY_IDENTITY_TOOLS: client === 'claude-code' ? 'mcp__agent-chat__chat_who' : 'mcp__agent_chat__chat_who' };
   delete env.AGENT_CHAT_NOTIFY_DEBUG;
   delete env.CLAUDE_PROJECT_DIR;
+  env.CODEX_HOME = path.join(root, 'codex-home');
   const payload = { session_id: 'live-host', cwd, hook_event_name: 'PostToolUse', tool_name: env.AGENT_CHAT_NOTIFY_IDENTITY_TOOLS,
     tool_response: identity };
   const send = text => tool(sender, 'chat_send', { to: identity.structuredContent.agentChatIdentity.name, text });

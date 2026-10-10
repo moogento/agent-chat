@@ -7,7 +7,9 @@ try {
   const { commandIdentity, runCommandHook } = await import('./notifications.mjs');
   let length = 0;
   const chunks = [];
-  for await (const chunk of process.stdin) {
+  // The detached Codex idle watcher has no stdin; its Stop hook passes the payload in the environment.
+  if (process.argv[3] === 'codex-idle-watch') chunks.push(Buffer.from(process.env.AGENT_CHAT_IDLE_WATCH_PAYLOAD || ''));
+  else for await (const chunk of process.stdin) {
     length += chunk.length;
     if (length > MAX_INPUT) throw new Error('hook payload exceeds 1 MiB');
     chunks.push(chunk);
@@ -15,7 +17,7 @@ try {
   const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
   const identity = commandIdentity(client, payload);
   // An idle-watch hook's stderr becomes the wake prompt, so it carries no debug output.
-  if (process.env.AGENT_CHAT_NOTIFY_DEBUG === '1' && identity && process.argv[3] !== 'idle-watch') {
+  if (process.env.AGENT_CHAT_NOTIFY_DEBUG === '1' && identity && !['idle-watch', 'codex-idle-watch'].includes(process.argv[3])) {
     process.stderr.write(`agent-chat hook identity: ${JSON.stringify(identity)}\n`);
   }
   const result = await runCommandHook({ client, payload, mode: process.argv[3], write: value => new Promise((resolve, reject) => {

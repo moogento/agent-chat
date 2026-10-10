@@ -633,7 +633,8 @@ export async function autoBindCommand({ client, payload, env = process.env, mail
 }
 
 export async function runCommandHook({ client, payload, env = process.env, mailbox, remoteInspector, write = value => process.stdout.write(value),
-  stopWaitOptions = {}, mode, wakeWrite = value => new Promise(resolve => process.stderr.write(value, () => resolve())), idleWatchOptions = {} }) {
+  stopWaitOptions = {}, mode, wakeWrite = value => new Promise(resolve => process.stderr.write(value, () => resolve())), idleWatchOptions = {},
+  codexWake }) {
   const identity = commandIdentity(client, payload, env);
   if (!identity) return { delivered: false, reason: 'unsupported-event' };
   if (['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'SessionEnd'].includes(payload.hook_event_name)) {
@@ -645,6 +646,14 @@ export async function runCommandHook({ client, payload, env = process.env, mailb
     const result = await idleWatch({ identity, env, mailbox, remoteInspector, wake: wakeWrite, ...idleWatchOptions });
     const wake = result.state.startsWith('woke');
     return { delivered: wake, wake, reason: `idle-${result.state}` };
+  }
+  if (payload.hook_event_name === 'Stop' && mode === 'codex-idle-watch' && client === 'codex') {
+    codexWake ??= await import('./codex-wake.mjs');
+    const hosted = await codexWake.codexLoadedThreads({ socket: codexWake.codexControlSocket(env) });
+    if (!hosted?.has(identity.hostSessionId)) return { delivered: false, reason: 'idle-not-hosted' };
+    const result = await idleWatch({ identity, env, mailbox, remoteInspector, ...idleWatchOptions,
+      wake: text => codexWake.queueCodexWake({ threadId: identity.hostSessionId, text, env }) });
+    return { delivered: result.state.startsWith('woke'), reason: `idle-${result.state}` };
   }
   if (payload.hook_event_name === 'SessionEnd') {
     try { await cancelBoundReplyWatch({ identity, env, mailbox, remoteInspector }); }
@@ -665,6 +674,10 @@ export async function runCommandHook({ client, payload, env = process.env, mailb
     } catch (error) {
       if (env.AGENT_CHAT_NOTIFY_DEBUG === '1') console.error(`agent-chat reply watch hook: ${error.message}`);
       if (outputAttempted) return { delivered: false, reason: 'reply-wait-output-failed' };
+    }
+    if (client === 'codex' && findBinding({ ...identity, env })) {
+      try { (codexWake ?? await import('./codex-wake.mjs')).startCodexIdleWatch({ identity, env }); }
+      catch (error) { if (env.AGENT_CHAT_NOTIFY_DEBUG === '1') console.error(`agent-chat codex idle watch: ${error.message}`); }
     }
     await write('{}\n');
     return { delivered: false, reason: 'session-idle' };
