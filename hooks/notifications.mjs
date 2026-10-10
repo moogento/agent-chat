@@ -489,25 +489,38 @@ export async function notifySession({ client, hostSessionId, cwd, env = process.
   } finally { fs.rmSync(lock, { force: true }); }
 }
 
-export function commandIdentity(client, payload) {
+export function commandIdentity(client, payload, env = process.env) {
   if (!['codex', 'claude-code'].includes(client) || !payload || !COMMAND_EVENTS.has(payload.hook_event_name)) return null;
-  if (typeof payload.session_id !== 'string' || !payload.session_id || !canonicalCwd(payload.cwd)) return null;
+  if (typeof payload.session_id !== 'string' || !payload.session_id) return null;
   // Codex subagents share their parent's session_id. Claude also supplies agent_id.
   // Neither may consume a notice bound to the main conversation.
   if (payload.agent_id) return null;
-  return { client, hostSessionId: payload.session_id, cwd: payload.cwd };
+  // Claude's payload cwd follows cd and worktree switches; its MCP server stays in the project directory.
+  const cwd = client === 'claude-code' && canonicalCwd(env.CLAUDE_PROJECT_DIR) ? env.CLAUDE_PROJECT_DIR : payload.cwd;
+  if (!canonicalCwd(cwd)) return null;
+  return { client, hostSessionId: payload.session_id, cwd };
+}
+
+// Claude passes an MCP result's structuredContent as a JSON string.
+function identityMetadata(client, response) {
+  if (client === 'claude-code' && typeof response === 'string') {
+    let parsed;
+    try { parsed = JSON.parse(response); } catch { return undefined; }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+    return parsed.agentChatIdentity;
+  }
+  if (!response || typeof response !== 'object' || response.isError || response.error) return undefined;
+  return response.structuredContent?.agentChatIdentity;
 }
 
 /** Opt-in binding only from exact allowlisted identity tools with structured metadata. */
 export async function autoBindCommand({ client, payload, env = process.env, mailbox, remoteInspector }) {
   if (env.AGENT_CHAT_NOTIFY_AUTO_BIND !== '1' || !env.AGENT_CHAT_NOTIFY_CONFIG) return false;
-  const identity = commandIdentity(client, payload);
+  const identity = commandIdentity(client, payload, env);
   if (!identity || payload.hook_event_name !== 'PostToolUse') return false;
   const tools = (env.AGENT_CHAT_NOTIFY_IDENTITY_TOOLS || '').split(',').map(value => value.trim()).filter(Boolean);
   if (!tools.includes(payload.tool_name) || !/__(chat_join|chat_who|chat_accept_invite)$/.test(payload.tool_name)) return false;
-  const response = payload.tool_response;
-  if (!response || response.isError || response.error) return false;
-  const metadata = response.structuredContent?.agentChatIdentity;
+  const metadata = identityMetadata(client, payload.tool_response);
   if (metadata?.version !== 1) return false;
   const remote = Boolean(env.AGENT_CHAT_BROKER_URL || env.AGENT_CHAT_BROKER_TOKEN_FILE || metadata.transport === 'broker');
   if (canonicalCwd(remote ? metadata.clientCwd : metadata.cwd) !== canonicalCwd(identity.cwd)) return false;
@@ -538,7 +551,7 @@ export async function autoBindCommand({ client, payload, env = process.env, mail
 
 export async function runCommandHook({ client, payload, env = process.env, mailbox, remoteInspector, write = value => process.stdout.write(value),
   stopWaitOptions = {} }) {
-  const identity = commandIdentity(client, payload);
+  const identity = commandIdentity(client, payload, env);
   if (!identity) return { delivered: false, reason: 'unsupported-event' };
   if (payload.hook_event_name === 'SessionEnd') {
     try { await cancelBoundReplyWatch({ identity, env, mailbox, remoteInspector }); }

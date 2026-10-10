@@ -24,6 +24,7 @@ function fixture(t) {
   const env = { ...process.env, AGENT_CHAT_HOME: home, AGENT_CHAT_NOTIFY_CONFIG: configFile,
     AGENT_CHAT_NOTIFY_AUTO_BIND: '1', AGENT_CHAT_NOTIFY_DEBUG: '0',
     AGENT_CHAT_NOTIFY_IDENTITY_TOOLS: 'mcp__agent-chat__chat_join' };
+  delete env.CLAUDE_PROJECT_DIR;
   return { cwd, home, configFile, mailbox, responses, server, env };
 }
 function run(file, args, env, input) {

@@ -1,6 +1,6 @@
 {
   "name": "agent-chat",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Coordinate local coding agents through a shared, file-backed mailbox.",
   "skills": "./skills/",
   "mcpServers": "./mcp.json",

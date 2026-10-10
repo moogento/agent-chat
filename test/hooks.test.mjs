@@ -445,6 +445,58 @@ test('auto-bind requires opt-in and a successful exact allowlisted identity tool
   assert.equal(notices.length, 1);
 });
 
+test('Claude auto-binds from its JSON string tool result and rejects other strings', async t => {
+  const f = fixture(t, 'claude-code');
+  fs.rmSync(f.configFile);
+  const tool = 'mcp__agent-chat__chat_who';
+  const env = { ...f.env, AGENT_CHAT_NOTIFY_AUTO_BIND: '1', AGENT_CHAT_NOTIFY_IDENTITY_TOOLS: tool };
+  const identity = { version: 1, sessionId: f.peer.sessionId, cwd: f.cwd, room: f.room.id, roomId: f.room.id, name: f.peer.name };
+  const payload = { session_id: f.binding.hostSessionId, cwd: f.cwd, hook_event_name: 'PostToolUse',
+    tool_name: tool, tool_response: JSON.stringify({ agentChatIdentity: identity }) };
+  for (const [client, invalid] of [['claude-code', { ...payload, tool_response: 'not json' }],
+    ['claude-code', { ...payload, tool_response: JSON.stringify({ content: [{ type: 'text', text: JSON.stringify({ agentChatIdentity: identity }) }] }) }],
+    ['claude-code', { ...payload, tool_response: JSON.stringify([{ agentChatIdentity: identity }]) }],
+    ['claude-code', { ...payload, tool_response: JSON.stringify({ agentChatIdentity: { ...identity, name: 'other' } }) }],
+    ['codex', payload]]) {
+    await runCommandHook({ client, payload: invalid, env, mailbox: f.mailbox, write: () => {} });
+    assert.equal(fs.existsSync(f.configFile), false);
+  }
+  f.send();
+  const notices = [];
+  await runCommandHook({ client: 'claude-code', payload, env, mailbox: f.mailbox, write: text => notices.push(text) });
+  assert.equal(readConfig(f.configFile).bindings[0].mailboxSessionId, f.peer.sessionId);
+  assert.equal(notices.length, 1);
+});
+
+test('Claude binds to its project directory after the session moves into a subdirectory', async t => {
+  const f = fixture(t, 'claude-code');
+  fs.rmSync(f.configFile);
+  const worktree = path.join(f.cwd, '.worktrees', 'feature');
+  fs.mkdirSync(worktree, { recursive: true });
+  const tool = 'mcp__agent-chat__chat_who';
+  const env = { ...f.env, AGENT_CHAT_NOTIFY_AUTO_BIND: '1', AGENT_CHAT_NOTIFY_IDENTITY_TOOLS: tool };
+  const payload = { session_id: f.binding.hostSessionId, cwd: worktree, hook_event_name: 'PostToolUse', tool_name: tool,
+    tool_response: JSON.stringify({ agentChatIdentity: { version: 1, sessionId: f.peer.sessionId, cwd: f.cwd, room: f.room.id, name: f.peer.name } }) };
+  await runCommandHook({ client: 'claude-code', payload, env, mailbox: f.mailbox, write: () => {} });
+  assert.equal(fs.existsSync(f.configFile), false);
+  const projectEnv = { ...env, CLAUDE_PROJECT_DIR: f.cwd };
+  await runCommandHook({ client: 'claude-code', payload, env: projectEnv, mailbox: f.mailbox, write: () => {} });
+  assert.equal(readConfig(f.configFile).bindings[0].cwd, f.cwd);
+  f.send();
+  const notices = [];
+  await runCommandHook({ client: 'claude-code', payload: { session_id: f.binding.hostSessionId, cwd: worktree,
+    hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_response: { stdout: '' } }, env: projectEnv, mailbox: f.mailbox,
+    write: text => notices.push(text) });
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /1 new message/);
+  fs.rmSync(worktree, { recursive: true });
+  f.send();
+  await runCommandHook({ client: 'claude-code', payload: { session_id: f.binding.hostSessionId, cwd: worktree,
+    hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_response: { stdout: '' } }, env: projectEnv, mailbox: f.mailbox,
+    write: text => notices.push(text) });
+  assert.equal(notices.length, 2);
+});
+
 test('OpenCode adds a bounded notice after a tool and preserves all existing output', async t => {
   const f = fixture(t, 'opencode');
   f.send();
