@@ -693,6 +693,24 @@ test('OpenCode records why an identity tool did or did not link the session', as
   assert.equal(readConfig(f.configFile).bindings[0].hostSessionId, 'trace-host');
 });
 
+test('OpenCode links and adds notices when an MCP tool passes its raw CallToolResult', async t => {
+  const f = fixture(t, 'opencode');
+  fs.rmSync(f.configFile);
+  const plugin = await AgentChatPlugin({ directory: f.cwd, client: {} }, { env: f.env, mailbox: f.mailbox });
+  const text = `You are "${f.peer.name}" in room ${f.room.label}\nSession: ${f.peer.sessionId}\nRoom id: ${f.room.id}`;
+  const result = { content: [{ type: 'text', text }], structuredContent: { agentChatIdentity: { version: 1, sessionId: f.peer.sessionId } } };
+  await plugin['tool.execute.after']({ sessionID: 'mcp-host', tool: 'agent-chat_chat_who', callID: 'c1', args: {} }, result);
+  assert.equal(readConfig(f.configFile).bindings[0].hostSessionId, 'mcp-host');
+  assert.equal(result.content.length, 1);
+  assert.equal(result.output, undefined);
+  f.send();
+  const later = { content: [{ type: 'text', text: 'No new messages.' }] };
+  await plugin['tool.execute.after']({ sessionID: 'mcp-host', tool: 'agent-chat_chat_status', callID: 'c2', args: {} }, later);
+  assert.equal(later.content.length, 2);
+  assert.match(later.content[1].text, /^\[💬 Agent Chat: 1 new message/);
+  assert.doesNotMatch(later.content[1].text, /private peer contents/);
+});
+
 test('OpenCode accepting an invitation moves its exact binding to the new room', async t => {
   const f = fixture(t, 'opencode');
   fs.rmSync(f.configFile);
