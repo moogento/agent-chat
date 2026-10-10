@@ -491,12 +491,13 @@ export async function notifySession({ client, hostSessionId, cwd, env = process.
 
 export function commandIdentity(client, payload, env = process.env) {
   if (!['codex', 'claude-code'].includes(client) || !payload || !COMMAND_EVENTS.has(payload.hook_event_name)) return null;
-  if (typeof payload.session_id !== 'string' || !payload.session_id || !canonicalCwd(payload.cwd)) return null;
+  if (typeof payload.session_id !== 'string' || !payload.session_id) return null;
   // Codex subagents share their parent's session_id. Claude also supplies agent_id.
   // Neither may consume a notice bound to the main conversation.
   if (payload.agent_id) return null;
   // Claude's payload cwd follows cd and worktree switches; its MCP server stays in the project directory.
   const cwd = client === 'claude-code' && canonicalCwd(env.CLAUDE_PROJECT_DIR) ? env.CLAUDE_PROJECT_DIR : payload.cwd;
+  if (!canonicalCwd(cwd)) return null;
   return { client, hostSessionId: payload.session_id, cwd };
 }
 
@@ -505,7 +506,7 @@ function identityMetadata(client, response) {
   if (client === 'claude-code' && typeof response === 'string') {
     let parsed;
     try { parsed = JSON.parse(response); } catch { return undefined; }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Object.keys(parsed).length !== 1) return undefined;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
     return parsed.agentChatIdentity;
   }
   if (!response || typeof response !== 'object' || response.isError || response.error) return undefined;

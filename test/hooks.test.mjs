@@ -454,7 +454,7 @@ test('Claude auto-binds from its JSON string tool result and rejects other strin
   const payload = { session_id: f.binding.hostSessionId, cwd: f.cwd, hook_event_name: 'PostToolUse',
     tool_name: tool, tool_response: JSON.stringify({ agentChatIdentity: identity }) };
   for (const [client, invalid] of [['claude-code', { ...payload, tool_response: 'not json' }],
-    ['claude-code', { ...payload, tool_response: JSON.stringify({ agentChatIdentity: identity, extra: true }) }],
+    ['claude-code', { ...payload, tool_response: JSON.stringify({ content: [{ type: 'text', text: JSON.stringify({ agentChatIdentity: identity }) }] }) }],
     ['claude-code', { ...payload, tool_response: JSON.stringify([{ agentChatIdentity: identity }]) }],
     ['claude-code', { ...payload, tool_response: JSON.stringify({ agentChatIdentity: { ...identity, name: 'other' } }) }],
     ['codex', payload]]) {
@@ -489,6 +489,12 @@ test('Claude binds to its project directory after the session moves into a subdi
     write: text => notices.push(text) });
   assert.equal(notices.length, 1);
   assert.match(notices[0], /1 new message/);
+  fs.rmSync(worktree, { recursive: true });
+  f.send();
+  await runCommandHook({ client: 'claude-code', payload: { session_id: f.binding.hostSessionId, cwd: worktree,
+    hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_response: { stdout: '' } }, env: projectEnv, mailbox: f.mailbox,
+    write: text => notices.push(text) });
+  assert.equal(notices.length, 2);
 });
 
 test('OpenCode adds a bounded notice after a tool and preserves all existing output', async t => {
