@@ -10,7 +10,7 @@ import { createMailbox } from '../lib/mailbox.mjs';
 import { createPresence } from '../lib/presence.mjs';
 import { bindNotification } from '../hooks/bind.mjs';
 import { notifySession, runCommandHook, readConfig, commandSessionTitle, syncBoundSessionTitle,
-  waitForReplyAtStop } from '../hooks/notifications.mjs';
+  waitForReplyAtStop, idleWatch, bumpIdleGeneration } from '../hooks/notifications.mjs';
 import { AgentChatPlugin } from '../integrations/opencode/agent-chat.mjs';
 
 function fixture(t, client = 'codex') {
@@ -991,4 +991,110 @@ test('unchanged checks do not rewrite dedupe state or identical auto-bind config
     write: () => assert.fail('duplicate notification') });
   assert.equal(fs.statSync(state).mtimeMs, past.getTime());
   assert.equal(fs.statSync(f.configFile).mtimeMs, past.getTime());
+});
+
+function idleFixture(t) {
+  const f = fixture(t, 'claude-code');
+  const identity = { client: 'claude-code', hostSessionId: f.binding.hostSessionId, cwd: f.cwd };
+  let clock = Date.now();
+  const watch = (options = {}) => {
+    const wakes = [];
+    const result = idleWatch({ identity, env: f.env, mailbox: f.mailbox, wake: text => { wakes.push(text); },
+      maxMs: 60 * 1000, pollMs: 5000, now: () => clock, sleep: async ms => { clock += ms; }, ...options });
+    return result.then(value => ({ ...value, wakes }));
+  };
+  return { ...f, identity, watch, advance: ms => { clock += ms; } };
+}
+
+test('idle watch wakes once for a directed message and ignores broadcasts', async t => {
+  const f = idleFixture(t);
+  f.send('broadcast lock', 'all');
+  const quiet = await f.watch();
+  assert.equal(quiet.state, 'timeout');
+  assert.equal(quiet.wakes.length, 0);
+  f.send('private directed request');
+  const woke = await f.watch();
+  assert.equal(woke.state, 'woke');
+  assert.equal(woke.wakes.length, 1);
+  assert.match(woke.wakes[0], /2 new messages/);
+  assert.match(woke.wakes[0], /chat_read/);
+  assert.match(woke.wakes[0], /never send acknowledgements/);
+  assert.doesNotMatch(woke.wakes[0], /private directed request|broadcast lock/);
+  const again = await f.watch();
+  assert.equal(again.state, 'timeout');
+  assert.equal(again.wakes.length, 0);
+  const notices = [];
+  await notifySession({ ...f.input, deliver: text => notices.push(text) });
+  assert.equal(notices.length, 0);
+});
+
+test('idle watch delivers a directed message that arrives while it waits', async t => {
+  const f = idleFixture(t);
+  let polls = 0;
+  const result = await f.watch({ sleep: async ms => { f.advance(ms); if (++polls === 3) f.send('later request'); } });
+  assert.equal(result.state, 'woke');
+  assert.equal(polls, 3);
+});
+
+test('idle watch exits when a prompt, newer Stop or session end supersedes it', async t => {
+  const f = idleFixture(t);
+  const superseded = await f.watch({ sleep: async ms => { f.advance(ms); bumpIdleGeneration(f.identity, f.env); } });
+  assert.equal(superseded.state, 'superseded');
+  for (const event of ['UserPromptSubmit', 'SessionEnd']) {
+    const result = await f.watch({ sleep: async ms => {
+      f.advance(ms);
+      await runCommandHook({ client: 'claude-code', payload: { session_id: f.binding.hostSessionId, cwd: f.cwd,
+        hook_event_name: event }, env: f.env, mailbox: f.mailbox, write: () => {} });
+    } });
+    assert.equal(result.state, 'superseded', event);
+  }
+  const other = fixture(t, 'claude-code');
+  await runCommandHook({ client: 'claude-code', payload: { session_id: other.binding.hostSessionId, cwd: other.cwd,
+    hook_event_name: 'UserPromptSubmit' }, env: other.env, mailbox: other.mailbox, write: () => {} });
+  assert.equal(fs.existsSync(path.join(path.dirname(other.configFile), 'notification-state')), false);
+});
+
+test('idle watch is inert for unbound sessions and wakes once when a reply watch expires', async t => {
+  const f = idleFixture(t);
+  const unbound = await idleWatch({ identity: { ...f.identity, hostSessionId: 'other-host' }, env: f.env, mailbox: f.mailbox,
+    wake: () => assert.fail('unbound sessions never wake') });
+  assert.equal(unbound.state, 'unbound');
+  const sender = f.mailbox.claimIdentity(f.room, 'awaited-sender', 'peer', crypto.randomUUID());
+  f.mailbox.beginReplyWait(f.peer, sender.sessionId, 1);
+  const originalStatus = f.mailbox.replyWaitStatus;
+  f.mailbox.replyWaitStatus = identity => ({ ...originalStatus(identity), state: 'expired' });
+  const expired = await f.watch();
+  assert.equal(expired.state, 'woke-expired');
+  assert.match(expired.wakes[0], /deadline/);
+  assert.doesNotMatch(expired.wakes[0], /decision/);
+  assert.equal((await f.watch()).state, 'timeout');
+});
+
+test('idle watch caps wakes per hour so idle peers cannot wake each other indefinitely', async t => {
+  const f = idleFixture(t);
+  const states = [];
+  for (let index = 0; index < 7; index++) {
+    f.send(`request ${index}`);
+    states.push((await f.watch()).state);
+  }
+  assert.deepEqual(states, [...Array(6).fill('woke'), 'budget']);
+  f.advance(61 * 60 * 1000);
+  assert.equal((await f.watch()).state, 'woke');
+});
+
+test('Claude idle-watch Stop hook exits 2 with the notice on stderr and nothing on stdout', async t => {
+  const f = idleFixture(t);
+  f.send();
+  const executable = path.resolve('hooks/notify.mjs');
+  const input = JSON.stringify({ session_id: f.binding.hostSessionId, cwd: f.cwd, hook_event_name: 'Stop' });
+  const env = { ...process.env, ...f.env };
+  delete env.CLAUDE_PROJECT_DIR;
+  const result = spawnSync(process.execPath, [executable, 'claude-code', 'idle-watch'], { input, env, encoding: 'utf8', timeout: 10000 });
+  assert.equal(result.status, 2, result.stderr);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /1 new message/);
+  const quiet = spawnSync(process.execPath, [executable, 'claude-code', 'idle-watch'], { input: JSON.stringify({
+    session_id: 'unbound-host', cwd: f.cwd, hook_event_name: 'Stop' }), env, encoding: 'utf8', timeout: 10000 });
+  assert.equal(quiet.status, 0, quiet.stderr);
+  assert.equal(quiet.stderr, '');
 });
