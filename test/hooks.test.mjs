@@ -676,6 +676,23 @@ test('OpenCode chat_who links exact same-repo sessions and syncs their own title
   assert.equal(createPresence({ home: f.home }).getHost({ client: 'opencode', hostSessionId: 'host-one' }).activity, 'working');
 });
 
+test('OpenCode records why an identity tool did or did not link the session', async t => {
+  const f = fixture(t, 'opencode');
+  fs.rmSync(f.configFile);
+  const trace = path.join(path.dirname(f.configFile), 'notification-state', 'opencode-link.json');
+  const plugin = await AgentChatPlugin({ directory: f.cwd, client: {} }, { env: f.env, mailbox: f.mailbox });
+  const who = { output: `You are "${f.peer.name}" in room ${f.room.label}\nSession: ${f.peer.sessionId}\nRoom id: ${f.room.id}` };
+  await plugin['tool.execute.after']({ sessionID: 'trace-host', tool: 'agent-chat_chat_who' }, { output: 'something else' });
+  assert.equal(JSON.parse(fs.readFileSync(trace, 'utf8')).reason, 'output-not-identity');
+  await plugin['tool.execute.after']({ sessionID: 'trace-host', tool: 'agent-chat_chat_who' }, { output: who.output.replace(f.peer.sessionId, crypto.randomUUID()) });
+  assert.equal(JSON.parse(fs.readFileSync(trace, 'utf8')).reason, 'peer-count-0');
+  await plugin['tool.execute.after']({ sessionID: 'trace-host', tool: 'agent-chat_chat_who' }, { ...who });
+  const linked = JSON.parse(fs.readFileSync(trace, 'utf8'));
+  assert.deepEqual([linked.reason, linked.hostSessionId, linked.tool], ['linked', 'trace-host', 'agent-chat_chat_who']);
+  assert.doesNotMatch(fs.readFileSync(trace, 'utf8'), /Room id|You are/);
+  assert.equal(readConfig(f.configFile).bindings[0].hostSessionId, 'trace-host');
+});
+
 test('OpenCode accepting an invitation moves its exact binding to the new room', async t => {
   const f = fixture(t, 'opencode');
   fs.rmSync(f.configFile);

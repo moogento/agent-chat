@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createMailbox } from '../../lib/mailbox.mjs';
@@ -160,38 +161,53 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
   };
   const notify = (sessionID, deliver) => notifySession({ client: 'opencode', hostSessionId: sessionID,
     cwd: directory, env, mailbox, remoteInspector, deliver });
-  const linkIdentityTool = (input, output) => {
-    if (!env.AGENT_CHAT_NOTIFY_CONFIG || env.AGENT_CHAT_BROKER_URL
-      || !['agent-chat_chat_who', 'agent-chat_chat_join', 'agent-chat_chat_rename', 'agent-chat_chat_accept_invite'].includes(input.tool)) return;
+  // Returns why a link was skipped; recorded so a host-side failure can be diagnosed without debug logging.
+  const linkIdentity = (input, output) => {
     const response = output.output;
-    if (typeof response !== 'string') return;
+    if (typeof response !== 'string') return 'output-not-text';
     const identityText = response.startsWith('You are "') ? response
       : /^Accepted invitation [a-f0-9-]{36}\.\nYou are "/.test(response) ? response.slice(response.indexOf('\n') + 1) : null;
-    if (!identityText) return;
+    if (!identityText) return 'output-not-identity';
     const lines = identityText.split('\n');
     if (lines.filter(line => line.startsWith('Session: ')).length !== 1
-      || lines.filter(line => line.startsWith('Room id: ')).length !== 1) return;
+      || lines.filter(line => line.startsWith('Room id: ')).length !== 1) return 'output-ambiguous';
     const [identityLine, sessionLine, roomLine] = lines;
     const peerName = identityLine.match(/^You are "([A-Za-z0-9._-]+)" in room /)?.[1];
     const sessionId = sessionLine?.match(/^Session: ([A-Za-z0-9._-]+)$/)?.[1];
     const roomId = roomLine?.match(/^Room id: ([A-Za-z0-9._-]+)$/)?.[1];
-    if (!peerName || !sessionId || !roomId) return;
+    if (!peerName || !sessionId || !roomId) return 'output-unparsed';
     const store = mailbox || createMailbox({ home: env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat'), cwd: directory });
     const room = { id: roomId, label: roomId };
     const currentCwd = canonicalCwd(directory);
-    if (!currentCwd) return;
-    const peers = store.listPeers(room).filter(peer => peer.sessionId === sessionId && peer.name === peerName && canonicalCwd(peer.cwd) === currentCwd
-      && peer.client.toLowerCase().includes('opencode') && store.isPeerAlive(peer));
-    if (peers.length !== 1) return;
+    if (!currentCwd) return 'directory-invalid';
+    const candidates = store.listPeers(room).filter(peer => peer.sessionId === sessionId && peer.name === peerName);
+    if (candidates.length !== 1) return `peer-count-${candidates.length}`;
+    if (canonicalCwd(candidates[0].cwd) !== currentCwd) return 'peer-cwd-mismatch';
+    if (!candidates[0].client.toLowerCase().includes('opencode')) return 'peer-client-mismatch';
+    if (!store.isPeerAlive(candidates[0])) return 'peer-not-alive';
     const presence = createPresence({ home: store.home });
     const host = presence.getHost({ client: 'opencode', hostSessionId: input.sessionID });
-    if (!host || canonicalCwd(host.cwd) !== currentCwd) return;
+    if (!host) return 'host-missing';
+    if (canonicalCwd(host.cwd) !== currentCwd) return 'host-cwd-mismatch';
     const binding = findBinding({ client: 'opencode', hostSessionId: input.sessionID, cwd: directory, env });
     if (binding?.room !== roomId || binding.mailboxSessionId !== sessionId) {
       bindNotification({ configFile: env.AGENT_CHAT_NOTIFY_CONFIG, binding: { client: 'opencode', hostSessionId: input.sessionID,
         cwd: directory, room: roomId, mailboxSessionId: sessionId } });
     }
-    presence.linkHost({ client: 'opencode', hostSessionId: input.sessionID, sessionId, room, name: peers[0].name });
+    presence.linkHost({ client: 'opencode', hostSessionId: input.sessionID, sessionId, room, name: candidates[0].name });
+    return 'linked';
+  };
+  const linkIdentityTool = (input, output) => {
+    if (!env.AGENT_CHAT_NOTIFY_CONFIG || env.AGENT_CHAT_BROKER_URL
+      || !['agent-chat_chat_who', 'agent-chat_chat_join', 'agent-chat_chat_rename', 'agent-chat_chat_accept_invite'].includes(input.tool)) return;
+    let reason;
+    try { reason = linkIdentity(input, output); } catch (error) { reason = `error: ${String(error?.message).slice(0, 200)}`; }
+    try {
+      const dir = path.join(path.dirname(env.AGENT_CHAT_NOTIFY_CONFIG), 'notification-state');
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(path.join(dir, 'opencode-link.json'), JSON.stringify({ at: new Date().toISOString(), tool: input.tool,
+        hostSessionId: input.sessionID, directory, reason }) + '\n', { mode: 0o600 });
+    } catch { /* diagnostics only */ }
   };
   const safely = async operation => {
     try { await operation(); } catch (error) {
