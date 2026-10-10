@@ -163,3 +163,26 @@ test('Codex idle watcher exits for an unhosted thread and wakes a hosted one onc
   assert.equal(notices.length, 1);
   assert.match(notices[0], /1 new message/);
 });
+
+test('a watcher retired during the hosted-thread query does not queue a stale wake', async t => {
+  const f = fixture(t);
+  let clock = Date.now();
+  let runs = 0;
+  const codexWake = {
+    codexControlSocket: () => 'socket',
+    codexLoadedThreads: async () => new Set([f.hostSessionId]),
+    queueCodexWake: options => queueCodexWake({ ...options, run: async () => { runs++; },
+      loadedThreads: async () => {
+        await runCommandHook({ client: 'codex', payload: { ...f.payload, hook_event_name: 'UserPromptSubmit' }, env: f.env, mailbox: f.mailbox, write: () => {} });
+        return new Set([f.hostSessionId]);
+      } }),
+  };
+  f.send();
+  const result = await runCommandHook({ client: 'codex', payload: f.payload, env: f.env, mailbox: f.mailbox, mode: 'codex-idle-watch', codexWake,
+    write: () => {}, idleWatchOptions: { maxMs: 60000, now: () => clock, sleep: async ms => { clock += ms; } } });
+  assert.equal(result.reason, 'idle-superseded');
+  assert.equal(runs, 0);
+  const notices = [];
+  await notifySession({ client: 'codex', hostSessionId: f.hostSessionId, cwd: f.cwd, env: f.env, mailbox: f.mailbox, deliver: text => notices.push(text) });
+  assert.equal(notices.length, 1);
+});
