@@ -966,9 +966,9 @@ test('an edited or reflowed wake block never fails update and is preserved with 
       assert.equal(read(f.project, 'CLAUDE.md'), edited);
       if (action === 'uninstall') assert.equal(inspectInstallation(f).exists, false, 'An edited block does not retain its client.');
       else {
-        assert.deepEqual(instructionEntries(f), []);
+        assert.deepEqual(instructionEntries(f).map(entry => entry.owners), [[]], 'A block that could not be removed stays tracked.');
         const reenabled = updateProject({ ...f, wakePermission: true });
-        assert.ok(reenabled.warnings.some(warning => /other Agent Chat instruction markers/.test(warning)));
+        assert.ok(reenabled.warnings.some(warning => /managed block was edited/.test(warning)));
         assert.equal(read(f.project, 'CLAUDE.md'), edited);
       }
     }
@@ -1184,6 +1184,8 @@ test('an adopted block is never rewritten to newer wording', t => {
   assert.ok(result.warnings.some(warning => /AGENTS\.md: the Agent Chat instructions that existed before installation use older wording/.test(warning)));
   assert.equal(read(f.project, 'AGENTS.md'), `# Team\n\n${older}`);
   assert.equal(instructionEntries(f)[0].adopted, true);
+  assert.match(instructionEntries(f)[0].wordingNoticeFor, /^[a-f0-9]{64}$/);
+  assert.ok(!updateProject(f).warnings.some(warning => /older wording/.test(warning)), 'The wording notice is shown once per wording version.');
   uninstallProject(f);
   assert.equal(read(f.project, 'AGENTS.md'), `# Team\n\n${older}`);
 });
@@ -1205,4 +1207,75 @@ test('receipts cannot claim instruction files or text beyond a marked wake block
     assert.throws(() => uninstallProject(f), /invalid instruction|invalid wake permission|invalid config ownership/, tamper);
     assert.ok(read(f.project, 'AGENTS.md').startsWith('precious\n'));
   }
+});
+
+test('an opted-out client that still shares a block is told why the block stays', t => {
+  const f = fixture(t); write(f.project, 'AGENTS.md', '# Rules\n');
+  installProject({ ...f, clients: ['codex', 'opencode'], hooks: true });
+  const result = updateProject({ ...f, clients: ['codex'], wakePermission: false });
+  assert.ok(result.warnings.some(warning => /^AGENTS\.md: kept the Agent Chat wake instructions because opencode still uses them, so codex will still read them; turn wake permission off for opencode too/.test(warning)));
+  assert.equal(read(f.project, 'AGENTS.md'), `# Rules\n\n${WAKE_BLOCK}`);
+  const removed = updateProject({ ...f, clients: ['opencode'], wakePermission: false });
+  assert.ok(!removed.warnings.some(warning => /kept the Agent Chat wake instructions/.test(warning)));
+  assert.equal(read(f.project, 'AGENTS.md'), '# Rules\n');
+});
+
+test('a block that could not be removed stays tracked and is later handled as installer content', t => {
+  for (const next of ['opt-out', 're-enable']) {
+    const f = fixture(t, next);
+    installProject({ ...f, clients: ['claude'], hooks: true });
+    const original = read(f.project, 'CLAUDE.md');
+    write(f.project, 'CLAUDE.md', original + 'x'.repeat(1024 * 1024));
+    const blocked = updateProject({ ...f, wakePermission: false });
+    assert.ok(blocked.warnings.some(warning => /CLAUDE\.md: left Agent Chat instructions in place because the file is not a readable regular file/.test(warning)));
+    assert.deepEqual(instructionEntries(f).map(entry => entry.owners), [[]]);
+    assert.deepEqual(inspectInstallation(f).receipt.configFiles['CLAUDE.md'], { created: true });
+    write(f.project, 'CLAUDE.md', original);
+    if (next === 'opt-out') {
+      updateProject(f);
+      assert.ok(!fs.existsSync(path.join(f.project, 'CLAUDE.md')), 'The installer-created file is removed, not adopted.');
+      assert.deepEqual(instructionEntries(f), []);
+    } else {
+      updateProject({ ...f, wakePermission: true });
+      assert.deepEqual(instructionEntries(f).map(entry => [entry.owners, entry.adopted]), [[['claude'], undefined]]);
+      uninstallProject(f);
+      assert.ok(!fs.existsSync(path.join(f.project, 'CLAUDE.md')));
+    }
+  }
+});
+
+test('updating an existing installation notes each wake block it adds or file it creates', t => {
+  const f = fixture(t); write(f.project, 'AGENTS.md', '# Rules\n');
+  installProject({ ...f, clients: ['codex', 'claude'], hooks: true });
+  write(f.project, 'AGENTS.md', '# Rules\n'); fs.rmSync(path.join(f.project, 'CLAUDE.md'));
+  const receipt = inspectInstallation(f).receipt;
+  receipt.entries = receipt.entries.filter(entry => entry.kind !== 'text-block');
+  delete receipt.wakePermission; delete receipt.configFiles['AGENTS.md']; delete receipt.configFiles['CLAUDE.md'];
+  write(f.project, '.agent-chat/install.json', receipt);
+  const result = updateProject(f);
+  assert.ok(result.warnings.some(warning => /^AGENTS\.md: added the managed Agent Chat wake instructions .*--no-wake-permission/.test(warning)));
+  assert.ok(result.warnings.some(warning => /^CLAUDE\.md: created with the managed Agent Chat wake instructions .*--no-wake-permission/.test(warning)));
+  assert.equal(read(f.project, 'AGENTS.md'), `# Rules\n\n${WAKE_BLOCK}`);
+  assert.ok(!updateProject(f).warnings.some(warning => /managed Agent Chat wake instructions so/.test(warning)), 'Unchanged blocks are not noted again.');
+});
+
+test('an instruction file that cannot be inspected is reported as unreadable, not as a symbolic link', t => {
+  const f = fixture(t); write(f.project, 'AGENTS.md', '# Rules\n');
+  const lstat = fs.lstatSync;
+  fs.lstatSync = (file, ...rest) => { if (String(file).endsWith(`${path.sep}AGENTS.md`)) throw Object.assign(new Error('denied'), { code: 'EACCES' }); return lstat(file, ...rest); };
+  let result;
+  try { result = installProject({ ...f, clients: ['codex'], hooks: true }); } finally { fs.lstatSync = lstat; }
+  assert.ok(result.warnings.some(warning => /AGENTS\.md: skipped .*not a readable regular file/.test(warning)));
+  assert.ok(!result.warnings.some(warning => /symbolic link/.test(warning)));
+  assert.ok(parseToml(read(f.project, '.codex/config.toml')).mcp_servers['agent-chat']);
+  assert.equal(read(f.project, 'AGENTS.md'), '# Rules\n');
+});
+
+test('removing a block from a pre-existing file ends its config file record', t => {
+  const f = fixture(t); write(f.project, 'CLAUDE.md', '# Mine\n');
+  installProject({ ...f, clients: ['claude'], hooks: true });
+  assert.deepEqual(inspectInstallation(f).receipt.configFiles['CLAUDE.md'], { created: false });
+  updateProject({ ...f, wakePermission: false });
+  assert.equal(read(f.project, 'CLAUDE.md'), '# Mine\n');
+  assert.equal(inspectInstallation(f).receipt.configFiles['CLAUDE.md'], undefined);
 });

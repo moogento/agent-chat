@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { doctorProject } from '../lib/doctor.mjs';
 import { installProject, updateProject, inspectInstallation, installationPaths } from '../lib/install.mjs';
 import { bindNotification } from '../hooks/bind.mjs';
@@ -203,13 +204,38 @@ test('doctor reports wake instructions as warnings without treating them as MCP 
   assert.match(check(result, 'claude.instructions')[0].message, /were edited/);
   assert.equal(check(result, 'claude.instructions')[0].status, 'warning');
   assert.deepEqual(snapshot(project), before);
-  const receiptFile = installationPaths(project).receipt;
-  const receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
-  receipt.entries = receipt.entries.filter(entry => entry.kind !== 'text-block');
-  fs.writeFileSync(receiptFile, JSON.stringify(receipt));
+  for (const relative of ['AGENTS.md', 'CLAUDE.md']) fs.rmSync(path.join(project, relative));
   result = await doctorProject({ project });
   for (const client of ['codex', 'claude', 'opencode']) {
-    assert.match(check(result, `${client}.instructions`)[0].message, /not installed in (AGENTS|CLAUDE)\.md.*--no-wake-permission/, client);
+    assert.match(check(result, `${client}.instructions`)[0].message, /not in (AGENTS|CLAUDE)\.md.*--no-wake-permission/, client);
+  }
+});
+
+test('doctor reports a client that opted out but still reads a shared block as information', async t => {
+  const { project } = fixture(t, { clients: ['codex', 'opencode'], hooks: true });
+  updateProject({ project, clients: ['codex'], wakePermission: false });
+  const result = await doctorProject({ project });
+  assert.deepEqual(check(result, 'codex.instructions').map(value => [value.status, /still reads .* because opencode uses them/.test(value.message)]), [['info', true]]);
+  assert.equal(check(result, 'opencode.instructions')[0].status, 'ok');
+});
+
+test('doctor follows the current instruction layout rather than recorded owners', async t => {
+  const { project } = fixture(t, { install: false });
+  fs.writeFileSync(path.join(project, 'AGENTS.md'), '# Shared\n');
+  try { fs.symlinkSync('AGENTS.md', path.join(project, 'CLAUDE.md')); }
+  catch (error) { if (error.code === 'EPERM' && process.platform === 'win32') return t.skip('symlink permission unavailable'); throw error; }
+  installProject({ project, clients: ['codex', 'claude'], hooks: true });
+  assert.equal(check(await doctorProject({ project }), 'claude.instructions')[0].status, 'ok');
+  fs.unlinkSync(path.join(project, 'CLAUDE.md'));
+  fs.writeFileSync(path.join(project, 'CLAUDE.md'), '# Claude only\n');
+  const result = await doctorProject({ project });
+  assert.equal(check(result, 'claude.instructions')[0].status, 'warning');
+  assert.match(check(result, 'claude.instructions')[0].message, /not in CLAUDE\.md/);
+  if (process.platform !== 'win32') {
+    fs.unlinkSync(path.join(project, 'AGENTS.md'));
+    assert.equal(spawnSync('mkfifo', [path.join(project, 'AGENTS.md')]).status, 0);
+    const fifo = await doctorProject({ project });
+    assert.match(check(fifo, 'codex.instructions')[0].message, /not a readable plain UTF-8 file/);
   }
 });
 
@@ -221,12 +247,7 @@ test('doctor accepts a CLAUDE.md symlink to the managed AGENTS.md wake instructi
   installProject({ project, clients: ['codex', 'claude'], hooks: true });
   const result = await doctorProject({ project });
   assert.deepEqual(check(result, 'claude.instructions').map(value => value.status), ['ok']);
-  assert.match(check(result, 'claude.instructions')[0].message, /in AGENTS\.md match/);
-  const receiptFile = installationPaths(project).receipt;
-  const receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
-  Object.assign(receipt.entries.find(entry => entry.kind === 'text-block'), { owners: ['codex'], client: 'codex' });
-  fs.writeFileSync(receiptFile, JSON.stringify(receipt));
-  assert.match(check(await doctorProject({ project }), 'claude.instructions')[0].message, /CLAUDE\.md links to AGENTS\.md/);
+  assert.match(check(result, 'claude.instructions')[0].message, /in AGENTS\.md through the CLAUDE\.md link/);
   fs.writeFileSync(path.join(project, 'AGENTS.md'), '# Shared\n');
   assert.equal(check(await doctorProject({ project }), 'claude.instructions')[0].status, 'warning');
 });
