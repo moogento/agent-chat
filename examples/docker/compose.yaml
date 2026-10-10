@@ -3,7 +3,7 @@ services:
     build:
       context: ../..
       dockerfile: examples/docker/Dockerfile
-    image: ${AGENT_CHAT_IMAGE:-agent-chat-local:0.8.2}
+    image: ${AGENT_CHAT_IMAGE:-agent-chat-local:0.8.3}
     read_only: true
     init: true
     cap_drop: [ALL]
@@ -23,7 +23,7 @@ services:
       retries: 20
       start_period: 2s
   agent:
-    image: ${AGENT_CHAT_IMAGE:-agent-chat-local:0.8.2}
+    image: ${AGENT_CHAT_IMAGE:-agent-chat-local:0.8.3}
     profiles: [agents]
     entrypoint: [node, /app/agent-chat.mjs]
     command: [proxy]
