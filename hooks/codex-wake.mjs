@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-export const CODEX_WAKE_PREFIX = 'This message was queued automatically by the agent-chat hook, not typed by the user. ';
+export const CODEX_WAKE_PREFIX = 'Queued automatically by the agent-chat idle watcher, not typed by the user. ';
 const LOADED_PAGES = 20;
 const WATCHER_ENV = ['PATH', 'HOME', 'USER', 'LOGNAME', 'TMPDIR', 'CODEX_HOME', 'AGENT_CHAT_HOME', 'AGENT_CHAT_NOTIFY_CONFIG',
   'AGENT_CHAT_NOTIFY_AUTO_BIND', 'AGENT_CHAT_NOTIFY_IDENTITY_TOOLS', 'AGENT_CHAT_CODEX_BIN', 'AGENT_CHAT_BROKER_URL',

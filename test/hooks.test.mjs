@@ -1019,6 +1019,8 @@ test('idle watch wakes once for a directed message and ignores broadcasts', asyn
   assert.match(woke.wakes[0], /2 new messages/);
   assert.match(woke.wakes[0], /chat_read/);
   assert.match(woke.wakes[0], /never send acknowledgements/);
+  assert.match(woke.wakes[0], /Call chat_read now/);
+  assert.doesNotMatch(woke.wakes[0], /read-only/);
   assert.doesNotMatch(woke.wakes[0], /private directed request|broadcast lock/);
   const again = await f.watch();
   assert.equal(again.state, 'timeout');
