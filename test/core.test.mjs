@@ -406,7 +406,7 @@ test('legacy AGENT_CHAT_MAX_WAIT initializes MCP with a capped schema and stderr
   const deadline = Date.now() + 10000;
   while (client.responses.length < 3 && client.child.exitCode === null && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(client.responses.length, 3, client.stderr());
-  assert.equal(client.responses.find(response => response.id === 1).result.serverInfo.version, '0.8.0');
+  assert.equal(client.responses.find(response => response.id === 1).result.serverInfo.version, '0.8.1');
   const read = client.responses.find(response => response.id === 2).result.tools.find(tool => tool.name === 'chat_read');
   assert.equal(read.inputSchema.properties.wait_seconds.maximum, 50); assert.match(read.description, /up to 50s/);
   assert.equal(client.responses.find(response => response.id === 3).error.code, -32602);
@@ -716,7 +716,7 @@ test('CLI works through an installed symlink', async (t) => {
   const child = spawn(process.execPath, [link, '--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
   let output = ''; child.stdout.on('data', (chunk) => { output += chunk; });
   const [code] = await once(child, 'exit');
-  assert.equal(code, 0); assert.equal(output.trim(), '0.8.0');
+  assert.equal(code, 0); assert.equal(output.trim(), '0.8.1');
 });
 
 test('waiting stops immediately when only a crashed peer remains', async (t) => {
@@ -742,4 +742,14 @@ test('chat_rename changes only the handle, keeps the room and session, and route
   assert.match(await renamed.server.callTool('chat_read'), /to the old handle/);
   await renamed.server.handle({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'chat_rename', arguments: {} } });
   assert.equal(renamed.responses.find(response => response.id === 3).error.code, -32602);
+});
+
+test('tools declare MCP annotations: inbox reads are read-only and nothing is destructive or open-world', async t => {
+  const { mailbox } = fixture(t);
+  const { server, responses } = serverFor(t, mailbox);
+  await server.handle({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+  const tools = Object.fromEntries(responses.find(response => response.id === 1).result.tools.map(tool => [tool.name, tool.annotations]));
+  for (const name of ['chat_read', 'chat_who', 'chat_wait_status', 'chat_rooms', 'chat_presence', 'chat_invitations']) assert.equal(tools[name].readOnlyHint, true, name);
+  for (const name of ['chat_send', 'chat_join', 'chat_rename', 'chat_status', 'chat_invite', 'chat_accept_invite', 'chat_cancel_wait']) assert.equal(tools[name].readOnlyHint, false, name);
+  for (const annotations of Object.values(tools)) assert.deepEqual([annotations.destructiveHint, annotations.openWorldHint], [false, false]);
 });

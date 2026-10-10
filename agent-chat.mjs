@@ -8,7 +8,7 @@ import { createMailbox, safeName, safeSessionId, pidAlive, LIMITS } from './lib/
 import { CHAT_LABEL } from './lib/presentation.mjs';
 import { createPresence } from './lib/presence.mjs';
 
-export const VERSION = '0.8.0';
+export const VERSION = '0.8.1';
 function envValue(name) {
   const value = process.env[name];
   return value === undefined || !value.trim() ? undefined : value;
@@ -60,6 +60,9 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
     { name: 'chat_invitations', description: 'Read invitations addressed to your session.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
     { name: 'chat_accept_invite', description: 'Accept an invitation and join its room. Broker sessions must reconnect to the invited room.', inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'], additionalProperties: false } },
   ];
+  // chat_read advances only this session's own read cursor. No tool deletes data or leaves the local mailbox or broker.
+  const READ_ONLY_TOOLS = new Set(['chat_read', 'chat_who', 'chat_wait_status', 'chat_rooms', 'chat_presence', 'chat_invitations']);
+  for (const tool of TOOLS) tool.annotations = { readOnlyHint: READ_ONLY_TOOLS.has(tool.name), destructiveHint: false, openWorldHint: false };
   function refreshIdentity() {
     if (state.identity && mailbox.getIdentity) {
       const current = mailbox.getIdentity(state.identity);
