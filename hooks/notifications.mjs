@@ -352,17 +352,18 @@ export async function idleWatch({ identity, env = process.env, mailbox, remoteIn
     writeIdleState(idleStateFile('idle-wakes', identity, env), { times: [...recentWakes(identity, env, now()), now()] });
     return { state };
   };
+  const stillCurrent = () => idleGeneration(identity, env) === generation;
+  const currentWake = text => wake(text, { stillCurrent });
   for (;;) {
-    if (idleGeneration(identity, env) !== generation) return { state: 'superseded' };
+    if (!stillCurrent()) return { state: 'superseded' };
     if (recentWakes(identity, env, now()).length < IDLE_WAKES_PER_HOUR) {
       try {
-        const stillCurrent = () => idleGeneration(identity, env) === generation;
-        const notice = await notifySession({ ...identity, env, mailbox, remoteInspector, wake: true, deliver: text => wake(text, { stillCurrent }) });
+        const notice = await notifySession({ ...identity, env, mailbox, remoteInspector, wake: true, deliver: currentWake });
         if (notice.delivered) return woke('woke');
         const watch = await boundReplyWatch({ binding, cwd: identity.cwd, env, mailbox, remoteInspector });
         const finished = { replied: STOP_REPLY_REASON, expired: STOP_EXPIRED_REASON }[watch?.wait.state];
         if (finished && await writeStopDecision({ reason: finished, decision: watch.wait.state, watch, identity, binding, env,
-          write: wake, once: true, render: text => text + '\n' })) return woke(`woke-${watch.wait.state}`);
+          write: currentWake, once: true, render: text => text + '\n' })) return woke(`woke-${watch.wait.state}`);
       } catch (error) {
         if (error?.code === 'IDLE_WAKE_UNREACHABLE') return { state: 'unreachable' };
         if (error?.code === 'IDLE_WAKE_SUPERSEDED') return { state: 'superseded' };
