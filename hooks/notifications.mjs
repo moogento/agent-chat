@@ -352,18 +352,21 @@ export async function idleWatch({ identity, env = process.env, mailbox, remoteIn
     writeIdleState(idleStateFile('idle-wakes', identity, env), { times: [...recentWakes(identity, env, now()), now()] });
     return { state };
   };
+  const stillCurrent = () => idleGeneration(identity, env) === generation;
+  const currentWake = text => wake(text, { stillCurrent });
   for (;;) {
-    if (idleGeneration(identity, env) !== generation) return { state: 'superseded' };
+    if (!stillCurrent()) return { state: 'superseded' };
     if (recentWakes(identity, env, now()).length < IDLE_WAKES_PER_HOUR) {
       try {
-        const notice = await notifySession({ ...identity, env, mailbox, remoteInspector, wake: true, deliver: wake });
+        const notice = await notifySession({ ...identity, env, mailbox, remoteInspector, wake: true, deliver: currentWake });
         if (notice.delivered) return woke('woke');
         const watch = await boundReplyWatch({ binding, cwd: identity.cwd, env, mailbox, remoteInspector });
         const finished = { replied: STOP_REPLY_REASON, expired: STOP_EXPIRED_REASON }[watch?.wait.state];
         if (finished && await writeStopDecision({ reason: finished, decision: watch.wait.state, watch, identity, binding, env,
-          write: wake, once: true, render: text => text + '\n' })) return woke(`woke-${watch.wait.state}`);
+          write: currentWake, once: true, render: text => text + '\n' })) return woke(`woke-${watch.wait.state}`);
       } catch (error) {
         if (error?.code === 'IDLE_WAKE_UNREACHABLE') return { state: 'unreachable' };
+        if (error?.code === 'IDLE_WAKE_SUPERSEDED') return { state: 'superseded' };
         // Other mailbox or broker failures are retried; stderr is reserved for the wake prompt.
       }
     }
@@ -662,7 +665,7 @@ export async function runCommandHook({ client, payload, env = process.env, mailb
     const hosted = await codexWake.codexLoadedThreads({ socket: codexWake.codexControlSocket(env) });
     if (hosted && !hosted.has(identity.hostSessionId)) return { delivered: false, reason: 'idle-not-hosted' };
     const result = await idleWatch({ identity, env, mailbox, remoteInspector, generation: env.AGENT_CHAT_IDLE_WATCH_GENERATION,
-      ...idleWatchOptions, wake: text => codexWake.queueCodexWake({ threadId: identity.hostSessionId, text, env }) });
+      ...idleWatchOptions, wake: (text, { stillCurrent } = {}) => codexWake.queueCodexWake({ threadId: identity.hostSessionId, text, env, stillCurrent }) });
     return { delivered: result.state.startsWith('woke'), reason: `idle-${result.state}` };
   }
   if (payload.hook_event_name === 'SessionEnd') {

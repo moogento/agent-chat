@@ -94,13 +94,15 @@ function unreachable(message) {
 }
 
 /** Queues fixed wake text for a daemon-hosted thread; rejects so an undelivered notice is retried. */
-export async function queueCodexWake({ threadId, text, env = process.env, loadedThreads = codexLoadedThreads,
+export async function queueCodexWake({ threadId, text, env = process.env, loadedThreads = codexLoadedThreads, stillCurrent = () => true,
   run = (file, args) => new Promise((resolve, reject) => execFile(file, args, { env, timeout: 10000 },
     error => error ? reject(error) : resolve())) }) {
   // A thread outside the shared daemon may belong to another host process; queueing could start a second writer.
   const hosted = await loadedThreads({ socket: codexControlSocket(env) });
   if (!hosted) throw new Error('Codex app-server did not answer');
   if (!hosted.has(threadId)) throw unreachable('Codex thread is not hosted by the shared app-server');
+  // The session may have become active during the query; a late wake would interrupt it.
+  if (!stillCurrent()) throw Object.assign(new Error('idle watcher was superseded'), { code: 'IDLE_WAKE_SUPERSEDED' });
   try { await run(env.AGENT_CHAT_CODEX_BIN || 'codex', ['queue', '--thread', threadId, '--message', CODEX_WAKE_PREFIX + text.trim()]); }
   catch (error) {
     if (error.code === 'ENOENT') throw unreachable('codex executable not found');
