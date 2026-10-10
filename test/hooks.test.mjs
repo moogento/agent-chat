@@ -26,7 +26,7 @@ function fixture(t, client = 'codex') {
   const configFile = path.join(root, 'notification config.json');
   const binding = { client, hostSessionId: 'host-session-a', cwd, room: room.id, mailboxSessionId: peer.sessionId };
   bindNotification({ configFile, binding });
-  const env = { AGENT_CHAT_HOME: home, AGENT_CHAT_NOTIFY_CONFIG: configFile };
+  const env = { AGENT_CHAT_HOME: home, AGENT_CHAT_NOTIFY_CONFIG: configFile, CODEX_HOME: path.join(root, 'codex-home') };
   const input = { client, hostSessionId: binding.hostSessionId, cwd, env, mailbox };
   const send = (text = 'private peer contents', to = peer.name, target = room) => mailbox.appendMessage(target, 'sender', to, text, crypto.randomUUID());
   return { root, cwd, home, room, mailbox, peer, configFile, binding, env, input, send };

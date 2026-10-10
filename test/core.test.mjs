@@ -406,7 +406,7 @@ test('legacy AGENT_CHAT_MAX_WAIT initializes MCP with a capped schema and stderr
   const deadline = Date.now() + 10000;
   while (client.responses.length < 3 && client.child.exitCode === null && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(client.responses.length, 3, client.stderr());
-  assert.equal(client.responses.find(response => response.id === 1).result.serverInfo.version, '0.7.0');
+  assert.equal(client.responses.find(response => response.id === 1).result.serverInfo.version, '0.8.0');
   const read = client.responses.find(response => response.id === 2).result.tools.find(tool => tool.name === 'chat_read');
   assert.equal(read.inputSchema.properties.wait_seconds.maximum, 50); assert.match(read.description, /up to 50s/);
   assert.equal(client.responses.find(response => response.id === 3).error.code, -32602);
@@ -716,7 +716,7 @@ test('CLI works through an installed symlink', async (t) => {
   const child = spawn(process.execPath, [link, '--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
   let output = ''; child.stdout.on('data', (chunk) => { output += chunk; });
   const [code] = await once(child, 'exit');
-  assert.equal(code, 0); assert.equal(output.trim(), '0.7.0');
+  assert.equal(code, 0); assert.equal(output.trim(), '0.8.0');
 });
 
 test('waiting stops immediately when only a crashed peer remains', async (t) => {
@@ -726,4 +726,20 @@ test('waiting stops immediately when only a crashed peer remains', async (t) => 
   const started = Date.now();
   assert.match(await server.callTool('chat_read', { wait_seconds: 2 }), /No active peers/);
   assert.ok(Date.now() - started < 500);
+});
+
+test('chat_rename changes only the handle, keeps the room and session, and routes the old handle', async t => {
+  const { mailbox } = fixture(t);
+  const renamed = serverFor(t, mailbox, { sessionId: 'rename-session', roomSpec: 'rename-room', nameSpec: 'opencode-m2-moo-3dc651' });
+  const sender = serverFor(t, mailbox, { sessionId: 'rename-sender', roomSpec: 'rename-room', nameSpec: 'sender' });
+  for (const item of [renamed, sender]) await item.server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'opencode' } } });
+  await renamed.server.handle({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'chat_rename', arguments: { name: 'deepseek' } } });
+  const result = renamed.responses.find(response => response.id === 2).result;
+  assert.match(result.content[0].text, /^You are "deepseek" in room rename-room/);
+  assert.equal(result.structuredContent.agentChatIdentity.name, 'deepseek');
+  assert.equal(result.structuredContent.agentChatIdentity.sessionId, 'rename-session');
+  await sender.server.callTool('chat_send', { to: 'opencode-m2-moo-3dc651', text: 'to the old handle' });
+  assert.match(await renamed.server.callTool('chat_read'), /to the old handle/);
+  await renamed.server.handle({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'chat_rename', arguments: {} } });
+  assert.equal(renamed.responses.find(response => response.id === 3).error.code, -32602);
 });

@@ -531,7 +531,7 @@ test('installs all clients, preserves unrelated settings and provides a self-con
   for (const entry of inspection.receipt.entries) assert.equal(inspectManagedEntry({ project: f.project, entry }).status, 'present');
   for (const relative of RUNTIME_FILES) assert.ok(fs.existsSync(path.join(f.project, '.agent-chat/runtime', relative)), relative);
   const run = spawnSync(process.execPath, [path.join(f.project, '.agent-chat/runtime/agent-chat.mjs'), '--version'], { encoding: 'utf8' });
-  assert.equal(run.status, 0, run.stderr); assert.equal(run.stdout.trim(), '0.7.0');
+  assert.equal(run.status, 0, run.stderr); assert.equal(run.stdout.trim(), '0.8.0');
   const diagnostic = spawnSync(process.execPath, [path.join(f.project, '.agent-chat/runtime/agent-chat.mjs'), 'doctor', '--project', f.project, '--json'], { encoding: 'utf8' });
   assert.equal(diagnostic.status, 0, diagnostic.stderr + diagnostic.stdout);
   assert.equal(JSON.parse(diagnostic.stdout).ok, true);
@@ -869,4 +869,12 @@ test('failed first install leaves all private backup snapshots ignored by Git', 
   const ignored = spawnSync('git', ['-C', f.project, 'check-ignore', backup], { encoding: 'utf8' });
   assert.equal(ignored.status, 0, ignored.stderr); assert.match(ignored.stdout, /0.before/);
   assert.equal(read(f.project, '.agent-chat/.gitignore'), '*\n');
+});
+
+test('the managed runtime includes every hook and library module', () => {
+  for (const directory of ['hooks', 'lib']) {
+    for (const name of fs.readdirSync(path.join(root, directory)).filter(name => name.endsWith('.mjs'))) {
+      assert.ok(RUNTIME_FILES.includes(`${directory}/${name}`), `${directory}/${name} is missing from RUNTIME_FILES`);
+    }
+  }
 });

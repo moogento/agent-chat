@@ -316,6 +316,13 @@ function writeIdleState(file, value) {
   } finally { fs.rmSync(temporary, { force: true }); }
 }
 
+/** Marks a new idle watcher as current; any older watcher for the host session exits at its next poll. */
+export function claimIdleWatch(identity, env = process.env) {
+  const generation = crypto.randomUUID();
+  writeIdleState(idleStateFile('idle-watch', identity, env), { generation });
+  return generation;
+}
+
 /** Host activity retires an idle watcher; session end also drops its wake history. */
 export function retireIdleWatch(identity, env = process.env, { ended = false } = {}) {
   if (!env.AGENT_CHAT_NOTIFY_CONFIG) return;
@@ -333,14 +340,13 @@ function recentWakes(identity, env, now) {
   return Array.isArray(times) ? times.filter(time => Number.isSafeInteger(time) && time <= now && now - time < 60 * 60 * 1000) : [];
 }
 
-/** Runs as a Claude asyncRewake Stop hook. Wakes an idle session once per new directed message or finished reply watch. */
+/** Wakes an idle session once per new directed message or finished reply watch: as Claude's asyncRewake Stop hook, or a detached Codex watcher. */
 export async function idleWatch({ identity, env = process.env, mailbox, remoteInspector, wake, maxMs = IDLE_WATCH_MS,
-  pollMs = IDLE_POLL_MS, now = () => Date.now(), sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
+  pollMs = IDLE_POLL_MS, now = () => Date.now(), sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), generation }) {
   const binding = findBinding({ ...identity, env });
   if (!binding) return { state: 'unbound' };
   if (remoteMode(binding, env) === false) mailbox ??= createMailbox({ home: env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat'), cwd: identity.cwd });
-  const generation = crypto.randomUUID();
-  writeIdleState(idleStateFile('idle-watch', identity, env), { generation });
+  generation ??= claimIdleWatch(identity, env);
   const ends = now() + Math.min(IDLE_WATCH_MS, Math.max(0, maxMs));
   const woke = state => {
     writeIdleState(idleStateFile('idle-wakes', identity, env), { times: [...recentWakes(identity, env, now()), now()] });
@@ -356,7 +362,10 @@ export async function idleWatch({ identity, env = process.env, mailbox, remoteIn
         const finished = { replied: STOP_REPLY_REASON, expired: STOP_EXPIRED_REASON }[watch?.wait.state];
         if (finished && await writeStopDecision({ reason: finished, decision: watch.wait.state, watch, identity, binding, env,
           write: wake, once: true, render: text => text + '\n' })) return woke(`woke-${watch.wait.state}`);
-      } catch { /* Transient mailbox or broker failure; stderr is reserved for the wake prompt. */ }
+      } catch (error) {
+        if (error?.code === 'IDLE_WAKE_UNREACHABLE') return { state: 'unreachable' };
+        // Other mailbox or broker failures are retried; stderr is reserved for the wake prompt.
+      }
     }
     if (now() >= ends) return { state: 'timeout' };
     await sleep(Math.max(1, Math.min(pollMs, ends - now())));
@@ -602,7 +611,7 @@ export async function autoBindCommand({ client, payload, env = process.env, mail
   const identity = commandIdentity(client, payload, env);
   if (!identity || payload.hook_event_name !== 'PostToolUse') return false;
   const tools = (env.AGENT_CHAT_NOTIFY_IDENTITY_TOOLS || '').split(',').map(value => value.trim()).filter(Boolean);
-  if (!tools.includes(payload.tool_name) || !/__(chat_join|chat_who|chat_accept_invite)$/.test(payload.tool_name)) return false;
+  if (!tools.includes(payload.tool_name) || !/__(chat_join|chat_rename|chat_who|chat_accept_invite)$/.test(payload.tool_name)) return false;
   const metadata = identityMetadata(client, payload.tool_response);
   if (metadata?.version !== 1) return false;
   const remote = Boolean(env.AGENT_CHAT_BROKER_URL || env.AGENT_CHAT_BROKER_TOKEN_FILE || metadata.transport === 'broker');
@@ -633,7 +642,8 @@ export async function autoBindCommand({ client, payload, env = process.env, mail
 }
 
 export async function runCommandHook({ client, payload, env = process.env, mailbox, remoteInspector, write = value => process.stdout.write(value),
-  stopWaitOptions = {}, mode, wakeWrite = value => new Promise(resolve => process.stderr.write(value, () => resolve())), idleWatchOptions = {} }) {
+  stopWaitOptions = {}, mode, wakeWrite = value => new Promise(resolve => process.stderr.write(value, () => resolve())), idleWatchOptions = {},
+  codexWake }) {
   const identity = commandIdentity(client, payload, env);
   if (!identity) return { delivered: false, reason: 'unsupported-event' };
   if (['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'SessionEnd'].includes(payload.hook_event_name)) {
@@ -645,6 +655,15 @@ export async function runCommandHook({ client, payload, env = process.env, mailb
     const result = await idleWatch({ identity, env, mailbox, remoteInspector, wake: wakeWrite, ...idleWatchOptions });
     const wake = result.state.startsWith('woke');
     return { delivered: wake, wake, reason: `idle-${result.state}` };
+  }
+  if (payload.hook_event_name === 'Stop' && mode === 'codex-idle-watch' && client === 'codex') {
+    codexWake ??= await import('./codex-wake.mjs');
+    // An unanswered query is retried at wake time; only a definite answer ends the watch early.
+    const hosted = await codexWake.codexLoadedThreads({ socket: codexWake.codexControlSocket(env) });
+    if (hosted && !hosted.has(identity.hostSessionId)) return { delivered: false, reason: 'idle-not-hosted' };
+    const result = await idleWatch({ identity, env, mailbox, remoteInspector, generation: env.AGENT_CHAT_IDLE_WATCH_GENERATION,
+      ...idleWatchOptions, wake: text => codexWake.queueCodexWake({ threadId: identity.hostSessionId, text, env }) });
+    return { delivered: result.state.startsWith('woke'), reason: `idle-${result.state}` };
   }
   if (payload.hook_event_name === 'SessionEnd') {
     try { await cancelBoundReplyWatch({ identity, env, mailbox, remoteInspector }); }
@@ -666,6 +685,13 @@ export async function runCommandHook({ client, payload, env = process.env, mailb
       if (env.AGENT_CHAT_NOTIFY_DEBUG === '1') console.error(`agent-chat reply watch hook: ${error.message}`);
       if (outputAttempted) return { delivered: false, reason: 'reply-wait-output-failed' };
     }
+    if (client === 'codex' && findBinding({ ...identity, env })) {
+      try {
+        codexWake ??= await import('./codex-wake.mjs');
+        if (codexWake.codexWakeSupported(env)) codexWake.startCodexIdleWatch({ identity, env, generation: claimIdleWatch(identity, env) });
+      }
+      catch (error) { if (env.AGENT_CHAT_NOTIFY_DEBUG === '1') console.error(`agent-chat codex idle watch: ${error.message}`); }
+    }
     await write('{}\n');
     return { delivered: false, reason: 'session-idle' };
   }
@@ -676,7 +702,7 @@ export async function runCommandHook({ client, payload, env = process.env, mailb
   await autoBindCommand({ client, payload, env, mailbox, remoteInspector });
   let title = commandSessionTitle(client, payload);
   if (!title && client === 'claude-code' && payload.hook_event_name === 'PostToolUse'
-    && /__(chat_join|chat_who|chat_accept_invite)$/.test(payload.tool_name || '')
+    && /__(chat_join|chat_rename|chat_who|chat_accept_invite)$/.test(payload.tool_name || '')
     && env.AGENT_CHAT_NOTIFY_CONFIG && !env.AGENT_CHAT_BROKER_URL) {
     const { createPresence } = await import('../lib/presence.mjs');
     const known = createPresence({ home: mailbox?.home || env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat') }).getHost(identity);
@@ -688,7 +714,7 @@ export async function runCommandHook({ client, payload, env = process.env, mailb
   }
   const startupHint = payload.hook_event_name === 'SessionStart' && env.AGENT_CHAT_NOTIFY_AUTO_BIND === '1'
     && ['startup', 'resume', 'clear', undefined].includes(payload.source)
-    ? `${CHAT_LABEL}: Call chat_who once to link your joined MCP peer to this host session. If you can see a host title, match it with chat_join(name: ...); do not guess a hidden title.` : '';
+    ? `${CHAT_LABEL}: Call chat_who once to link your joined MCP peer to this host session. If you can see a host title, match it with chat_rename(name: ...); do not guess a hidden title.` : '';
   const deliver = async notice => {
     await write(JSON.stringify({ hookSpecificOutput: { hookEventName: payload.hook_event_name,
       additionalContext: [startupHint, notice].filter(Boolean).join('\n') } }) + '\n');

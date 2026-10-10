@@ -162,7 +162,7 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
     cwd: directory, env, mailbox, remoteInspector, deliver });
   const linkIdentityTool = (input, output) => {
     if (!env.AGENT_CHAT_NOTIFY_CONFIG || env.AGENT_CHAT_BROKER_URL
-      || !['agent-chat_chat_who', 'agent-chat_chat_join', 'agent-chat_chat_accept_invite'].includes(input.tool)) return;
+      || !['agent-chat_chat_who', 'agent-chat_chat_join', 'agent-chat_chat_rename', 'agent-chat_chat_accept_invite'].includes(input.tool)) return;
     const response = output.output;
     if (typeof response !== 'string') return;
     const identityText = response.startsWith('You are "') ? response

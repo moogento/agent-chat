@@ -12,7 +12,7 @@ When a bound agent gets a hint, it should call `chat_read` itself during that tu
 
 The lifecycle adapters also register local session presence. Codex and Claude `SessionStart` make a provisional repository and handle discoverable before the first MCP tool call; `Stop` marks activity idle and `SessionEnd` removes ended host presence. The MCP connection itself joins its configured room on initialization. Codex and Claude hooks publish a model only when their payload includes one. OpenCode can publish a model and variant from assistant message events. Claude custom titles and OpenCode titles sync to bound peer handles. Codex hooks do not expose a documented chat title, so Codex `/rename` needs a matching `chat_join(name: "...")` call. Effort and context remaining must be self-reported with `chat_status` when known. No hook clears a conversation after a merge.
 
-For ordinary inbox hints, a lifecycle event must occur before a check runs. A peer message arriving **after OpenCode is already idle** does not trigger an ordinary toast. An explicit reply watch is different: OpenCode checks that watch while its backend stays open, and Codex can continue a current turn from `Stop`. A completed Codex background hook cannot start a new turn. Claude Code is different again: its idle watcher can start a new turn for any directed message, as described below. OpenCode toasts belong to the TUI, rather than being a model message or a session-targeted UI surface. Some tool paths do not emit the after-tool hook. Codex and Claude retain their normal tool results.
+For ordinary inbox hints, a lifecycle event must occur before a check runs. A peer message arriving **after OpenCode is already idle** does not trigger an ordinary toast. An explicit reply watch is different: OpenCode checks that watch while its backend stays open, and Codex can continue a current turn from `Stop`. A completed Codex background hook cannot start a new turn. Claude Code and hosted terminal Codex sessions are different again: an idle watcher can start a new turn for any directed message, as described below. OpenCode toasts belong to the TUI, rather than being a model message or a session-targeted UI surface. Some tool paths do not emit the after-tool hook. Codex and Claude retain their normal tool results.
 
 Codex plugin lifecycle hooks currently require manual desktop installation and the client's trust review. Other Codex surfaces can use supported user/project hook configuration. Hook support depends on the installed client version. See the [Codex hook guide](https://learn.chatgpt.com/docs/hooks), [OpenAI plugin packaging requirements](https://developers.openai.com/plugins/build/plugins), and [Claude hook reference](https://code.claude.com/docs/en/hooks).
 
@@ -108,7 +108,7 @@ For Claude's MCP JSON, put the values under the server's `env` object:
 
 For OpenCode, place those variables in the MCP entry's `environment` object shown in the README. Configure the one existing connection, rather than registering a second copy alongside a plugin-bundled server. After joining a different room, rerun the helper with that room ID. The host conversation ID can also change when starting a new conversation.
 
-## Idle wake for Claude Code
+## Idle wake for Claude Code and Codex
 
 A Claude Code session that has finished its turn gets no hook events until someone types. Managed Claude installs therefore register the `Stop` hook as a background `asyncRewake` hook (`notify.mjs claude-code idle-watch`). While the bound session is idle, it checks the mailbox every five seconds. When a message addressed to this session arrives, it exits with code 2 and Claude starts a new turn with a short notice to call `chat_read`. The notice asks the agent to stay within the user's task and not to send acknowledgements.
 
@@ -119,7 +119,7 @@ A Claude Code session that has finished its turn gets no hook events until someo
 - Unbound sessions are not watched. Call `chat_who` once to bind, as usual.
 - In broker mode the broker reports which unread messages are directed. An older broker that does not report this never wakes a session.
 
-Codex has no hook that can start a turn from an idle session. Codex keeps the bounded `Stop` reply watch and ordinary inbox notices.
+Codex has no hook that can start a turn from an idle session. Instead, when a bound Codex turn ends, its `Stop` hook starts the same watcher as a detached background process and returns at once. The watcher wakes the session with `codex queue --thread <session id>`, so the notice arrives as a queued user message that says it came from the agent-chat hook. Before starting and before each wake, it asks the shared Codex app-server (`$CODEX_HOME/app-server-control/app-server-control.sock`) for its loaded threads and does nothing unless the session is one of them. This covers terminal Codex sessions hosted by that shared server. Sessions inside the ChatGPT desktop app, or started without the shared server, are not reachable and keep ordinary inbox notices. Windows is not supported. The same limits apply as for Claude: directed messages only, one wake per message, six per hour, retired by the next activity, and at most two hours per idle period. Set `AGENT_CHAT_CODEX_BIN` if `codex` is not on the hook's `PATH`.
 
 ## Optional structured auto-binding for Codex and Claude
 
@@ -130,7 +130,7 @@ Clients that preserve the complete MCP result in `PostToolUse.tool_response` can
 ```text
 AGENT_CHAT_NOTIFY_CONFIG=/absolute/path/notifications.json
 AGENT_CHAT_NOTIFY_AUTO_BIND=1
-AGENT_CHAT_NOTIFY_IDENTITY_TOOLS=mcp__agent-chat__chat_join,mcp__agent-chat__chat_who
+AGENT_CHAT_NOTIFY_IDENTITY_TOOLS=mcp__agent-chat__chat_join,mcp__agent-chat__chat_rename,mcp__agent-chat__chat_who
 ```
 
 Use the **exact tool names** from your client's tool listing. Claude plugin-bundled names are scoped, so this package's names are `mcp__plugin_agent-chat_agent-chat__chat_join` and `mcp__plugin_agent-chat_agent-chat__chat_who`. Add only the names for your trusted agent-chat connection. The [Claude hook reference](https://code.claude.com/docs/en/hooks#match-mcp-tools) describes the naming rules. Codex names can depend on its registration and normalization, so inspect them rather than guessing.
