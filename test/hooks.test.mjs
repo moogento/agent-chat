@@ -1160,17 +1160,42 @@ test('Codex PostToolUse skips mid-turn notices for providers that reject them, b
     return file;
   };
   f.send();
-  const run = async (event, transcriptPath) => {
+  const run = async (event, transcriptPath, model = 'gpt-6.1-sol') => {
     const notices = [];
     await runCommandHook({ client: 'codex', payload: { session_id: f.binding.hostSessionId, cwd: f.cwd, hook_event_name: event,
-      tool_name: 'Bash', transcript_path: transcriptPath }, env: f.env, mailbox: f.mailbox, write: text => notices.push(text) });
+      tool_name: 'Bash', transcript_path: transcriptPath, model }, env: f.env, mailbox: f.mailbox, write: text => notices.push(text) });
     return notices;
   };
   assert.equal((await run('PostToolUse', transcript('deepseek'))).length, 0);
   assert.equal((await run('PostToolUse', transcript('zai'))).length, 0);
+  assert.equal((await run('PostToolUse', transcript('openai'), 'deepseek/deepseek-v4.1-flash')).length, 0);
+  assert.equal((await run('PostToolUse', path.join(f.root, 'missing.jsonl'), 'deepseek-flash')).length, 0);
   assert.equal((await run('UserPromptSubmit', transcript('deepseek'))).length, 1);
   f.send();
   assert.equal((await run('PostToolUse', transcript('openai'))).length, 1);
   f.send();
   assert.equal((await run('PostToolUse', path.join(f.root, 'missing.jsonl'))).length, 1);
+});
+
+test('Codex Stop continues the turn with a directed notice when mid-turn notices were skipped', async t => {
+  const f = fixture(t);
+  const transcript = path.join(f.root, 'rollout.jsonl');
+  fs.writeFileSync(transcript, JSON.stringify({ type: 'session_meta', payload: { model_provider: 'deepseek' } }) + '\n');
+  const stop = async (model = 'deepseek-flash') => {
+    const output = [];
+    await runCommandHook({ client: 'codex', payload: { session_id: f.binding.hostSessionId, cwd: f.cwd, hook_event_name: 'Stop',
+      transcript_path: transcript, model }, env: f.env, mailbox: f.mailbox, write: text => output.push(text) });
+    return JSON.parse(output.join(''));
+  };
+  f.send('broadcast only', 'all');
+  assert.deepEqual(await stop(), {});
+  f.send('private directed request');
+  const continued = await stop();
+  assert.equal(continued.decision, 'block');
+  assert.match(continued.reason, /Call chat_read now/);
+  assert.doesNotMatch(continued.reason, /private directed request|idle/);
+  assert.deepEqual(await stop(), {});
+  f.send('another request');
+  fs.writeFileSync(transcript, JSON.stringify({ type: 'session_meta', payload: { model_provider: 'openai' } }) + '\n');
+  assert.deepEqual(await stop('gpt-6.1-sol'), {});
 });
