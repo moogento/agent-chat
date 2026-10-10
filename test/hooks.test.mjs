@@ -10,7 +10,7 @@ import { createMailbox } from '../lib/mailbox.mjs';
 import { createPresence } from '../lib/presence.mjs';
 import { bindNotification } from '../hooks/bind.mjs';
 import { notifySession, runCommandHook, readConfig, commandSessionTitle, syncBoundSessionTitle,
-  waitForReplyAtStop, idleWatch, bumpIdleGeneration } from '../hooks/notifications.mjs';
+  waitForReplyAtStop, idleWatch, retireIdleWatch } from '../hooks/notifications.mjs';
 import { AgentChatPlugin } from '../integrations/opencode/agent-chat.mjs';
 
 function fixture(t, client = 'codex') {
@@ -1038,9 +1038,9 @@ test('idle watch delivers a directed message that arrives while it waits', async
 
 test('idle watch exits when a prompt, newer Stop or session end supersedes it', async t => {
   const f = idleFixture(t);
-  const superseded = await f.watch({ sleep: async ms => { f.advance(ms); bumpIdleGeneration(f.identity, f.env); } });
+  const superseded = await f.watch({ sleep: async ms => { f.advance(ms); retireIdleWatch(f.identity, f.env); } });
   assert.equal(superseded.state, 'superseded');
-  for (const event of ['UserPromptSubmit', 'SessionEnd']) {
+  for (const event of ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'SessionEnd']) {
     const result = await f.watch({ sleep: async ms => {
       f.advance(ms);
       await runCommandHook({ client: 'claude-code', payload: { session_id: f.binding.hostSessionId, cwd: f.cwd,
@@ -1052,6 +1052,38 @@ test('idle watch exits when a prompt, newer Stop or session end supersedes it', 
   await runCommandHook({ client: 'claude-code', payload: { session_id: other.binding.hostSessionId, cwd: other.cwd,
     hook_event_name: 'UserPromptSubmit' }, env: other.env, mailbox: other.mailbox, write: () => {} });
   assert.equal(fs.existsSync(path.join(path.dirname(other.configFile), 'notification-state')), false);
+  f.send();
+  assert.equal((await f.watch()).state, 'woke');
+  const state = path.join(path.dirname(f.configFile), 'notification-state');
+  assert.equal(fs.readdirSync(state).filter(name => name.startsWith('idle-')).length, 2);
+  await runCommandHook({ client: 'claude-code', payload: { session_id: f.binding.hostSessionId, cwd: f.cwd,
+    hook_event_name: 'SessionEnd' }, env: f.env, mailbox: f.mailbox, write: () => {} });
+  assert.deepEqual(fs.readdirSync(state).filter(name => name.startsWith('idle-')), []);
+});
+
+test('idle watch finds a directed message behind more than a page of broadcasts', async t => {
+  const f = idleFixture(t);
+  f.send('already read');
+  f.mailbox.takeUnread(f.peer);
+  for (let index = 0; index < 25; index++) f.send(`lock ${index}`, 'all');
+  assert.equal((await f.watch()).state, 'timeout');
+  f.send('directed after the flood');
+  const result = await f.watch();
+  assert.equal(result.state, 'woke');
+  assert.match(result.wakes[0], /more may remain/);
+});
+
+test('idle watch wakes once for an awaited reply that was noticed during the turn but not read', async t => {
+  const f = idleFixture(t);
+  const sender = f.mailbox.claimIdentity(f.room, 'awaited-sender', 'peer', crypto.randomUUID());
+  f.mailbox.beginReplyWait(f.peer, sender.sessionId, 30);
+  f.mailbox.appendMessage(f.room, sender.name, f.peer.name, 'the reply', sender.sessionId);
+  await notifySession({ ...f.input, deliver: () => {} });
+  assert.equal(f.mailbox.replyWaitStatus(f.peer).state, 'replied');
+  const result = await f.watch();
+  assert.equal(result.state, 'woke-replied');
+  assert.match(result.wakes[0], /awaited peer replied/);
+  assert.equal((await f.watch()).state, 'timeout');
 });
 
 test('idle watch is inert for unbound sessions and wakes once when a reply watch expires', async t => {
@@ -1077,9 +1109,11 @@ test('idle watch caps wakes per hour so idle peers cannot wake each other indefi
     f.send(`request ${index}`);
     states.push((await f.watch()).state);
   }
-  assert.deepEqual(states, [...Array(6).fill('woke'), 'budget']);
-  f.advance(61 * 60 * 1000);
-  assert.equal((await f.watch()).state, 'woke');
+  assert.deepEqual(states.slice(0, 6), Array(6).fill('woke'));
+  assert.equal(states[6], 'timeout');
+  const paused = await f.watch({ maxMs: 2 * 60 * 60 * 1000 });
+  assert.equal(paused.state, 'woke');
+  assert.equal(paused.wakes.length, 1);
 });
 
 test('Claude idle-watch Stop hook exits 2 with the notice on stderr and nothing on stdout', async t => {

@@ -14,7 +14,8 @@ try {
   }
   const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
   const identity = commandIdentity(client, payload);
-  if (process.env.AGENT_CHAT_NOTIFY_DEBUG === '1' && identity) {
+  // An idle-watch hook's stderr becomes the wake prompt, so it carries no debug output.
+  if (process.env.AGENT_CHAT_NOTIFY_DEBUG === '1' && identity && process.argv[3] !== 'idle-watch') {
     process.stderr.write(`agent-chat hook identity: ${JSON.stringify(identity)}\n`);
   }
   const result = await runCommandHook({ client, payload, mode: process.argv[3], write: value => new Promise((resolve, reject) => {
