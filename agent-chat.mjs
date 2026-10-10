@@ -8,7 +8,7 @@ import { createMailbox, safeName, safeSessionId, pidAlive, LIMITS } from './lib/
 import { CHAT_LABEL } from './lib/presentation.mjs';
 import { createPresence } from './lib/presence.mjs';
 
-export const VERSION = '0.8.2';
+export const VERSION = '0.8.3';
 function envValue(name) {
   const value = process.env[name];
   return value === undefined || !value.trim() ? undefined : value;
