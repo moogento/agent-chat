@@ -744,12 +744,17 @@ test('chat_rename changes only the handle, keeps the room and session, and route
   assert.equal(renamed.responses.find(response => response.id === 3).error.code, -32602);
 });
 
-test('tools declare MCP annotations: inbox reads are read-only and nothing is destructive or open-world', async t => {
+test('tools declare MCP annotations: lookups are read-only, chat_read consumes, and nothing is destructive or open-world', async t => {
   const { mailbox } = fixture(t);
   const { server, responses } = serverFor(t, mailbox);
-  await server.handle({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
-  const tools = Object.fromEntries(responses.find(response => response.id === 1).result.tools.map(tool => [tool.name, tool.annotations]));
-  for (const name of ['chat_read', 'chat_who', 'chat_wait_status', 'chat_rooms', 'chat_presence', 'chat_invitations']) assert.equal(tools[name].readOnlyHint, true, name);
-  for (const name of ['chat_send', 'chat_join', 'chat_rename', 'chat_status', 'chat_invite', 'chat_accept_invite', 'chat_cancel_wait']) assert.equal(tools[name].readOnlyHint, false, name);
+  await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', clientInfo: { name: 'test' } } });
+  await server.handle({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+  const tools = Object.fromEntries(responses.find(response => response.id === 2).result.tools.map(tool => [tool.name, tool.annotations]));
+  for (const name of ['chat_who', 'chat_wait_status', 'chat_rooms', 'chat_presence', 'chat_invitations']) assert.deepEqual([tools[name].readOnlyHint, tools[name].idempotentHint], [true, true], name);
+  for (const name of ['chat_read', 'chat_send', 'chat_join', 'chat_rename', 'chat_status', 'chat_invite', 'chat_accept_invite', 'chat_cancel_wait']) assert.deepEqual([tools[name].readOnlyHint, tools[name].idempotentHint], [false, false], name);
   for (const annotations of Object.values(tools)) assert.deepEqual([annotations.destructiveHint, annotations.openWorldHint], [false, false]);
+  const legacy = serverFor(t, mailbox);
+  await legacy.server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', clientInfo: { name: 'test' } } });
+  await legacy.server.handle({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+  assert.ok(legacy.responses.find(response => response.id === 2).result.tools.every(tool => tool.annotations === undefined));
 });
