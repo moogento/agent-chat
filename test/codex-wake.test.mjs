@@ -21,7 +21,9 @@ function fixture(t) {
   const configFile = path.join(root, 'notifications.json');
   const hostSessionId = '01a12495-4b5d-7c10-bfcb-b927fe0c3f5d';
   bindNotification({ configFile, binding: { client: 'codex', hostSessionId, cwd, room: room.id, mailboxSessionId: peer.sessionId } });
-  const codexHome = path.join(root, 'codex');
+  // Unix socket paths are limited to about 104 bytes, so the Codex home lives under a short temporary root.
+  const codexHome = process.platform === 'win32' ? path.join(root, 'codex') : fs.mkdtempSync('/tmp/acw-');
+  if (process.platform !== 'win32') t.after(() => fs.rmSync(codexHome, { recursive: true, force: true }));
   const env = { AGENT_CHAT_HOME: home, AGENT_CHAT_NOTIFY_CONFIG: configFile, CODEX_HOME: codexHome };
   const send = (text = 'private request', to = peer.name) => mailbox.appendMessage(room, 'sender', to, text);
   return { root, cwd, home, mailbox, room, peer, configFile, hostSessionId, codexHome, env, send,
@@ -65,7 +67,7 @@ async function fakeDaemon(t, codexHome, threads, pages = [threads]) {
   return { socket, methods };
 }
 
-test('loaded-thread query speaks the app-server control protocol and fails closed', async t => {
+test('loaded-thread query speaks the app-server control protocol and fails closed', { skip: process.platform === 'win32' && 'Codex idle wake is not supported on Windows' }, async t => {
   const f = fixture(t);
   const daemon = await fakeDaemon(t, f.codexHome, [f.hostSessionId, 'other']);
   assert.deepEqual([...await codexLoadedThreads({ socket: daemon.socket })], [f.hostSessionId, 'other']);
@@ -73,7 +75,7 @@ test('loaded-thread query speaks the app-server control protocol and fails close
   assert.equal(await codexLoadedThreads({ socket: path.join(f.root, 'missing.sock') }), null);
 });
 
-test('loaded-thread query follows page cursors', async t => {
+test('loaded-thread query follows page cursors', { skip: process.platform === 'win32' && 'Codex idle wake is not supported on Windows' }, async t => {
   const f = fixture(t);
   const daemon = await fakeDaemon(t, f.codexHome, null, [['a'], ['b'], [f.hostSessionId]]);
   assert.deepEqual([...await codexLoadedThreads({ socket: daemon.socket })], ['a', 'b', f.hostSessionId]);
@@ -99,7 +101,7 @@ test('Codex wake queues fixed text only for a daemon-hosted thread', async t => 
   assert.deepEqual(calls, [['/bin/codex', 'queue', '--thread', f.hostSessionId, '--message', `${CODEX_WAKE_PREFIX}notice`]]);
 });
 
-test('Codex Stop starts a detached watcher only for a bound session with a control socket', async t => {
+test('Codex Stop starts a detached watcher only for a bound session with a control socket', { skip: process.platform === 'win32' && 'Codex idle wake is not supported on Windows' }, async t => {
   const f = fixture(t);
   const spawned = [];
   const codexWake = { codexWakeSupported, startCodexIdleWatch: options => startCodexIdleWatch({ ...options, spawnChild: (file, args, options) => {
