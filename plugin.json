@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "agent-chat",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Coordinate local coding agents through a shared, file-backed mailbox.",
   "author": { "name": "agent-chat contributors" },
   "license": "MIT",
