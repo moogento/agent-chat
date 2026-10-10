@@ -107,5 +107,5 @@ test('management CLI persists --no-wake-permission until --wake-permission re-en
   assert.equal(instructions(), null);
   result = run(['update', '--project', project, '--wake-permission']);
   assert.equal(result.status, 0, result.stderr);
-  assert.match(instructions(), /^<!-- >>> agent-chat managed instructions >>> -->\n## Agent Chat\n/);
+  assert.match(instructions(), /^<!-- >>> agent-chat managed instructions >>> -->\n\n## Agent Chat\n\n/);
 });

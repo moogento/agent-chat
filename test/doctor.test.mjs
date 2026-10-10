@@ -212,6 +212,19 @@ test('doctor reports wake instructions as warnings without treating them as MCP 
   }
 });
 
+test('doctor accepts a CLAUDE.md symlink to the managed AGENTS.md wake instructions', async t => {
+  const { project } = fixture(t, { install: false });
+  fs.writeFileSync(path.join(project, 'AGENTS.md'), '# Shared\n');
+  try { fs.symlinkSync('AGENTS.md', path.join(project, 'CLAUDE.md')); }
+  catch (error) { if (error.code === 'EPERM' && process.platform === 'win32') return t.skip('symlink permission unavailable'); throw error; }
+  installProject({ project, clients: ['codex', 'claude'], hooks: true });
+  const result = await doctorProject({ project });
+  assert.deepEqual(check(result, 'claude.instructions').map(value => value.status), ['ok']);
+  assert.match(check(result, 'claude.instructions')[0].message, /CLAUDE\.md links to AGENTS\.md/);
+  fs.writeFileSync(path.join(project, 'AGENTS.md'), '# Shared\n');
+  assert.equal(check(await doctorProject({ project }), 'claude.instructions')[0].status, 'warning');
+});
+
 test('doctor prints managed binding commands with exact project paths and broker options', async t => {
   for (const client of ['codex', 'claude', 'opencode']) {
     for (const broker of [false, true]) {
