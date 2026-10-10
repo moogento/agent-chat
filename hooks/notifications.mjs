@@ -584,6 +584,22 @@ export async function notifySession({ client, hostSessionId, cwd, env = process.
   } finally { fs.rmSync(lock, { force: true }); }
 }
 
+/** Codex records hook context between a tool call and its output, which only OpenAI's API accepts. */
+export function codexToolContextSafe(payload) {
+  if (typeof payload?.transcript_path !== 'string' || !path.isAbsolute(payload.transcript_path)) return true;
+  try {
+    const fd = fs.openSync(payload.transcript_path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    let head;
+    try { const buffer = Buffer.alloc(256 * 1024); head = buffer.subarray(0, fs.readSync(fd, buffer, 0, buffer.length, 0)).toString('utf8'); }
+    finally { fs.closeSync(fd); }
+    const end = head.indexOf('\n');
+    if (end < 0) return true;
+    const meta = JSON.parse(head.slice(0, end));
+    const provider = meta?.type === 'session_meta' ? meta.payload?.model_provider : undefined;
+    return typeof provider !== 'string' || provider === 'openai';
+  } catch { return true; }
+}
+
 export function commandIdentity(client, payload, env = process.env) {
   if (!['codex', 'claude-code'].includes(client) || !payload || !COMMAND_EVENTS.has(payload.hook_event_name)) return null;
   if (typeof payload.session_id !== 'string' || !payload.session_id) return null;
@@ -722,6 +738,11 @@ export async function runCommandHook({ client, payload, env = process.env, mailb
     await write(JSON.stringify({ hookSpecificOutput: { hookEventName: payload.hook_event_name,
       additionalContext: [startupHint, notice].filter(Boolean).join('\n') } }) + '\n');
   };
+  if (client === 'codex' && payload.hook_event_name === 'PostToolUse' && !codexToolContextSafe(payload)) {
+    // Mid-turn notices would break the next model request; prompts and idle wakes still deliver them.
+    await registerHostPresence({ ...identity, model: payload.model, activity: 'working', env, mailbox });
+    return { delivered: false, reason: 'provider-rejects-tool-context' };
+  }
   let invitationMessageResult;
   try {
     const invitations = await notifyHostInvitations({ ...identity, title: title?.sessionTitle, model: payload.model,

@@ -1151,3 +1151,26 @@ test('Claude idle-watch Stop hook exits 2 with the notice on stderr and nothing 
   assert.equal(quiet.status, 0, quiet.stderr);
   assert.equal(quiet.stderr, '');
 });
+
+test('Codex PostToolUse skips mid-turn notices for providers that reject them, but prompts still deliver', async t => {
+  const f = fixture(t);
+  const transcript = provider => {
+    const file = path.join(f.root, `rollout-${provider}.jsonl`);
+    fs.writeFileSync(file, JSON.stringify({ type: 'session_meta', payload: { id: 'x', model_provider: provider, base_instructions: 'x'.repeat(30000) } }) + '\n');
+    return file;
+  };
+  f.send();
+  const run = async (event, transcriptPath) => {
+    const notices = [];
+    await runCommandHook({ client: 'codex', payload: { session_id: f.binding.hostSessionId, cwd: f.cwd, hook_event_name: event,
+      tool_name: 'Bash', transcript_path: transcriptPath }, env: f.env, mailbox: f.mailbox, write: text => notices.push(text) });
+    return notices;
+  };
+  assert.equal((await run('PostToolUse', transcript('deepseek'))).length, 0);
+  assert.equal((await run('PostToolUse', transcript('zai'))).length, 0);
+  assert.equal((await run('UserPromptSubmit', transcript('deepseek'))).length, 1);
+  f.send();
+  assert.equal((await run('PostToolUse', transcript('openai'))).length, 1);
+  f.send();
+  assert.equal((await run('PostToolUse', path.join(f.root, 'missing.jsonl'))).length, 1);
+});

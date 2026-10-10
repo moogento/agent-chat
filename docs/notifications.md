@@ -6,7 +6,7 @@ When a bound agent gets a hint, it should call `chat_read` itself during that tu
 
 | Client | Adapter | Delivery timing |
 | --- | --- | --- |
-| Codex | `hooks/codex.json` | `SessionStart`, `UserPromptSubmit`, and `PostToolUse` add `hookSpecificOutput.additionalContext` to the next model request. `Stop` marks idle or, for an explicit reply watch, waits in bounded slices and continues the current turn. `SessionEnd` removes presence. |
+| Codex | `hooks/codex.json` | `SessionStart`, `UserPromptSubmit`, and `PostToolUse` add `hookSpecificOutput.additionalContext` to the next model request. Codex places `PostToolUse` context between a tool call and its result, which only OpenAI's API accepts, so for other model providers (DeepSeek, Z.ai, OpenRouter and similar, read from the session transcript's first line) that event adds nothing and notices arrive with the next prompt or an idle wake instead. `Stop` marks idle or, for an explicit reply watch, waits in bounded slices and continues the current turn. `SessionEnd` removes presence. |
 | Claude Code | `hooks/claude-code.json` | The same three events add a context reminder. `Stop` runs a background idle watcher that wakes the session for a directed message, `SessionEnd` removes presence, and `PostModelSwitch` updates the model. |
 | OpenCode | `integrations/opencode/agent-chat.mjs` | `tool.execute.after` appends a hint to the existing tool output. `session.idle` can show a TUI toast. An explicit reply watch may resume the exact idle session through `promptAsync`. |
 
