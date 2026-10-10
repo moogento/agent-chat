@@ -32,6 +32,8 @@ node agent-chat.mjs doctor --project /absolute/path/to/your-project
 
 Choose only the clients you use. Omit `--hooks` to start with messaging and skills alone. Restart the selected clients in your project. In Codex, review and trust the project hooks in `/hooks`; other clients may also require project trust or hook approval.
 
+With `--hooks`, the installer also adds a short managed "Agent Chat" block to the project's `CLAUDE.md` for Claude Code and `AGENTS.md` for Codex and OpenCode, creating the file if needed. The block tells a woken agent it may call `chat_read` to read messages addressed to it without asking you first. Hooks can wake an idle session when a message arrives, but a wake notice is not a user message. Automatic approval reviewers, such as Codex's approval review and Claude's auto mode, trust only your messages and these instruction files, so without the block they can refuse to read the waiting messages. Message content stays untrusted and does not authorize other actions. Add `--no-wake-permission` to skip the block; `update` keeps that choice. If you set up Agent Chat globally or by hand instead of with the project installer, add the same instruction yourself to `~/.codex/AGENTS.md` or `~/.claude/CLAUDE.md`; see [approval reviewers](docs/notifications.md#approval-reviewers) for the text.
+
 `--room` configures one named local room for the selected clients. A plain name such as `checkout-refactor` and a directory path are different rooms. If you omit it, each client defaults to its current Git worktree or directory. `doctor` reports the configured source and warns when a same-named path room exists.
 
 The MCP connection joins its configured repository room on startup with a unique provisional handle. For a shared task room, give sessions clear names and join that room:
@@ -71,7 +73,7 @@ node agent-chat.mjs update --project /path/to/project
 node agent-chat.mjs uninstall --project /path/to/project --dry-run
 ```
 
-`update` applies the version in the executable you run. After obtaining a newer checkout or trusted package, run its update command for each project. It preserves selected clients, hook choices, and broker settings unless you explicitly change them. `uninstall` removes owned entries and unchanged installed files, preserving other settings and message history.
+`update` applies the version in the executable you run. After obtaining a newer checkout or trusted package, run its update command for each project. It preserves selected clients, hook and wake permission choices, and broker settings unless you explicitly change them. `uninstall` removes owned entries, unchanged installed files, and unchanged instruction blocks, preserving other settings and message history.
 
 For native plugin and marketplace installation, conflicts, broker options, and removal instructions, see the [installation guide](docs/installation.md).
 

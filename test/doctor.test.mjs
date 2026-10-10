@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { doctorProject } from '../lib/doctor.mjs';
 import { installProject, updateProject, inspectInstallation, installationPaths } from '../lib/install.mjs';
 import { bindNotification } from '../hooks/bind.mjs';
@@ -186,6 +187,69 @@ test('doctor diagnoses optional hooks and pending binding as warnings without cl
   config.hooks.UserPromptSubmit[0].hooks[0].command = 'wrong-command';
   fs.writeFileSync(hookFile, JSON.stringify(config));
   assert.ok(check(await doctorProject({ project }), 'claude.hooks').some(value => value.status === 'error'));
+});
+
+test('doctor reports wake instructions as warnings without treating them as MCP entries', async t => {
+  const { project } = fixture(t, { clients: ['codex', 'claude', 'opencode'], hooks: true });
+  let result = await doctorProject({ project });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(['codex', 'claude', 'opencode'].map(client => check(result, `${client}.instructions`).map(value => value.status)), [['ok'], ['ok'], ['ok']]);
+  assert.equal(check(result, 'claude.mcp').length, 1);
+  assert.deepEqual(check(await doctorProject({ project, client: 'opencode' }), 'opencode.instructions').map(value => value.status), ['ok']);
+  const file = path.join(project, 'CLAUDE.md');
+  fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('without asking', 'after asking'));
+  const before = snapshot(project);
+  result = await doctorProject({ project });
+  assert.equal(result.ok, true);
+  assert.match(check(result, 'claude.instructions')[0].message, /were edited/);
+  assert.equal(check(result, 'claude.instructions')[0].status, 'warning');
+  assert.deepEqual(snapshot(project), before);
+  for (const relative of ['AGENTS.md', 'CLAUDE.md']) fs.rmSync(path.join(project, relative));
+  result = await doctorProject({ project });
+  for (const client of ['codex', 'claude', 'opencode']) {
+    assert.match(check(result, `${client}.instructions`)[0].message, /not in (AGENTS|CLAUDE)\.md.*--no-wake-permission/, client);
+  }
+});
+
+test('doctor reports a client that opted out but still reads a shared block as information', async t => {
+  const { project } = fixture(t, { clients: ['codex', 'opencode'], hooks: true });
+  updateProject({ project, clients: ['codex'], wakePermission: false });
+  const result = await doctorProject({ project });
+  assert.deepEqual(check(result, 'codex.instructions').map(value => [value.status, /still reads .* because opencode uses them/.test(value.message)]), [['info', true]]);
+  assert.equal(check(result, 'opencode.instructions')[0].status, 'ok');
+});
+
+test('doctor follows the current instruction layout rather than recorded owners', async t => {
+  const { project } = fixture(t, { install: false });
+  fs.writeFileSync(path.join(project, 'AGENTS.md'), '# Shared\n');
+  try { fs.symlinkSync('AGENTS.md', path.join(project, 'CLAUDE.md')); }
+  catch (error) { if (error.code === 'EPERM' && process.platform === 'win32') return t.skip('symlink permission unavailable'); throw error; }
+  installProject({ project, clients: ['codex', 'claude'], hooks: true });
+  assert.equal(check(await doctorProject({ project }), 'claude.instructions')[0].status, 'ok');
+  fs.unlinkSync(path.join(project, 'CLAUDE.md'));
+  fs.writeFileSync(path.join(project, 'CLAUDE.md'), '# Claude only\n');
+  const result = await doctorProject({ project });
+  assert.equal(check(result, 'claude.instructions')[0].status, 'warning');
+  assert.match(check(result, 'claude.instructions')[0].message, /not in CLAUDE\.md/);
+  if (process.platform !== 'win32') {
+    fs.unlinkSync(path.join(project, 'AGENTS.md'));
+    assert.equal(spawnSync('mkfifo', [path.join(project, 'AGENTS.md')]).status, 0);
+    const fifo = await doctorProject({ project });
+    assert.match(check(fifo, 'codex.instructions')[0].message, /not a readable plain UTF-8 file/);
+  }
+});
+
+test('doctor accepts a CLAUDE.md symlink to the managed AGENTS.md wake instructions', async t => {
+  const { project } = fixture(t, { install: false });
+  fs.writeFileSync(path.join(project, 'AGENTS.md'), '# Shared\n');
+  try { fs.symlinkSync('AGENTS.md', path.join(project, 'CLAUDE.md')); }
+  catch (error) { if (error.code === 'EPERM' && process.platform === 'win32') return t.skip('symlink permission unavailable'); throw error; }
+  installProject({ project, clients: ['codex', 'claude'], hooks: true });
+  const result = await doctorProject({ project });
+  assert.deepEqual(check(result, 'claude.instructions').map(value => value.status), ['ok']);
+  assert.match(check(result, 'claude.instructions')[0].message, /in AGENTS\.md through the CLAUDE\.md link/);
+  fs.writeFileSync(path.join(project, 'AGENTS.md'), '# Shared\n');
+  assert.equal(check(await doctorProject({ project }), 'claude.instructions')[0].status, 'warning');
 });
 
 test('doctor prints managed binding commands with exact project paths and broker options', async t => {

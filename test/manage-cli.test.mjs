@@ -30,6 +30,8 @@ test('invalid or contradictory management options cannot change the project', t 
   const project = fixture(t);
   for (const args of [
     ['install', '--clients', 'claude', '--hooks', '--no-hooks'],
+    ['install', '--clients', 'claude', '--hooks', '--wake-permission', '--no-wake-permission'],
+    ['uninstall', '--no-wake-permission'],
     ['install', '--clients', ''],
     ['install', '--clients', 'claude,'],
     ['install', '--clients', 'unknown'],
@@ -88,4 +90,29 @@ test('management CLI accepts a named local default and preserves it on update', 
   result = run(['update', '--project', project, '--local', '--room', 'other-room', '--json']);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(config().AGENT_CHAT_ROOM, 'other-room');
+});
+test('management CLI persists --no-wake-permission until --wake-permission re-enables it', t => {
+  const project = fixture(t);
+  const instructions = () => fs.existsSync(path.join(project, 'CLAUDE.md')) ? fs.readFileSync(path.join(project, 'CLAUDE.md'), 'utf8') : null;
+  let result = run(['install', '--project', project, '--clients', 'claude', '--hooks', '--no-wake-permission', '--json']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).wakePermission.claude, false);
+  assert.equal(instructions(), null);
+  result = run(['update', '--project', project, '--json']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(instructions(), null);
+  result = run(['update', '--project', project, '--wake-permission', '--dry-run']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /create: CLAUDE\.md/);
+  assert.equal(instructions(), null);
+  result = run(['update', '--project', project, '--wake-permission']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(instructions(), /^<!-- >>> agent-chat managed instructions >>> -->\n\n## Agent Chat\n\n/);
+});
+test('management CLI tells the user that --wake-permission needs hooks', t => {
+  const project = fixture(t);
+  const result = run(['install', '--project', project, '--clients', 'claude', '--wake-permission']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Note: claude: wake permission takes effect only with hooks; add --hooks/);
+  assert.equal(fs.existsSync(path.join(project, 'CLAUDE.md')), false);
 });
