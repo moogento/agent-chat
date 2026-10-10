@@ -188,6 +188,30 @@ test('doctor diagnoses optional hooks and pending binding as warnings without cl
   assert.ok(check(await doctorProject({ project }), 'claude.hooks').some(value => value.status === 'error'));
 });
 
+test('doctor reports wake instructions as warnings without treating them as MCP entries', async t => {
+  const { project } = fixture(t, { clients: ['codex', 'claude', 'opencode'], hooks: true });
+  let result = await doctorProject({ project });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(['codex', 'claude', 'opencode'].map(client => check(result, `${client}.instructions`).map(value => value.status)), [['ok'], ['ok'], []]);
+  assert.equal(check(result, 'claude.mcp').length, 1);
+  const file = path.join(project, 'CLAUDE.md');
+  fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('without asking', 'after asking'));
+  const before = snapshot(project);
+  result = await doctorProject({ project });
+  assert.equal(result.ok, true);
+  assert.match(check(result, 'claude.instructions')[0].message, /were edited/);
+  assert.equal(check(result, 'claude.instructions')[0].status, 'warning');
+  assert.deepEqual(snapshot(project), before);
+  const receiptFile = installationPaths(project).receipt;
+  const receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+  receipt.entries = receipt.entries.filter(entry => entry.kind !== 'text-block');
+  fs.writeFileSync(receiptFile, JSON.stringify(receipt));
+  result = await doctorProject({ project });
+  for (const client of ['codex', 'claude', 'opencode']) {
+    assert.match(check(result, `${client}.instructions`)[0].message, /not installed in (AGENTS|CLAUDE)\.md.*--no-wake-permission/, client);
+  }
+});
+
 test('doctor prints managed binding commands with exact project paths and broker options', async t => {
   for (const client of ['codex', 'claude', 'opencode']) {
     for (const broker of [false, true]) {

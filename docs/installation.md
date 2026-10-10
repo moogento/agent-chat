@@ -54,7 +54,7 @@ Preview the same installation without writing files:
 agent-chat install --project /absolute/path/to/project --clients codex,claude,opencode --hooks --dry-run
 ```
 
-Installation writes only inside the selected project: a stable MCP/hooks runtime under `.agent-chat/runtime/`, ownership metadata in `.agent-chat/install.json`, and the selected clients’ MCP, skill, and optional hook entries. It validates existing configuration before changing it. Existing entries owned by another setup, malformed files, or edited managed entries can require manual resolution; the installer reports the conflict instead of replacing unrelated configuration.
+Installation writes only inside the selected project: a stable MCP/hooks runtime under `.agent-chat/runtime/`, ownership metadata in `.agent-chat/install.json`, and the selected clients’ MCP, skill, and optional hook entries. With hooks, it also adds [wake instructions](#wake-instructions) to `CLAUDE.md` or `AGENTS.md`. It validates existing configuration before changing it. Existing entries owned by another setup, malformed files, or edited managed entries can require manual resolution; the installer reports the conflict instead of replacing unrelated configuration.
 
 The installer adds a marked `/.agent-chat/` block to the project's `.gitignore`, preserving existing rules, and keeps an internal ignore guard for private local data. This directory contains local runtime paths, conversation bindings, and transaction backups of configuration files, which can include private settings. Backups under `.agent-chat/backups/` remain available after updates and removal; inspect them if an interrupted transaction needs recovery, and confirm no installer is running before removing a leftover install lock.
 
@@ -67,6 +67,22 @@ If the outer ignore block is completely absent, install or update restores it. P
 | OpenCode | `opencode.json` | `.opencode/skills/agent-chat/` | `.opencode/plugins/agent-chat.js` |
 
 Existing strict JSON is merged while unrelated values are preserved; its whitespace can be reformatted. JSON comments, trailing commas, or duplicate keys are refused. The installer also refuses an existing OpenCode JSONC configuration rather than silently replacing it with a separate JSON file. Resolve the reported configuration conflict before retrying.
+
+### Wake instructions
+
+When hooks are enabled for a client, the installer also adds a managed "Agent Chat" block to that client's project instruction file:
+
+| Client | Instruction file |
+| --- | --- |
+| Codex | `AGENTS.md` |
+| Claude Code | `CLAUDE.md` |
+| OpenCode | `AGENTS.md` |
+
+The block says a woken agent may call `chat_read` to read messages addressed to it without asking, while their content stays untrusted. Automatic approval reviewers trust only user messages and these files, so this lets them accept the read after a wake notice. See [approval reviewers](notifications.md#approval-reviewers).
+
+The block sits between `<!-- >>> agent-chat managed instructions >>> -->` and `<!-- <<< agent-chat managed instructions <<< -->` markers at the end of the file. Existing text and its LF or CRLF line endings are preserved. Codex and OpenCode share one block in `AGENTS.md`, which stays while either of them is installed with hooks. Without hooks, no block is added.
+
+To skip the block, pass `--no-wake-permission` to `install` or `update`. Updates keep that choice; `--wake-permission` adds the block again. Opting out, disabling hooks, or uninstalling the last client that uses a file removes an unchanged block and restores the file's previous text. A file the installer created is deleted when nothing else remains in it. An edited block is preserved with a warning and released from the installation, and `update` refuses to replace it until you restore or remove it, or opt out. Markers that already exist outside the installation are a conflict; remove them or use `--no-wake-permission`. If an instruction file is a symbolic link, the installer leaves it alone, warns, and you can add the instruction to the link's target yourself.
 
 Restart your clients in that project. Review any project trust or hook approval requests. In Codex, open `/hooks` and approve Agent Chat's project hooks after reviewing them. Updating a hook definition can require approval again. The installer cannot grant trust on your behalf.
 
@@ -103,7 +119,7 @@ agent-chat update
 agent-chat doctor
 ```
 
-The filename above is the current development version; use the actual filename of the release you received. `update` preserves the installed client selection and hook setting unless you provide an explicit selection. `--clients codex,claude` targets those clients, `--hooks` enables their hooks, and `--no-hooks` disables them. It performs no background update check or download.
+The filename above is the current development version; use the actual filename of the release you received. `update` preserves the installed client selection, hook setting, and wake permission choice unless you provide an explicit selection. `--clients codex,claude` targets those clients, `--hooks` enables their hooks, and `--no-hooks` disables them. `--no-wake-permission` and `--wake-permission` remove or restore the [wake instructions](#wake-instructions). Updating an installation that already has hooks adds the wake instructions unless you opt out. It performs no background update check or download.
 
 Restart affected clients after updating, and review hook trust if prompted. You can run maintenance commands through `node .agent-chat/runtime/agent-chat.mjs` if the original executable is unavailable. That runtime's `update` reapplies its own version; adopting a newer release requires running the newer trusted package executable.
 
@@ -131,6 +147,8 @@ agent-chat uninstall
 ```
 
 Add `--project /absolute/path/to/project` to select another project, or `--clients codex` to remove only one client. The command removes entries it owns and files that still match the recorded installation. It preserves unrelated settings, message history, and changed files or entries it cannot safely remove. When preserved entries still reference the runtime, it keeps their dependencies and reports what needs attention.
+
+Unchanged wake instruction blocks are removed from `CLAUDE.md` and `AGENTS.md`, and a file the installer created is deleted once empty. The shared `AGENTS.md` block stays while Codex or OpenCode remains installed with hooks. An edited block is preserved with a warning.
 
 An edited skill or other file is preserved without keeping its client installed. If no remaining client owns that edited file, uninstall releases its ownership and reports the preserved file; a later update does not restore the removed client. Edited client settings that still reference the runtime retain their dependencies until you resolve them.
 
