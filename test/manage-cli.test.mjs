@@ -109,3 +109,10 @@ test('management CLI persists --no-wake-permission until --wake-permission re-en
   assert.equal(result.status, 0, result.stderr);
   assert.match(instructions(), /^<!-- >>> agent-chat managed instructions >>> -->\n\n## Agent Chat\n\n/);
 });
+test('management CLI tells the user that --wake-permission needs hooks', t => {
+  const project = fixture(t);
+  const result = run(['install', '--project', project, '--clients', 'claude', '--wake-permission']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Note: claude: wake permission takes effect only with hooks; add --hooks/);
+  assert.equal(fs.existsSync(path.join(project, 'CLAUDE.md')), false);
+});

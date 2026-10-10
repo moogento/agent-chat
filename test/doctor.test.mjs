@@ -192,8 +192,9 @@ test('doctor reports wake instructions as warnings without treating them as MCP 
   const { project } = fixture(t, { clients: ['codex', 'claude', 'opencode'], hooks: true });
   let result = await doctorProject({ project });
   assert.equal(result.ok, true, JSON.stringify(result));
-  assert.deepEqual(['codex', 'claude', 'opencode'].map(client => check(result, `${client}.instructions`).map(value => value.status)), [['ok'], ['ok'], []]);
+  assert.deepEqual(['codex', 'claude', 'opencode'].map(client => check(result, `${client}.instructions`).map(value => value.status)), [['ok'], ['ok'], ['ok']]);
   assert.equal(check(result, 'claude.mcp').length, 1);
+  assert.deepEqual(check(await doctorProject({ project, client: 'opencode' }), 'opencode.instructions').map(value => value.status), ['ok']);
   const file = path.join(project, 'CLAUDE.md');
   fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('without asking', 'after asking'));
   const before = snapshot(project);
@@ -220,7 +221,12 @@ test('doctor accepts a CLAUDE.md symlink to the managed AGENTS.md wake instructi
   installProject({ project, clients: ['codex', 'claude'], hooks: true });
   const result = await doctorProject({ project });
   assert.deepEqual(check(result, 'claude.instructions').map(value => value.status), ['ok']);
-  assert.match(check(result, 'claude.instructions')[0].message, /CLAUDE\.md links to AGENTS\.md/);
+  assert.match(check(result, 'claude.instructions')[0].message, /in AGENTS\.md match/);
+  const receiptFile = installationPaths(project).receipt;
+  const receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+  Object.assign(receipt.entries.find(entry => entry.kind === 'text-block'), { owners: ['codex'], client: 'codex' });
+  fs.writeFileSync(receiptFile, JSON.stringify(receipt));
+  assert.match(check(await doctorProject({ project }), 'claude.instructions')[0].message, /CLAUDE\.md links to AGENTS\.md/);
   fs.writeFileSync(path.join(project, 'AGENTS.md'), '# Shared\n');
   assert.equal(check(await doctorProject({ project }), 'claude.instructions')[0].status, 'warning');
 });

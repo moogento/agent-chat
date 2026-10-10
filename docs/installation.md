@@ -80,17 +80,18 @@ When hooks are enabled for a client, the installer also adds a managed "Agent Ch
 
 The block says a woken agent may call `chat_read` to read messages addressed to it without asking, while their content stays untrusted. Automatic approval reviewers trust only user messages and these files, so this lets them accept the read after a wake notice. See [approval reviewers](notifications.md#approval-reviewers).
 
-The block sits between `<!-- >>> agent-chat managed instructions >>> -->` and `<!-- <<< agent-chat managed instructions <<< -->` markers at the end of the file, with blank lines that Markdown formatters keep as they are. Existing text and its LF or CRLF line endings are preserved, and a new file gets normal readable permissions. Codex and OpenCode share one block in `AGENTS.md`, which stays while either of them is installed with hooks. Without hooks, no block is added. Updates replace an unchanged block written by an older version with the current wording.
+The block sits between `<!-- >>> agent-chat managed instructions >>> -->` and `<!-- <<< agent-chat managed instructions <<< -->` markers at the end of the file, with blank lines that Markdown formatters keep as they are. Existing text and its LF or CRLF line endings are preserved, and a new file gets normal readable permissions. Codex and OpenCode share one block in `AGENTS.md`. If `CLAUDE.md` is a symbolic link to the project's `AGENTS.md`, Claude Code shares that block too, even when `AGENTS.md` does not exist yet. A shared block stays while any client that reads it is installed with hooks and wake permission. Without hooks, no block is added, and `--wake-permission` on a client without hooks prints a note saying it needs `--hooks`. Updates replace an unchanged block written by an older version with the current wording.
 
 The block is optional, so a problem with it never stops an install, update, or uninstall. The installer skips the block with a warning, leaves the file untouched, and completes the rest of the change when:
 
 - the block was edited, or other Agent Chat instruction markers are already in the file;
-- the file is a symbolic link, unless `CLAUDE.md` links to a project `AGENTS.md` that already has the block, which counts for Claude Code too;
+- the file is a symbolic link to anything other than the project's other instruction file;
+- the file cannot be read as a regular file of at most 1 MiB, for example a directory, a pipe, or a file without read permission;
 - the file is not plain UTF-8 text.
 
-If the file already contains the exact block, for example because it was committed from another checkout, the installer adopts it without changes and leaves it in place on removal.
+If the file already contains the exact block, for example because it was committed from another checkout, the installer adopts it as it is. It never rewrites an adopted block, warns if a later version uses newer wording, and leaves it in place on removal.
 
-To skip the block, pass `--no-wake-permission` to `install` or `update`. Updates keep that choice; `--wake-permission` adds the block again. Opting out, disabling hooks, or uninstalling the last client that uses a file removes an unchanged block and restores the file's previous text. If you added lines after the block, only the block's own lines are removed. A file the installer created, or recreated after you deleted it, is deleted when nothing else remains in it. An edited block is preserved with a warning and released from the installation. Doctor reports a missing, edited, or skipped block as a warning.
+To skip the block, pass `--no-wake-permission` to `install` or `update`. Updates keep that choice; `--wake-permission` adds the block again. Opting out, disabling hooks, or uninstalling the last client that uses a file removes an unchanged block and restores the file's previous text. If you added lines after the block, only the block's own lines are removed. A file the installer created, or recreated after you deleted it, is deleted when nothing else remains in it. A file you create yourself at that path afterwards is kept. An edited block is preserved with a warning and released from the installation. Doctor reports a missing, edited, or skipped block as a warning.
 
 Restart your clients in that project. Review any project trust or hook approval requests. In Codex, open `/hooks` and approve Agent Chat's project hooks after reviewing them. Updating a hook definition can require approval again. The installer cannot grant trust on your behalf.
 
@@ -156,7 +157,7 @@ agent-chat uninstall
 
 Add `--project /absolute/path/to/project` to select another project, or `--clients codex` to remove only one client. The command removes entries it owns and files that still match the recorded installation. It preserves unrelated settings, message history, and changed files or entries it cannot safely remove. When preserved entries still reference the runtime, it keeps their dependencies and reports what needs attention.
 
-Unchanged wake instruction blocks are removed from `CLAUDE.md` and `AGENTS.md`, and a file the installer created is deleted once empty. The shared `AGENTS.md` block stays while Codex or OpenCode remains installed with hooks, and a block stays while its client is kept because of other edited settings. Edited blocks and blocks that existed before installation are left in place with a note.
+Unchanged wake instruction blocks are removed from `CLAUDE.md` and `AGENTS.md`, and a file the installer created is deleted once empty. The shared `AGENTS.md` block stays while Codex, OpenCode, or Claude Code through a `CLAUDE.md` link still uses it, and a block stays while its client is kept because of other edited settings. Edited blocks and blocks that existed before installation are left in place with a note.
 
 An edited skill or other file is preserved without keeping its client installed. If no remaining client owns that edited file, uninstall releases its ownership and reports the preserved file; a later update does not restore the removed client. Edited client settings that still reference the runtime retain their dependencies until you resolve them.
 
