@@ -50,7 +50,7 @@ test('unique session credentials isolate directed messages and notification insp
   assert.match((await call(bob2, 'chat_who')).text, /bob-2/);
   await call(alice, 'chat_send', { to: 'bob', text: 'PRIVATE PAYLOAD' });
   const info = await inspectRemoteNotifications({ url: f.broker.url, tokenFile: f.tokenFile, room: 'shared', sessionId: bob.sessionId, sessionDir: f.creds });
-  assert.equal(info.messages.length, 1); assert.deepEqual(Object.keys(info.messages[0]), ['id']); assert.equal(info.peer.clientCwd, f.base);
+  assert.equal(info.messages.length, 1); assert.deepEqual(Object.keys(info.messages[0]), ['id', 'directed']); assert.equal(info.messages[0].directed, true); assert.equal(info.peer.clientCwd, f.base);
   assert.doesNotMatch(JSON.stringify(info), /PRIVATE PAYLOAD/);
   const unauthorized = await raw(f.broker.url, `/v1/sessions/${bob.sessionId}/notifications`, alice.sessionToken, { room: 'shared' }); assert.equal(unauthorized.status, 401);
   assert.equal((await raw(f.broker.url, `/v1/sessions/${bob.sessionId}/notifications`, fs.readFileSync(f.tokenFile, 'utf8'), { room: 'shared' })).status, 401);

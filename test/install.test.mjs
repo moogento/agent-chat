@@ -34,20 +34,27 @@ function useLegacyOpenCodeWrapper(f) {
   return { current, legacy };
 }
 
-test('managed Stop hooks have a bounded reply-watch timeout without delaying other hooks', t => {
+test('managed Stop hooks are bounded: Codex holds a reply watch, Claude runs an asyncRewake idle watcher', t => {
   const f = fixture(t);
   installProject({ ...f, clients: ['codex', 'claude'], hooks: true });
   for (const relative of ['.codex/hooks.json', '.claude/settings.local.json']) {
     const hooks = readJson(f.project, relative).hooks;
-    assert.equal(hooks.Stop[0].hooks[0].timeout, 540);
+    const stop = hooks.Stop[0].hooks[0];
+    if (relative.startsWith('.codex')) {
+      assert.equal(stop.timeout, 540); assert.equal(stop.asyncRewake, undefined);
+    } else {
+      assert.equal(stop.timeout, 7200); assert.equal(stop.asyncRewake, true);
+      assert.ok(stop.command.endsWith(' claude-code idle-watch'));
+    }
     for (const event of ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'SessionEnd']) {
       assert.equal(hooks[event][0].hooks[0].timeout, 5);
+      assert.equal(hooks[event][0].hooks[0].asyncRewake, undefined);
     }
   }
-  for (const relative of ['hooks/codex.json', 'hooks/claude-code.json']) {
-    const hooks = JSON.parse(fs.readFileSync(path.join(root, relative), 'utf8')).hooks;
-    assert.equal(hooks.Stop[0].hooks[0].timeout, 540);
-  }
+  const codex = JSON.parse(fs.readFileSync(path.join(root, 'hooks/codex.json'), 'utf8')).hooks.Stop[0].hooks[0];
+  assert.equal(codex.timeout, 540);
+  const claude = JSON.parse(fs.readFileSync(path.join(root, 'hooks/claude-code.json'), 'utf8')).hooks.Stop[0].hooks[0];
+  assert.deepEqual([claude.timeout, claude.asyncRewake, claude.command.endsWith(' claude-code idle-watch')], [7200, true, true]);
 });
 
 test('Codex install and update preserve literal dollar patterns in runtime and token paths', t => {
@@ -524,7 +531,7 @@ test('installs all clients, preserves unrelated settings and provides a self-con
   for (const entry of inspection.receipt.entries) assert.equal(inspectManagedEntry({ project: f.project, entry }).status, 'present');
   for (const relative of RUNTIME_FILES) assert.ok(fs.existsSync(path.join(f.project, '.agent-chat/runtime', relative)), relative);
   const run = spawnSync(process.execPath, [path.join(f.project, '.agent-chat/runtime/agent-chat.mjs'), '--version'], { encoding: 'utf8' });
-  assert.equal(run.status, 0, run.stderr); assert.equal(run.stdout.trim(), '0.6.1');
+  assert.equal(run.status, 0, run.stderr); assert.equal(run.stdout.trim(), '0.7.0');
   const diagnostic = spawnSync(process.execPath, [path.join(f.project, '.agent-chat/runtime/agent-chat.mjs'), 'doctor', '--project', f.project, '--json'], { encoding: 'utf8' });
   assert.equal(diagnostic.status, 0, diagnostic.stderr + diagnostic.stdout);
   assert.equal(JSON.parse(diagnostic.stdout).ok, true);
@@ -795,9 +802,13 @@ test('portable hook command quoting handles spaces and POSIX metacharacters safe
     for (const relative of ['.codex/hooks.json', '.claude/settings.local.json']) {
       const command = readJson(f.project, relative).hooks.SessionStart[0].hooks[0].command;
       const payload = JSON.stringify({ session_id: 'test', cwd: f.project, hook_event_name: 'SessionStart' });
-      const result = spawnSync('/bin/sh', ['-c', command], { input: payload, encoding: 'utf8', timeout: 3000 });
+      const home = path.join(f.project, '.test-mailbox');
+      const env = { ...process.env, AGENT_CHAT_HOME: home };
+      delete env.CLAUDE_PROJECT_DIR;
+      const result = spawnSync('/bin/sh', ['-c', command], { input: payload, encoding: 'utf8', timeout: 3000, env });
       assert.equal(result.status, 0, result.stderr);
       assert.match(JSON.parse(result.stdout).hookSpecificOutput.additionalContext, /Call chat_who once/);
+      assert.ok(fs.existsSync(path.join(home, 'presence')));
     }
   }
   assert.equal(quotePosix("a'b"), "'a'\\''b'"); assert.equal(quoteWindows('C:\\with space\\node.exe'), '"C:\\with space\\node.exe"');

@@ -14,12 +14,15 @@ try {
   }
   const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
   const identity = commandIdentity(client, payload);
-  if (process.env.AGENT_CHAT_NOTIFY_DEBUG === '1' && identity) {
+  // An idle-watch hook's stderr becomes the wake prompt, so it carries no debug output.
+  if (process.env.AGENT_CHAT_NOTIFY_DEBUG === '1' && identity && process.argv[3] !== 'idle-watch') {
     process.stderr.write(`agent-chat hook identity: ${JSON.stringify(identity)}\n`);
   }
-  await runCommandHook({ client, payload, write: value => new Promise((resolve, reject) => {
+  const result = await runCommandHook({ client, payload, mode: process.argv[3], write: value => new Promise((resolve, reject) => {
     process.stdout.write(value, error => error ? reject(error) : resolve());
   }) });
+  // asyncRewake hooks wake an idle Claude session only on exit code 2.
+  if (result?.wake) process.exitCode = 2;
 } catch (error) {
   // Optional notifications never block a host operation or expose tool payloads.
   if (process.env.AGENT_CHAT_NOTIFY_DEBUG === '1') process.stderr.write(`agent-chat hook: ${error.message}\n`);
