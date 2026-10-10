@@ -259,3 +259,50 @@ test('OpenCode waits for a confirmed idle status before prompting the session', 
   } } });
   await until(() => f.prompts.length === 1);
 });
+
+test('OpenCode still wakes for a directed message after an expired reply watch', async t => {
+  const f = fixture(t);
+  const adapter = await AgentChatPlugin({ client: f.client, directory: f.cwd },
+    { env: f.env, mailbox: f.mailbox, watchPollMs: 10, wakeConfirmMs: 500 });
+  t.adapter = adapter;
+  f.mailbox.beginReplyWait(f.receiver, f.sender.sessionId, 1);
+  const originalStatus = f.mailbox.replyWaitStatus;
+  f.mailbox.replyWaitStatus = identity => ({ ...originalStatus(identity), state: 'expired' });
+  await adapter.event({ event: { type: 'session.idle', properties: { sessionID: 'host-opencode' } } });
+  await until(() => f.prompts.length === 1);
+  assert.match(f.prompts[0].body.parts[0].text, /deadline/);
+  await adapter.event({ event: { type: 'session.status', properties: { sessionID: 'host-opencode', status: { type: 'busy' } } } });
+  await adapter.event({ event: { type: 'session.status', properties: { sessionID: 'host-opencode', status: { type: 'idle' } } } });
+  const other = f.mailbox.claimIdentity(f.room, 'other', 'codex', 'other-peer');
+  f.mailbox.appendMessage(f.room, other.name, f.receiver.name, 'new directed request', other.sessionId, f.receiver.sessionId);
+  await until(() => f.prompts.length === 2);
+  assert.match(f.prompts[1].body.parts[0].text, /Call chat_read now/);
+});
+
+test('OpenCode shows a toast once instead of retrying when a directed wake has no session profile', async t => {
+  const f = fixture(t);
+  f.client.session.get = async () => ({ data: { id: 'host-opencode' } });
+  const adapter = await AgentChatPlugin({ client: f.client, directory: f.cwd },
+    { env: f.env, mailbox: f.mailbox, watchPollMs: 10, wakeConfirmMs: 500 });
+  t.adapter = adapter;
+  await adapter.event({ event: { type: 'session.idle', properties: { sessionID: 'host-opencode' } } });
+  f.mailbox.appendMessage(f.room, f.sender.name, f.receiver.name, 'private request', f.sender.sessionId, f.receiver.sessionId);
+  await until(() => f.toasts.length === 1);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(f.toasts.length, 1);
+  assert.equal(f.prompts.length, 0);
+  assert.doesNotMatch(JSON.stringify(f.toasts), /private request/);
+});
+
+test('OpenCode falls back to a toast when a directed wake prompt is not confirmed', async t => {
+  const f = fixture(t);
+  const adapter = await AgentChatPlugin({ client: f.client, directory: f.cwd },
+    { env: f.env, mailbox: f.mailbox, watchPollMs: 10, wakeConfirmMs: 25 });
+  t.adapter = adapter;
+  await adapter.event({ event: { type: 'session.idle', properties: { sessionID: 'host-opencode' } } });
+  f.mailbox.appendMessage(f.room, f.sender.name, f.receiver.name, 'private request', f.sender.sessionId, f.receiver.sessionId);
+  await until(() => f.prompts.length === 1);
+  await until(() => f.toasts.length === 1);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(f.prompts.length, 1, 'an unconfirmed prompt is not repeated');
+});

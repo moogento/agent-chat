@@ -21,6 +21,19 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
   const watchTimers = new Map();
   const wakeAttempts = new Map();
   const wakeConfirmTimers = new Map();
+  // One wake per idle period, whichever watcher fires first; cleared when the session becomes active.
+  const wokeSessions = new Set();
+  const wakeTimes = new Map();
+  const IDLE_WAKES_PER_HOUR = 6;
+  const messageWatchMs = Number.isSafeInteger(options.messageWatchMs) && options.messageWatchMs >= 10 ? options.messageWatchMs : 2 * 60 * 60 * 1000;
+  const wakesThisHour = sessionID => {
+    const times = (wakeTimes.get(sessionID) || []).filter(time => Date.now() - time < 60 * 60 * 1000);
+    wakeTimes.set(sessionID, times);
+    if (wakeTimes.size > 100) wakeTimes.delete(wakeTimes.keys().next().value);
+    return times;
+  };
+  const claimWake = sessionID => { wokeSessions.add(sessionID); wakesThisHour(sessionID).push(Date.now()); };
+  const markActive = sessionID => wokeSessions.delete(sessionID);
   const watchPollMs = Number.isSafeInteger(options.watchPollMs) && options.watchPollMs >= 10
     ? options.watchPollMs : env.AGENT_CHAT_BROKER_URL ? 60000 : 15000;
   const wakeConfirmMs = Number.isSafeInteger(options.wakeConfirmMs) && options.wakeConfirmMs >= 10
@@ -80,6 +93,16 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
     const variant = info.model?.variant || saved?.variant;
     return { agent: info.agent, model, ...(variant ? { variant } : {}) };
   };
+  const confirmWake = (sessionID, fallback) => {
+    const previous = wakeConfirmTimers.get(sessionID);
+    if (previous) clearTimeout(previous);
+    const timer = setTimeout(() => {
+      wakeConfirmTimers.delete(sessionID);
+      if (idleSessions.has(sessionID)) void safely(() => showWakeFallback(sessionID, fallback));
+    }, wakeConfirmMs);
+    timer.unref?.();
+    wakeConfirmTimers.set(sessionID, timer);
+  };
   const wakeSession = async (sessionID, status) => {
     if (!idleSessions.has(sessionID) || childSessions.has(sessionID) || closedSessions.has(sessionID)) return;
     const key = `${status.watchId || status.startedAt || status.deadlineAt}:${status.state}`;
@@ -114,16 +137,15 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
         wakeAttempts.delete(sessionID);
         return;
       }
+      if (wokeSessions.has(sessionID)) {
+        wakeAttempts.delete(sessionID);
+        return;
+      }
+      claimWake(sessionID);
       const result = await client.session.promptAsync({ path: { id: sessionID },
         body: { parts: [{ type: 'text', text }], ...profile } });
       if (result?.error || result?.data === false || result === false) throw new Error('OpenCode rejected reply-watch prompt');
-      const timer = setTimeout(() => {
-        wakeConfirmTimers.delete(sessionID);
-        if (idleSessions.has(sessionID)) void safely(() => showWakeFallback(sessionID,
-          `${wakeFallbackText(status)} OpenCode did not confirm a resumed turn.`));
-      }, wakeConfirmMs);
-      timer.unref?.();
-      wakeConfirmTimers.set(sessionID, timer);
+      confirmWake(sessionID, `${wakeFallbackText(status)} OpenCode did not confirm a resumed turn.`);
     } catch (error) {
       await safely(() => showWakeFallback(sessionID, wakeFallbackText(status)));
       if (env.AGENT_CHAT_NOTIFY_DEBUG === '1') console.error(`agent-chat OpenCode wake: ${error.message}`);
@@ -155,37 +177,39 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
     }
   };
   const messageWatches = new Map();
-  const messageWakes = new Map();
   const stopMessageWatch = sessionID => {
     const watch = messageWatches.get(sessionID);
     if (watch) clearInterval(watch.timer);
     messageWatches.delete(sessionID);
   };
-  // While a bound root session is idle, a directed message prompts it once, at most six times an hour, for two hours.
+  // While a bound root session is idle, a directed message prompts it once, within the shared hourly wake budget.
   const checkMessages = async sessionID => {
     const watch = messageWatches.get(sessionID);
     if (!watch || !idleSessions.has(sessionID) || childSessions.has(sessionID) || closedSessions.has(sessionID) || Date.now() > watch.until) {
       stopMessageWatch(sessionID); return;
     }
-    const recent = (messageWakes.get(sessionID) || []).filter(time => Date.now() - time < 60 * 60 * 1000);
-    if (recent.length >= 6) return;
-    // An awaited reply or expired watch is the reply watcher's single wake.
-    if (['replied', 'expired'].includes((await waitStatus(sessionID)).state)) return;
+    if (wokeSessions.has(sessionID) || wakesThisHour(sessionID).length >= IDLE_WAKES_PER_HOUR) return;
     await notifySession({ client: 'opencode', hostSessionId: sessionID, cwd: directory, env, mailbox, remoteInspector, wake: true,
       deliver: async notice => {
         const profile = await currentProfile(sessionID);
-        if (!profile || !idleSessions.has(sessionID) || messageWatches.get(sessionID) !== watch) throw new Error('OpenCode session is not ready for a prompt');
-        const result = await client.session.promptAsync({ path: { id: sessionID }, body: { parts: [{ type: 'text', text: notice.trim() }], ...profile } });
-        if (result?.error || result?.data === false || result === false) throw new Error('OpenCode rejected the wake prompt');
-        messageWakes.set(sessionID, [...recent, Date.now()]);
+        if (!idleSessions.has(sessionID) || messageWatches.get(sessionID) !== watch || wokeSessions.has(sessionID)) throw new Error('OpenCode session is no longer idle');
         stopMessageWatch(sessionID);
+        claimWake(sessionID);
+        if (!profile) { await showWakeFallback(sessionID, 'New Agent Chat messages are addressed to this session. Ask your agent to call chat_read.'); return; }
+        const result = await client.session.promptAsync({ path: { id: sessionID }, body: { parts: [{ type: 'text', text: notice.trim() }], ...profile } });
+        if (result?.error || result?.data === false || result === false) {
+          wokeSessions.delete(sessionID);
+          startMessageWatch(sessionID);
+          throw new Error('OpenCode rejected the wake prompt');
+        }
+        confirmWake(sessionID, 'New Agent Chat messages are addressed to this session. Ask your agent to call chat_read. OpenCode did not confirm a resumed turn.');
       } });
   };
   const startMessageWatch = sessionID => {
     stopMessageWatch(sessionID);
     if (options.idleMessageWake === false || typeof client?.session?.promptAsync !== 'function' || childSessions.has(sessionID) || closedSessions.has(sessionID)
       || !findBinding({ client: 'opencode', hostSessionId: sessionID, cwd: directory, env })) return;
-    const watch = { until: Date.now() + (options.messageWatchMs ?? 2 * 60 * 60 * 1000) };
+    const watch = { until: Date.now() + messageWatchMs };
     watch.timer = setInterval(() => void safely(() => checkMessages(sessionID)), watchPollMs);
     watch.timer.unref?.();
     messageWatches.set(sessionID, watch);
@@ -262,6 +286,7 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
         else output.output += `\n\n[${notice}]`;
       };
       idleSessions.delete(input.sessionID);
+      markActive(input.sessionID);
       stopWatch(input.sessionID);
       stopMessageWatch(input.sessionID);
       await registerHostPresence({ client: 'opencode', hostSessionId: input.sessionID, cwd: directory,
@@ -282,6 +307,7 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
           await safely(async () => startMessageWatch(sessionID));
         } else {
           idleSessions.delete(sessionID);
+          markActive(sessionID);
           stopWatch(sessionID);
           stopMessageWatch(sessionID);
         }
@@ -339,6 +365,8 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
         wakeAttempts.delete(event.properties.info.id);
         stopWatch(event.properties.info.id);
         stopMessageWatch(event.properties.info.id);
+        wokeSessions.delete(event.properties.info.id);
+        wakeTimes.delete(event.properties.info.id);
         const confirm = wakeConfirmTimers.get(event.properties.info.id);
         if (confirm) clearTimeout(confirm);
         wakeConfirmTimers.delete(event.properties.info.id);
