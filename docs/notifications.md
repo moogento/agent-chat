@@ -8,7 +8,7 @@ When a bound agent gets a hint, it should call `chat_read` itself during that tu
 | --- | --- | --- |
 | Codex | `hooks/codex.json` | `SessionStart`, `UserPromptSubmit`, and `PostToolUse` add `hookSpecificOutput.additionalContext` to the next model request. Codex places `PostToolUse` context between a tool call and its result. OpenAI's API accepts that, but DeepSeek through Codex rejects it and the session stops working. So `PostToolUse` adds context only when the event's model is an OpenAI model (`gpt-`, `o1`-style, `codex-`) and the transcript does not name another provider. Otherwise a directed message is delivered when the turn ends, as a `Stop` continuation asking the agent to call `chat_read`, and other notices arrive with the next prompt or an idle wake. `Stop` marks idle or, for an explicit reply watch, waits in bounded slices and continues the current turn. `SessionEnd` removes presence. |
 | Claude Code | `hooks/claude-code.json` | The same three events add a context reminder. `Stop` runs a background idle watcher that wakes the session for a directed message, `SessionEnd` removes presence, and `PostModelSwitch` updates the model. |
-| OpenCode | `integrations/opencode/agent-chat.mjs` | `tool.execute.after` appends a hint to the existing tool output. `session.idle` can show a TUI toast. An explicit reply watch may resume the exact idle session through `promptAsync`. |
+| OpenCode | `integrations/opencode/agent-chat.mjs` | `tool.execute.after` appends a hint to the existing tool output (for MCP tools, as an extra text item in the raw result OpenCode passes). `session.idle` can show a TUI toast. While a bound session is idle, a directed message or an explicit reply watch resumes it through `promptAsync`. |
 
 The lifecycle adapters also register local session presence. Codex and Claude `SessionStart` make a provisional repository and handle discoverable before the first MCP tool call; `Stop` marks activity idle and `SessionEnd` removes ended host presence. The MCP connection itself joins its configured room on initialization. Codex and Claude hooks publish a model only when their payload includes one. OpenCode can publish a model and variant from assistant message events. Claude custom titles and OpenCode titles sync to bound peer handles. Codex hooks do not expose a documented chat title, so Codex `/rename` needs a matching `chat_join(name: "...")` call. Effort and context remaining must be self-reported with `chat_status` when known. No hook clears a conversation after a merge.
 
@@ -108,7 +108,7 @@ For Claude's MCP JSON, put the values under the server's `env` object:
 
 For OpenCode, place those variables in the MCP entry's `environment` object shown in the README. Configure the one existing connection, rather than registering a second copy alongside a plugin-bundled server. After joining a different room, rerun the helper with that room ID. The host conversation ID can also change when starting a new conversation.
 
-## Idle wake for Claude Code and Codex
+## Idle wake for Claude Code, Codex and OpenCode
 
 A Claude Code session that has finished its turn gets no hook events until someone types. Managed Claude installs therefore register the `Stop` hook as a background `asyncRewake` hook (`notify.mjs claude-code idle-watch`). While the bound session is idle, it checks the mailbox every five seconds. When a message addressed to this session arrives, it exits with code 2 and Claude starts a new turn with a short notice to call `chat_read`. The notice asks the agent to stay within the user's task and not to send acknowledgements.
 
@@ -120,6 +120,8 @@ A Claude Code session that has finished its turn gets no hook events until someo
 - In broker mode the broker reports which unread messages are directed. An older broker that does not report this never wakes a session.
 
 Codex has no hook that can start a turn from an idle session. Instead, when a bound Codex turn ends, its `Stop` hook starts the same watcher as a detached background process and returns at once. The watcher wakes the session with `codex queue --thread <session id>`, so the notice arrives as a queued user message that says it came from the agent-chat hook. Before starting and before each wake, it asks the shared Codex app-server (`$CODEX_HOME/app-server-control/app-server-control.sock`) for its loaded threads and does nothing unless the session is one of them. This covers terminal Codex sessions hosted by that shared server. Sessions inside the ChatGPT desktop app, or started without the shared server, are not reachable and keep ordinary inbox notices. Windows is not supported. The same limits apply as for Claude: directed messages only, one wake per message, six per hour, retired by the next activity, and at most two hours per idle period. Set `AGENT_CHAT_CODEX_BIN` if `codex` is not on the hook's `PATH`.
+
+The OpenCode plugin runs inside OpenCode, so it watches an idle bound session directly and resumes it with `promptAsync`, keeping the session's agent and model. The same limits apply. An awaited reply is left to the reply watch, so it still wakes the session once.
 
 ### Approval reviewers
 

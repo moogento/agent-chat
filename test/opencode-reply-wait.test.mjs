@@ -43,7 +43,7 @@ async function until(predicate, timeoutMs = 1000) {
 test('OpenCode resumes only the exact idle session for an explicitly awaited peer reply', async t => {
   const f = fixture(t);
   const adapter = await AgentChatPlugin({ client: f.client, directory: f.cwd },
-    { env: f.env, mailbox: f.mailbox, watchPollMs: 10, wakeConfirmMs: 500 });
+    { env: f.env, mailbox: f.mailbox, watchPollMs: 10, idleMessageWake: false, wakeConfirmMs: 500 });
   t.adapter = adapter;
   f.mailbox.beginReplyWait(f.receiver, f.sender.sessionId, 1);
   await adapter.event({ event: { type: 'session.idle', properties: { sessionID: 'host-opencode' } } });
@@ -63,22 +63,47 @@ test('OpenCode resumes only the exact idle session for an explicitly awaited pee
   assert.equal(f.toasts.length, 0, 'confirmed activity suppresses the fallback toast');
 });
 
-test('OpenCode ordinary messages do not create a wake or a polling timer', async t => {
+test('OpenCode wakes an idle session once for a directed message but not for a broadcast', async t => {
   const f = fixture(t);
   const adapter = await AgentChatPlugin({ client: f.client, directory: f.cwd },
     { env: f.env, mailbox: f.mailbox, watchPollMs: 10, wakeConfirmMs: 50 });
   t.adapter = adapter;
   await adapter.event({ event: { type: 'session.idle', properties: { sessionID: 'host-opencode' } } });
-  f.mailbox.appendMessage(f.room, f.sender.name, f.receiver.name,
-    'ordinary unawaited message', f.sender.sessionId, f.receiver.sessionId);
+  f.mailbox.appendMessage(f.room, f.sender.name, 'all', 'room broadcast', f.sender.sessionId);
   await new Promise(resolve => setTimeout(resolve, 70));
   assert.equal(f.prompts.length, 0);
+  f.mailbox.appendMessage(f.room, f.sender.name, f.receiver.name,
+    'ordinary unawaited message', f.sender.sessionId, f.receiver.sessionId);
+  await until(() => f.prompts.length === 1);
+  assert.deepEqual(f.prompts[0].path, { id: 'host-opencode' });
+  assert.equal(f.prompts[0].body.agent, 'plan');
+  assert.match(f.prompts[0].body.parts[0].text, /Call chat_read now/);
+  assert.doesNotMatch(JSON.stringify(f.prompts), /ordinary unawaited message|room broadcast/);
+  await new Promise(resolve => setTimeout(resolve, 70));
+  assert.equal(f.prompts.length, 1, 'one directed message wakes once');
+  await adapter.event({ event: { type: 'session.idle', properties: { sessionID: 'host-opencode' } } });
+  await new Promise(resolve => setTimeout(resolve, 70));
+  assert.equal(f.prompts.length, 1, 'an already announced message does not wake again');
+});
+
+test('OpenCode wakes once, through the reply watch, for an awaited reply', async t => {
+  const f = fixture(t);
+  const adapter = await AgentChatPlugin({ client: f.client, directory: f.cwd },
+    { env: f.env, mailbox: f.mailbox, watchPollMs: 10, wakeConfirmMs: 500 });
+  t.adapter = adapter;
+  f.mailbox.beginReplyWait(f.receiver, f.sender.sessionId, 1);
+  await adapter.event({ event: { type: 'session.idle', properties: { sessionID: 'host-opencode' } } });
+  f.mailbox.appendMessage(f.room, f.sender.name, f.receiver.name, 'awaited reply', f.sender.sessionId, f.receiver.sessionId);
+  await until(() => f.prompts.length === 1);
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal(f.prompts.length, 1);
+  assert.match(f.prompts[0].body.parts[0].text, /explicitly awaited/);
 });
 
 test('OpenCode ignores other senders and falls back to a toast if async wake is unconfirmed', async t => {
   const f = fixture(t);
   const adapter = await AgentChatPlugin({ client: f.client, directory: f.cwd },
-    { env: f.env, mailbox: f.mailbox, watchPollMs: 10, wakeConfirmMs: 25 });
+    { env: f.env, mailbox: f.mailbox, watchPollMs: 10, idleMessageWake: false, wakeConfirmMs: 25 });
   t.adapter = adapter;
   const other = f.mailbox.claimIdentity(f.room, 'other', 'codex', 'other-peer');
   f.mailbox.beginReplyWait(f.receiver, f.sender.sessionId, 1);
@@ -140,7 +165,7 @@ test('OpenCode retries a transient watch inspection failure without waking the w
     return f.mailbox.replyWaitStatus(identity);
   } };
   const adapter = await AgentChatPlugin({ client: f.client, directory: f.cwd },
-    { env: f.env, mailbox: flakyMailbox, watchPollMs: 10, wakeConfirmMs: 500 });
+    { env: f.env, mailbox: flakyMailbox, watchPollMs: 10, idleMessageWake: false, wakeConfirmMs: 500 });
   t.adapter = adapter;
   f.mailbox.beginReplyWait(f.receiver, f.sender.sessionId, 1);
   await adapter.event({ event: { type: 'session.idle', properties: { sessionID: 'host-opencode' } } });
@@ -165,7 +190,7 @@ test('OpenCode does not wake from a stale reply result after the watch was cance
     return status;
   } };
   const adapter = await AgentChatPlugin({ client: f.client, directory: f.cwd },
-    { env: f.env, mailbox, watchPollMs: 10, wakeConfirmMs: 50 });
+    { env: f.env, mailbox, watchPollMs: 10, idleMessageWake: false, wakeConfirmMs: 50 });
   t.adapter = adapter;
   await adapter.event({ event: { type: 'session.idle', properties: { sessionID: 'host-opencode' } } });
   await new Promise(resolve => setTimeout(resolve, 40));

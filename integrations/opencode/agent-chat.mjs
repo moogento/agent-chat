@@ -154,6 +154,42 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
       }
     }
   };
+  const messageWatches = new Map();
+  const messageWakes = new Map();
+  const stopMessageWatch = sessionID => {
+    const watch = messageWatches.get(sessionID);
+    if (watch) clearInterval(watch.timer);
+    messageWatches.delete(sessionID);
+  };
+  // While a bound root session is idle, a directed message prompts it once, at most six times an hour, for two hours.
+  const checkMessages = async sessionID => {
+    const watch = messageWatches.get(sessionID);
+    if (!watch || !idleSessions.has(sessionID) || childSessions.has(sessionID) || closedSessions.has(sessionID) || Date.now() > watch.until) {
+      stopMessageWatch(sessionID); return;
+    }
+    const recent = (messageWakes.get(sessionID) || []).filter(time => Date.now() - time < 60 * 60 * 1000);
+    if (recent.length >= 6) return;
+    // An awaited reply or expired watch is the reply watcher's single wake.
+    if (['replied', 'expired'].includes((await waitStatus(sessionID)).state)) return;
+    await notifySession({ client: 'opencode', hostSessionId: sessionID, cwd: directory, env, mailbox, remoteInspector, wake: true,
+      deliver: async notice => {
+        const profile = await currentProfile(sessionID);
+        if (!profile || !idleSessions.has(sessionID) || messageWatches.get(sessionID) !== watch) throw new Error('OpenCode session is not ready for a prompt');
+        const result = await client.session.promptAsync({ path: { id: sessionID }, body: { parts: [{ type: 'text', text: notice.trim() }], ...profile } });
+        if (result?.error || result?.data === false || result === false) throw new Error('OpenCode rejected the wake prompt');
+        messageWakes.set(sessionID, [...recent, Date.now()]);
+        stopMessageWatch(sessionID);
+      } });
+  };
+  const startMessageWatch = sessionID => {
+    stopMessageWatch(sessionID);
+    if (options.idleMessageWake === false || typeof client?.session?.promptAsync !== 'function' || childSessions.has(sessionID) || closedSessions.has(sessionID)
+      || !findBinding({ client: 'opencode', hostSessionId: sessionID, cwd: directory, env })) return;
+    const watch = { until: Date.now() + (options.messageWatchMs ?? 2 * 60 * 60 * 1000) };
+    watch.timer = setInterval(() => void safely(() => checkMessages(sessionID)), watchPollMs);
+    watch.timer.unref?.();
+    messageWatches.set(sessionID, watch);
+  };
   const syncTitle = sessionID => {
     const title = titles.get(sessionID);
     return title ? syncBoundSessionTitle({ client: 'opencode', hostSessionId: sessionID, cwd: directory,
@@ -216,17 +252,25 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
   };
   return {
     'tool.execute.after': async (input, output) => {
+      // Built-in tools pass { output }; MCP tools pass the raw CallToolResult { content }.
+      const mcpResult = typeof output?.output !== 'string' && Array.isArray(output?.content) ? output : null;
       if (typeof input?.sessionID !== 'string' || childSessions.has(input.sessionID)
-        || closedSessions.has(input.sessionID) || typeof output?.output !== 'string') return;
+        || closedSessions.has(input.sessionID) || (!mcpResult && typeof output?.output !== 'string')) return;
+      const text = mcpResult ? mcpResult.content.filter(item => item?.type === 'text' && typeof item.text === 'string').map(item => item.text).join('\n') : output.output;
+      const append = async notice => {
+        if (mcpResult) mcpResult.content.push({ type: 'text', text: `[${notice}]` });
+        else output.output += `\n\n[${notice}]`;
+      };
       idleSessions.delete(input.sessionID);
       stopWatch(input.sessionID);
+      stopMessageWatch(input.sessionID);
       await registerHostPresence({ client: 'opencode', hostSessionId: input.sessionID, cwd: directory,
         activity: 'working', env, mailbox });
-      await safely(() => linkIdentityTool(input, output));
+      await safely(() => linkIdentityTool(input, { output: text }));
       await safely(() => syncTitle(input.sessionID));
       await safely(() => notifyHostInvitations({ client: 'opencode', hostSessionId: input.sessionID,
-        cwd: directory, env, mailbox, deliver: async notice => { output.output += `\n\n[${notice}]`; } }));
-      await safely(() => notify(input.sessionID, async notice => { output.output += `\n\n[${notice}]`; }));
+        cwd: directory, env, mailbox, deliver: append }));
+      await safely(() => notify(input.sessionID, append));
     },
     event: async ({ event } = {}) => {
       if (event?.type === 'session.status' && typeof event.properties?.sessionID === 'string') {
@@ -235,9 +279,11 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
         if (event.properties.status?.type === 'idle') {
           idleSessions.add(sessionID);
           await safely(() => checkWatch(sessionID));
+          await safely(async () => startMessageWatch(sessionID));
         } else {
           idleSessions.delete(sessionID);
           stopWatch(sessionID);
+          stopMessageWatch(sessionID);
         }
         return;
       }
@@ -292,6 +338,7 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
         models.delete(event.properties.info.id);
         wakeAttempts.delete(event.properties.info.id);
         stopWatch(event.properties.info.id);
+        stopMessageWatch(event.properties.info.id);
         const confirm = wakeConfirmTimers.get(event.properties.info.id);
         if (confirm) clearTimeout(confirm);
         wakeConfirmTimers.delete(event.properties.info.id);
@@ -302,6 +349,7 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
         || childSessions.has(event.properties.sessionID) || closedSessions.has(event.properties.sessionID)) return;
       idleSessions.add(event.properties.sessionID);
       await safely(() => checkWatch(event.properties.sessionID));
+      await safely(async () => startMessageWatch(event.properties.sessionID));
       await registerHostPresence({ client: 'opencode', hostSessionId: event.properties.sessionID, cwd: directory,
         activity: 'idle', env, mailbox });
       if (env.AGENT_CHAT_NOTIFY_DEBUG === '1') console.error(`agent-chat hook identity: ${JSON.stringify({ client: 'opencode', hostSessionId: event.properties.sessionID, cwd: directory })}`);

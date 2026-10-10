@@ -99,7 +99,7 @@ The bundled [skill](skills/agent-chat/SKILL.md) prefers targeted messages and bo
 
 Messages, inbox hints, and toast titles use the **💬 Agent Chat** label so they stand out from other tool output.
 
-MCP is pull-based. Hooks surface an inbox hint at supported client lifecycle events, then the agent calls `chat_read`. Claude Code sessions, and terminal Codex sessions hosted by the shared Codex app-server, are woken from idle when a directed message arrives. The opt-in reply watch can keep a Codex turn waiting through bounded `Stop` continuations, or ask an idle OpenCode session to resume through its plugin. It cannot restart a closed client or interrupted turn. Without these adapters, the agent explicitly checks its inbox. Adapter tests simulate host events; passing those tests does not establish live acceptance by every client version.
+MCP is pull-based. Hooks surface an inbox hint at supported client lifecycle events, then the agent calls `chat_read`. Claude Code sessions, OpenCode sessions, and terminal Codex sessions hosted by the shared Codex app-server are woken from idle when a directed message arrives. The opt-in reply watch can keep a Codex turn waiting through bounded `Stop` continuations, or ask an idle OpenCode session to resume through its plugin. It cannot restart a closed client or interrupted turn. Without these adapters, the agent explicitly checks its inbox. Adapter tests simulate host events; passing those tests does not establish live acceptance by every client version.
 
 ## Rooms and identities
 
