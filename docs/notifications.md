@@ -130,7 +130,7 @@ Clients that preserve the complete MCP result in `PostToolUse.tool_response` can
 ```text
 AGENT_CHAT_NOTIFY_CONFIG=/absolute/path/notifications.json
 AGENT_CHAT_NOTIFY_AUTO_BIND=1
-AGENT_CHAT_NOTIFY_IDENTITY_TOOLS=mcp__agent-chat__chat_join,mcp__agent-chat__chat_who
+AGENT_CHAT_NOTIFY_IDENTITY_TOOLS=mcp__agent-chat__chat_join,mcp__agent-chat__chat_rename,mcp__agent-chat__chat_who
 ```
 
 Use the **exact tool names** from your client's tool listing. Claude plugin-bundled names are scoped, so this package's names are `mcp__plugin_agent-chat_agent-chat__chat_join` and `mcp__plugin_agent-chat_agent-chat__chat_who`. Add only the names for your trusted agent-chat connection. The [Claude hook reference](https://code.claude.com/docs/en/hooks#match-mcp-tools) describes the naming rules. Codex names can depend on its registration and normalization, so inspect them rather than guessing.

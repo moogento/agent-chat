@@ -340,7 +340,7 @@ function recentWakes(identity, env, now) {
   return Array.isArray(times) ? times.filter(time => Number.isSafeInteger(time) && time <= now && now - time < 60 * 60 * 1000) : [];
 }
 
-/** Runs as a Claude asyncRewake Stop hook. Wakes an idle session once per new directed message or finished reply watch. */
+/** Wakes an idle session once per new directed message or finished reply watch: as Claude's asyncRewake Stop hook, or a detached Codex watcher. */
 export async function idleWatch({ identity, env = process.env, mailbox, remoteInspector, wake, maxMs = IDLE_WATCH_MS,
   pollMs = IDLE_POLL_MS, now = () => Date.now(), sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), generation }) {
   const binding = findBinding({ ...identity, env });
@@ -611,7 +611,7 @@ export async function autoBindCommand({ client, payload, env = process.env, mail
   const identity = commandIdentity(client, payload, env);
   if (!identity || payload.hook_event_name !== 'PostToolUse') return false;
   const tools = (env.AGENT_CHAT_NOTIFY_IDENTITY_TOOLS || '').split(',').map(value => value.trim()).filter(Boolean);
-  if (!tools.includes(payload.tool_name) || !/__(chat_join|chat_who|chat_accept_invite)$/.test(payload.tool_name)) return false;
+  if (!tools.includes(payload.tool_name) || !/__(chat_join|chat_rename|chat_who|chat_accept_invite)$/.test(payload.tool_name)) return false;
   const metadata = identityMetadata(client, payload.tool_response);
   if (metadata?.version !== 1) return false;
   const remote = Boolean(env.AGENT_CHAT_BROKER_URL || env.AGENT_CHAT_BROKER_TOKEN_FILE || metadata.transport === 'broker');
@@ -658,8 +658,9 @@ export async function runCommandHook({ client, payload, env = process.env, mailb
   }
   if (payload.hook_event_name === 'Stop' && mode === 'codex-idle-watch' && client === 'codex') {
     codexWake ??= await import('./codex-wake.mjs');
+    // An unanswered query is retried at wake time; only a definite answer ends the watch early.
     const hosted = await codexWake.codexLoadedThreads({ socket: codexWake.codexControlSocket(env) });
-    if (!hosted?.has(identity.hostSessionId)) return { delivered: false, reason: 'idle-not-hosted' };
+    if (hosted && !hosted.has(identity.hostSessionId)) return { delivered: false, reason: 'idle-not-hosted' };
     const result = await idleWatch({ identity, env, mailbox, remoteInspector, generation: env.AGENT_CHAT_IDLE_WATCH_GENERATION,
       ...idleWatchOptions, wake: text => codexWake.queueCodexWake({ threadId: identity.hostSessionId, text, env }) });
     return { delivered: result.state.startsWith('woke'), reason: `idle-${result.state}` };
@@ -701,7 +702,7 @@ export async function runCommandHook({ client, payload, env = process.env, mailb
   await autoBindCommand({ client, payload, env, mailbox, remoteInspector });
   let title = commandSessionTitle(client, payload);
   if (!title && client === 'claude-code' && payload.hook_event_name === 'PostToolUse'
-    && /__(chat_join|chat_who|chat_accept_invite)$/.test(payload.tool_name || '')
+    && /__(chat_join|chat_rename|chat_who|chat_accept_invite)$/.test(payload.tool_name || '')
     && env.AGENT_CHAT_NOTIFY_CONFIG && !env.AGENT_CHAT_BROKER_URL) {
     const { createPresence } = await import('../lib/presence.mjs');
     const known = createPresence({ home: mailbox?.home || env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat') }).getHost(identity);
@@ -713,7 +714,7 @@ export async function runCommandHook({ client, payload, env = process.env, mailb
   }
   const startupHint = payload.hook_event_name === 'SessionStart' && env.AGENT_CHAT_NOTIFY_AUTO_BIND === '1'
     && ['startup', 'resume', 'clear', undefined].includes(payload.source)
-    ? `${CHAT_LABEL}: Call chat_who once to link your joined MCP peer to this host session. If you can see a host title, match it with chat_join(name: ...); do not guess a hidden title.` : '';
+    ? `${CHAT_LABEL}: Call chat_who once to link your joined MCP peer to this host session. If you can see a host title, match it with chat_rename(name: ...); do not guess a hidden title.` : '';
   const deliver = async notice => {
     await write(JSON.stringify({ hookSpecificOutput: { hookEventName: payload.hook_event_name,
       additionalContext: [startupHint, notice].filter(Boolean).join('\n') } }) + '\n');

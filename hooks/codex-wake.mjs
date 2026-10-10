@@ -44,12 +44,14 @@ export function codexLoadedThreads({ socket = codexControlSocket(), timeoutMs = 
     const handle = text => {
       let message; try { message = JSON.parse(text); } catch { return; }
       if (message.id === 1) { send({ method: 'initialized' }); list(); return; }
-      if (message.id !== 2) return;
+      if (message.id !== 2 || 'method' in message) return;
       const ids = message.result?.data;
       if (!Array.isArray(ids)) return finish(null);
       for (const id of ids) if (typeof id === 'string') threads.add(id);
       const cursor = message.result.nextCursor;
-      if (typeof cursor === 'string' && cursor && ++pages < LOADED_PAGES) list(cursor); else finish(threads);
+      if (typeof cursor !== 'string' || !cursor) finish(threads);
+      else if (++pages < LOADED_PAGES) list(cursor);
+      else finish(null);
     };
     const parse = () => {
       while (buffer.length >= 2) {
@@ -97,9 +99,15 @@ export async function queueCodexWake({ threadId, text, env = process.env, loaded
     error => error ? reject(error) : resolve())) }) {
   // A thread outside the shared daemon may belong to another host process; queueing could start a second writer.
   const hosted = await loadedThreads({ socket: codexControlSocket(env) });
-  if (!hosted?.has(threadId)) throw unreachable('Codex thread is not hosted by the shared app-server');
+  if (!hosted) throw new Error('Codex app-server did not answer');
+  if (!hosted.has(threadId)) throw unreachable('Codex thread is not hosted by the shared app-server');
   try { await run(env.AGENT_CHAT_CODEX_BIN || 'codex', ['queue', '--thread', threadId, '--message', CODEX_WAKE_PREFIX + text.trim()]); }
-  catch (error) { throw error.code === 'ENOENT' ? unreachable('codex executable not found') : error; }
+  catch (error) {
+    if (error.code === 'ENOENT') throw unreachable('codex executable not found');
+    // A timed-out queue may already have been accepted; a repeat would wake the session twice.
+    if (error.killed) return;
+    throw error;
+  }
 }
 
 /** Starts the idle watcher outside the Stop hook so the Codex turn can finish immediately. */

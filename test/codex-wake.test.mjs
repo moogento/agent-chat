@@ -87,7 +87,12 @@ test('Codex wake queues fixed text only for a daemon-hosted thread', async t => 
     loadedThreads: async () => new Set(['other']) }), error => error.code === 'IDLE_WAKE_UNREACHABLE');
   await assert.rejects(queueCodexWake({ threadId: f.hostSessionId, text: 'notice', env: f.env, loadedThreads: async () => new Set([f.hostSessionId]),
     run: async () => { throw Object.assign(new Error('spawn codex ENOENT'), { code: 'ENOENT' }); } }), error => error.code === 'IDLE_WAKE_UNREACHABLE');
-  await assert.rejects(queueCodexWake({ threadId: f.hostSessionId, text: 'notice', env: f.env, run, loadedThreads: async () => null }), /not hosted/);
+  await assert.rejects(queueCodexWake({ threadId: f.hostSessionId, text: 'notice', env: f.env, run, loadedThreads: async () => null }),
+    error => /did not answer/.test(error.message) && error.code === undefined);
+  await queueCodexWake({ threadId: f.hostSessionId, text: 'notice', env: f.env, loadedThreads: async () => new Set([f.hostSessionId]),
+    run: async () => { throw Object.assign(new Error('timed out'), { killed: true, signal: 'SIGTERM' }); } });
+  await assert.rejects(queueCodexWake({ threadId: f.hostSessionId, text: 'notice', env: f.env, loadedThreads: async () => new Set([f.hostSessionId]),
+    run: async () => { throw Object.assign(new Error('exit 1'), { code: 1 }); } }), /exit 1/);
   assert.equal(calls.length, 0);
   await queueCodexWake({ threadId: f.hostSessionId, text: 'notice\n', env: { ...f.env, AGENT_CHAT_CODEX_BIN: '/bin/codex' }, run,
     loadedThreads: async () => new Set([f.hostSessionId]) });
