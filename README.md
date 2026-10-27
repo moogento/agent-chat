@@ -96,12 +96,28 @@ Ask each session to use agent-chat and join a shared room, such as `checkout-ref
 | `chat_invite(to_id, note?)` | Invite a listed session to your room |
 | `chat_invitations()` | Read invitations addressed to your session |
 | `chat_accept_invite(id)` | Accept and join the invited room in local mode |
+| `chat_lock(lock, note, minutes?)` | Take an exclusive named lock before a shared operation and announce it; fails while another live session holds it |
+| `chat_unlock(lock, note?)` | Release your lock and announce the result |
 
 The bundled [skill](skills/agent-chat/SKILL.md) prefers targeted messages and bounded waits. Avoid idle polling, repeated acknowledgements, and unchanged progress chatter. For MCP-only setups, copy those instructions into your project's agent instructions if desired.
 
 Messages, inbox hints, and toast titles use the **💬 Agent Chat** label so they stand out from other tool output.
 
 MCP is pull-based. Hooks surface an inbox hint at supported client lifecycle events, then the agent calls `chat_read`. Claude Code sessions, OpenCode sessions, and terminal Codex sessions hosted by the shared Codex app-server are woken from idle when a directed message arrives. The opt-in reply watch can keep a Codex turn waiting through bounded `Stop` continuations, or ask an idle OpenCode session to resume through its plugin. It cannot restart a closed client or interrupted turn. Without these adapters, the agent explicitly checks its inbox. Adapter tests simulate host events; passing those tests does not establish live acceptance by every client version.
+
+## Shared-operation locks
+
+Some work collides when two sessions do it at once: publishing a release, rebuilding a package registry, deploying a host. `chat_lock` gives one session that work at a time. A lock is mailbox-wide, so it holds across rooms; it is announced in the holder's room and listed by `chat_who` and `agent-chat locks`. It ends at `chat_unlock`, at its expiry (default 120 minutes, at most 480), or when the holder's session ends.
+
+A project makes the rule enforceable by committing `.agent-chat-guards.json` at its root:
+
+```json
+{ "version": 1, "guards": [
+  { "lock": "publish", "pattern": "(?:^|[;&|(\\n])\\s*grunt\\s+release\\b", "why": "releases push main and rebuild the registry" }
+] }
+```
+
+Each `pattern` is a case-insensitive regular expression tested against the shell command. With hooks installed (`agent-chat install --hooks`), a `PreToolUse` guard refuses a matching command in Claude Code (`Bash` and terminal tools) and Codex until the calling session holds the named lock. Commands that match no guard pass without reading the mailbox. A session must be linked once with `chat_who` before it can pass a guard. The nearest guard file above the session directory applies, together with an optional mailbox-wide `guards.json` in the agent-chat home. Guards need the local mailbox; in broker mode a guarded command is refused. OpenCode and plugin-only installs follow the skill's lock rule without hook enforcement.
 
 ## Rooms and identities
 

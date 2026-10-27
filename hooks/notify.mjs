@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 const MAX_INPUT = 1024 * 1024;
 const client = process.argv[2];
+// Managed launchers run the PreToolUse lock guard through this entry point.
+if (process.argv[3] === 'guard') await import('./guard.mjs');
 // A disabled optional hook should not parse a tool result or load mailbox code.
-if (!process.env.AGENT_CHAT_NOTIFY_CONFIG && process.env.AGENT_CHAT_NOTIFY_DEBUG !== '1') process.exit(0);
-try {
+else if (!process.env.AGENT_CHAT_NOTIFY_CONFIG && process.env.AGENT_CHAT_NOTIFY_DEBUG !== '1') process.exit(0);
+else try {
   const { commandIdentity, runCommandHook } = await import('./notifications.mjs');
   let length = 0;
   const chunks = [];
