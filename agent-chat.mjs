@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { createMailbox, safeName, safeSessionId, pidAlive, LIMITS } from './lib/mailbox.mjs';
+import { createMailbox, safeName, safeSessionId, pidAlive, LIMITS, LOCK_LIMITS } from './lib/mailbox.mjs';
 import { CHAT_LABEL } from './lib/presentation.mjs';
 import { createPresence } from './lib/presence.mjs';
 
@@ -58,6 +58,8 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
     { name: 'chat_presence', description: 'Show recent sessions in this mailbox, including sessions not yet joined to a room. Presence IDs can be used for invitations.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
     { name: 'chat_invite', description: 'Invite a present session to your room. Invitations are requests, never automatic joins.', inputSchema: { type: 'object', properties: { to_id: { type: 'string' }, note: { type: 'string', maxLength: 500 } }, required: ['to_id'], additionalProperties: false } },
     { name: 'chat_invitations', description: 'Read invitations addressed to your session.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+    { name: 'chat_lock', description: `Take an exclusive named lock before a shared operation (package release, registry rebuild, host deploy) and announce it to your room. Fails while another live session holds it and names the holder. Renews when you already hold it. Expires after minutes (default ${LOCK_LIMITS.defaultMinutes}) or when your session ends.`, inputSchema: { type: 'object', properties: { lock: { type: 'string', description: 'Lock name, for example the guarded resource a project guard names' }, note: { type: 'string', maxLength: LOCK_LIMITS.noteChars, description: 'What you are doing under the lock' }, minutes: { type: 'integer', minimum: 1, maximum: LOCK_LIMITS.maxMinutes } }, required: ['lock', 'note'], additionalProperties: false } },
+    { name: 'chat_unlock', description: 'Release a lock you hold once the shared operation is finished and verified, and announce it to your room. Also clears a lock whose holder ended or expired.', inputSchema: { type: 'object', properties: { lock: { type: 'string' }, note: { type: 'string', maxLength: LOCK_LIMITS.noteChars, description: 'Result, for example the released version' } }, required: ['lock'], additionalProperties: false } },
     { name: 'chat_accept_invite', description: 'Accept an invitation and join its room. Broker sessions must reconnect to the invited room.', inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'], additionalProperties: false } },
   ];
   // chat_read consumes the page it returns, so a repeat call skips messages: it is neither read-only nor idempotent.
@@ -83,7 +85,7 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
   function whoText() {
     const me = state.identity;
     const meta = mailbox.readMeta(me.room);
-    return [`You are "${me.name}" in room ${oneLine(me.room.label)}`, `Session: ${me.sessionId}`, `Room id: ${me.room.id}`, `Room source: ${/[\\/]/.test(me.room.label) ? 'directory path' : 'named room'}`, `Summary: ${oneLine(meta.summary || '(none set)')}`, `Room status: ${oneLine(meta.status || '(none set)')}`, `Active agents:\n${mailbox.listPeers(me.room).map((peer) => formatPeer(peer, me.sessionId)).join('\n') || '(none)'}`].join('\n');
+    return [`You are "${me.name}" in room ${oneLine(me.room.label)}`, `Session: ${me.sessionId}`, `Room id: ${me.room.id}`, `Room source: ${/[\\/]/.test(me.room.label) ? 'directory path' : 'named room'}`, `Summary: ${oneLine(meta.summary || '(none set)')}`, `Room status: ${oneLine(meta.status || '(none set)')}`, `Active agents:\n${mailbox.listPeers(me.room).map((peer) => formatPeer(peer, me.sessionId)).join('\n') || '(none)'}`, `Held locks:\n${formatLocks(mailbox, me.sessionId)}`].join('\n');
   }
   function validateArgs(name, args) {
     const tool = TOOLS.find((item) => item.name === name);
@@ -186,6 +188,16 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
         } finally { if (waited) state.waitedMs += Date.now() - started; state.waiting = false; }
       }
       case 'chat_who': return whoText();
+      case 'chat_lock': {
+        const { record, renewed, announceError } = mailbox.acquireResource(me, args.lock, args.note, args.minutes ?? LOCK_LIMITS.defaultMinutes);
+        const announced = announceError ? `. The announcement failed (${announceError}): post it with chat_send to all` : ` and announced it in ${oneLine(me.room.label)}`;
+        return `${renewed ? 'Renewed' : 'Locked'} ${record.resource} until ${new Date(record.expiresAt).toISOString()}${announced}. Call chat_unlock when the operation is finished and verified.`;
+      }
+      case 'chat_unlock': {
+        const result = mailbox.releaseResource(me, args.lock, args.note ?? '');
+        if (!result.released) return `${args.lock} was not locked.`;
+        return `Unlocked ${args.lock}${result.stale ? ' (it had already ended)' : ''}${result.announceError ? `. The announcement failed (${result.announceError}): post it with chat_send to all` : ` and announced it in ${oneLine(me.room.label)}`}.`;
+      }
       case 'chat_status': {
         const updated = [];
         if (args.mine !== undefined) {
@@ -313,6 +325,7 @@ function defaultName(client, cwd, sessionId) {
 }
 function formatProfile(peer) { return `${peer.activity ? `, ${oneLine(peer.activity)}` : ''}${peer.availability ? `, ${oneLine(peer.availability)}` : ''}${peer.task ? `, task: ${oneLine(peer.task)}` : ''}${peer.model ? `, model: ${oneLine(peer.model)}` : ''}${peer.variant ? `, variant: ${oneLine(peer.variant)}` : ''}${peer.effort ? `, effort: ${oneLine(peer.effort)}` : ''}${Number.isSafeInteger(peer.context_remaining_percent) ? `, context left: ${peer.context_remaining_percent}% (self-reported)` : ''}`; }
 function formatPeer(peer, self) { return `- ${oneLine(peer.name)} (${oneLine(peer.client || 'unknown')})${peer.sessionId === self ? ' [you]' : ''}${peer.status ? `: ${oneLine(peer.status)}` : ''}${formatProfile(peer)}`; }
+function formatLocks(mailbox, self) { return mailbox.listLocks?.().map(lock => `- ${oneLine(lock.resource)}: ${oneLine(lock.name)}${lock.sessionId === self ? ' [you]' : ''} in ${oneLine(lock.room.label)} until ${new Date(lock.expiresAt).toISOString()}: ${oneLine(lock.note)}`).join('\n') || '(none)'; }
 function formatMessages(messages) { return messages.map((msg) => `${CHAT_LABEL} | [${msg.ts}] ${msg.from} -> ${msg.to}: ${msg.text}`).join('\n'); }
 function formatRooms(mailbox) { return mailbox.listRooms().map((room) => [`## ${oneLine(room.label)} (${room.bytes} transcript bytes, last activity ${room.last ? new Date(room.last).toISOString() : 'never'})`, `   Summary: ${oneLine(room.summary || '(none set)')}`, ...(room.status ? [`   Status: ${oneLine(room.status)}`] : []), ...mailbox.listPeers(room).map((peer) => `   ${formatPeer(peer)}`)].join('\n')).join('\n'); }
 export function serve() {
@@ -366,7 +379,7 @@ export async function cli(argv) {
   if (process.env.AGENT_CHAT_BROKER_URL && !['--help', '-h', 'help', '--version', '-v'].includes(cmd)) throw new Error('Local mailbox CLI commands are unavailable in broker mode. Use the connected MCP tools; no local fallback was attempted.');
   if (cmd === '--version' || cmd === '-v') return console.log(VERSION);
   if (cmd === undefined || cmd === 'serve') return serve();
-  if (['--help', '-h', 'help'].includes(cmd)) return console.log(`agent-chat ${VERSION}\n\nagent-chat [serve]\nagent-chat broker --token-file PATH [--host HOST] [--port PORT] [--home PATH]\nagent-chat proxy  (requires broker URL, token file, and explicit room)\nagent-chat log [-f] [-n N] [--room ROOM]\nagent-chat send [--to NAME] [--as NAME] [--room ROOM] TEXT\nagent-chat who [--room ROOM]\nagent-chat set [--summary TEXT] [--status TEXT] [--room ROOM]\nagent-chat rooms\nagent-chat tidy\nagent-chat install --clients codex,claude,opencode [--hooks] [--project PATH] [--dry-run]\nagent-chat update [--project PATH] [--dry-run]\nagent-chat uninstall [--project PATH] [--dry-run]\nagent-chat doctor [--project PATH] [--json]\n\nROOM is a task name or directory. Default: current git repo.`);
+  if (['--help', '-h', 'help'].includes(cmd)) return console.log(`agent-chat ${VERSION}\n\nagent-chat [serve]\nagent-chat broker --token-file PATH [--host HOST] [--port PORT] [--home PATH]\nagent-chat proxy  (requires broker URL, token file, and explicit room)\nagent-chat log [-f] [-n N] [--room ROOM]\nagent-chat send [--to NAME] [--as NAME] [--room ROOM] TEXT\nagent-chat who [--room ROOM]\nagent-chat set [--summary TEXT] [--status TEXT] [--room ROOM]\nagent-chat rooms\nagent-chat locks\nagent-chat tidy\nagent-chat install --clients codex,claude,opencode [--hooks] [--project PATH] [--dry-run]\nagent-chat update [--project PATH] [--dry-run]\nagent-chat uninstall [--project PATH] [--dry-run]\nagent-chat doctor [--project PATH] [--json]\n\nROOM is a task name or directory. Default: current git repo.`);
   const { flags, rest } = parseFlags(more);
   const mailbox = createMailbox();
   const room = mailbox.resolveRoom(flags.room ?? envValue('AGENT_CHAT_ROOM'));
@@ -405,6 +418,7 @@ export async function cli(argv) {
       const keys = mailbox.updateMeta(room, changes, safeName(flags.as || 'human'));
       return console.log(keys.length ? `Updated ${room.label}` : 'No status changes.');
     }
+    case 'locks': return console.log(formatLocks(mailbox));
     case 'rooms': mailbox.tidyRooms({ ttlDays: envNumber('AGENT_CHAT_TTL_DAYS', 7, 0, 36500) }); return console.log(formatRooms(mailbox) || 'No rooms yet.');
     case 'tidy': {
       const removed = mailbox.tidyRooms({ force: true, ttlDays: envNumber('AGENT_CHAT_TTL_DAYS', 7, 0, 36500) });

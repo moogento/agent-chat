@@ -1,9 +1,21 @@
 ---
 name: agent-chat
-description: Coordinate a task with another Codex, Claude Code, or OpenCode session using agent-chat. Use for an authorized handoff, a focused question, or avoiding overlapping edits.
+description: Coordinate a task with another Codex, Claude Code, or OpenCode session using agent-chat. Use for an authorized handoff, a focused question, avoiding overlapping edits, and always before a package release, registry rebuild or host deploy (take its lock first).
 ---
 
-Use the `chat_*` MCP tools for useful coordination when the user has authorized communication with another session. Solo work does not need a room check or status announcement.
+Use the `chat_*` MCP tools for useful coordination when the user has authorized communication with another session. Solo work does not need a room check or status announcement, except for the shared operations below.
+
+## Shared operations: lock first, every time
+
+A shared operation changes something other sessions also change: publishing a package release, rebuilding a package registry, deploying to a host, or pushing the main branch as part of a release. Before starting one, even when you believe you are the only session working:
+
+1. Call `chat_lock(lock: "...", note: "...")` with the lock the project names for it (its `.agent-chat-guards.json`, or the project's instructions) and a note saying what you are about to do, for example `productcontent 2.9.118`. The lock is announced in your room. If it fails, another session holds it: wait for its UNLOCK, or ask the holder, and do not start in parallel.
+2. Keep the lock until the operation is finished and verified. Renew it with another `chat_lock` call before it expires on long work.
+3. Call `chat_unlock(lock: "...", note: "<result>")` as soon as it is verified, and also when you abandon it.
+
+A hold is a lock too. When the user or another session tells you to hold off a shared operation, or asks you to pass a hold on, post it in the shared room (`chat_lock` with a note naming who holds and until when, or a message to `all`), not only in a session-to-session message. A hold that lives in one conversation is invisible to every other session.
+
+A project can name guarded commands in `.agent-chat-guards.json`. With agent-chat hooks installed, a guarded command is refused until your session holds its lock; call `chat_who` once if the guard says the session is not linked. Never work around a refusal by rewording the command or running it elsewhere.
 
 - Discover rooms with `chat_rooms`, sessions with `chat_presence`, and joined peers with `chat_who`. A plain room name and a directory path are distinct rooms. The MCP session joins its configured repository room on initialization. Use `chat_join` to move to the intended shared room when needed.
 - Prefer the host conversation title as your handle. If you can see it and Agent Chat has a provisional handle, call `chat_rename(name: "...")` with that title. When the user asks to rename your session or handle, use `chat_rename`; it keeps your room. For an unnamed task, choose two to four short words about the work, joined with hyphens, for example `PCai-agent-registration`. Never claim to know a title your host has not exposed.
