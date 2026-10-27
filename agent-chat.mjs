@@ -189,12 +189,14 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
       }
       case 'chat_who': return whoText();
       case 'chat_lock': {
-        const { record, renewed } = mailbox.acquireResource(me, args.lock, args.note, args.minutes ?? LOCK_LIMITS.defaultMinutes);
-        return `${renewed ? 'Renewed' : 'Locked'} ${record.resource} until ${new Date(record.expiresAt).toISOString()} and announced it in ${oneLine(me.room.label)}. Call chat_unlock when the operation is finished and verified.`;
+        const { record, renewed, announceError } = mailbox.acquireResource(me, args.lock, args.note, args.minutes ?? LOCK_LIMITS.defaultMinutes);
+        const announced = announceError ? `. The announcement failed (${announceError}): post it with chat_send to all` : ` and announced it in ${oneLine(me.room.label)}`;
+        return `${renewed ? 'Renewed' : 'Locked'} ${record.resource} until ${new Date(record.expiresAt).toISOString()}${announced}. Call chat_unlock when the operation is finished and verified.`;
       }
       case 'chat_unlock': {
         const result = mailbox.releaseResource(me, args.lock, args.note ?? '');
-        return result.released ? `Unlocked ${args.lock}${result.stale ? ' (it had already ended)' : ''} and announced it in ${oneLine(me.room.label)}.` : `${args.lock} was not locked.`;
+        if (!result.released) return `${args.lock} was not locked.`;
+        return `Unlocked ${args.lock}${result.stale ? ' (it had already ended)' : ''}${result.announceError ? `. The announcement failed (${result.announceError}): post it with chat_send to all` : ` and announced it in ${oneLine(me.room.label)}`}.`;
       }
       case 'chat_status': {
         const updated = [];

@@ -137,12 +137,15 @@ test('the guard passes unguarded commands without the mailbox and blocks guarded
   assert.deepEqual(await decide('grunt release:productcontent'), { allow: true, locks: ['publish'] });
   mailbox.releaseResource(me, 'publish');
   assert.equal((await decide('grunt release:productcontent')).allow, false);
-  assert.match((await decide('grunt release', { env: { ...env, AGENT_CHAT_BROKER_URL: 'http://127.0.0.1:1' } })).reason, /not supported in broker mode/);
+  assert.deepEqual(await decide('grunt release', { env: { ...env, AGENT_CHAT_BROKER_URL: 'http://127.0.0.1:1' }, mailbox: untouchable }), { allow: true, unchecked: 'broker' });
+  const padded = await decide(`${' '.repeat(300000)}; grunt release:productcontent`);
+  assert.equal(padded.allow, false);
 
   fs.writeFileSync(path.join(project, GUARD_FILE), 'not json');
   const broken = await decide('git status', { mailbox: untouchable });
   assert.equal(broken.allow, false);
   assert.match(broken.reason, /Fix the guard file/);
+  assert.deepEqual(await decide('cat .agent-chat-guards.json', { mailbox: untouchable }), { allow: true });
 });
 
 test('installed launchers register the guard and block a guarded command through the real hook process', t => {
@@ -168,4 +171,17 @@ test('installed launchers register the guard and block a guarded command through
   bindNotification({ configFile: path.join(project, '.agent-chat/notifications.json'), binding: { client: 'claude-code', hostSessionId: 'host-1', cwd: project, room: room.id, mailboxSessionId: me.sessionId } });
   mailbox.acquireResource(me, 'publish', 'productcontent 2.9.118');
   assert.equal(run('grunt release:productcontent').status, 0);
+});
+
+test('a lock whose announcement fails is still taken and released, and says so', t => {
+  const { mailbox, room, claim } = fixture(t);
+  const one = claim('releaser', 'session-one');
+  const transcript = path.join(mailbox.roomPath(room), 'messages.jsonl');
+  fs.rmSync(transcript, { force: true }); fs.mkdirSync(transcript);
+  const taken = mailbox.acquireResource(one, 'publish', 'release');
+  assert.ok(taken.announceError);
+  assert.equal(mailbox.heldLock('publish').sessionId, 'session-one');
+  const released = mailbox.releaseResource(one, 'publish');
+  assert.deepEqual([released.released, Boolean(released.announceError)], [true, true]);
+  assert.equal(mailbox.heldLock('publish'), null);
 });
