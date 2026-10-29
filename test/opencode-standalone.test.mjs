@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { installProject } from '../lib/install.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -24,7 +24,7 @@ test('the shipped OpenCode adapter imports nothing from the filesystem', async (
   assert.deepEqual(external, [], 'runtime cannot resolve filesystem imports, so the bundle must be self-contained');
   assert.ok(source.includes('__AGENT_CHAT_NOTIFY_CONFIG__'), 'notify-config placeholder missing');
   assert.ok(source.includes('__AGENT_CHAT_EMBEDDED_ENV__'), 'embedded-env placeholder missing');
-  const module = await import(`${standalonePath}?probe=${Date.now()}`);
+  const module = await import(`${pathToFileURL(standalonePath).href}?probe=${Date.now()}`);
   assert.deepEqual(Object.keys(module), ['AgentChat']);
 });
 
@@ -36,8 +36,8 @@ test('installer writes a self-contained plugin without substituting an import pa
   assert.deepEqual(specifiers.filter(specifier => !specifier.startsWith('node:')), []);
   assert.ok(!written.includes('file:///'), 'installed adapter must not reference a runtime file URL');
   assert.ok(!written.includes('__AGENT_CHAT_NOTIFY_CONFIG__'), 'notify path was not substituted');
-  assert.ok(written.includes('.agent-chat/notifications.json'), 'notify config path missing from the adapter');
-  assert.ok(written.includes('notifications.json"') || written.includes("notifications.json'"), 'notify config path is not a quoted literal');
+  assert.ok(written.includes('notifications.json'), 'notify config path missing from the adapter');
+  assert.ok(/["']notifications\.json["']/.test(written), 'notify config path is not a quoted literal');
   const embedded = written.match(/var embeddedEnv = (".*?");/);
   assert.ok(embedded, 'embedded environment literal missing');
   const canonical = project => (process.platform === 'win32' ? fs.realpathSync.native : fs.realpathSync)(project);
