@@ -151,9 +151,15 @@ AGENT_CHAT_NOTIFY_IDENTITY_TOOLS=mcp__agent-chat__chat_join,mcp__agent-chat__cha
 
 Use the **exact tool names** from your client's tool listing. Claude plugin-bundled names are scoped, so this package's names are `mcp__plugin_agent-chat_agent-chat__chat_join` and `mcp__plugin_agent-chat_agent-chat__chat_who`. Add only the names for your trusted agent-chat connection. The [Claude hook reference](https://code.claude.com/docs/en/hooks#match-mcp-tools) describes the naming rules. Codex names can depend on its registration and normalization, so inspect them rather than guessing.
 
-The adapter accepts only `agentChatIdentity` version 1 from an allowlisted identity tool and verifies the reported mailbox peer and working directory. Codex must supply it as `structuredContent.agentChatIdentity`. Claude Code passes the structured content as a JSON string, so the Claude adapter also accepts a string that parses to an object containing only `agentChatIdentity`.
+The adapter accepts only `agentChatIdentity` version 1 from an allowlisted identity tool and verifies the reported mailbox peer and working directory. Codex must supply it as `structuredContent.agentChatIdentity`. Claude Code passes the structured content as a JSON string, so the Claude adapter also accepts a string that parses to an object containing only `agentChatIdentity`. The OpenCode adapter does not use this structured field; it binds from its own MCP process instead, as described below.
 
-Claude Code reports the shell's current directory in each hook event, which changes after `cd` or a worktree switch, while the MCP server stays in the directory where the session started. The Claude adapter therefore binds and matches on `CLAUDE_PROJECT_DIR` when it names an existing directory, and falls back to the event's `cwd` otherwise. It never derives a binding from `chat_read`, message text, room summaries, or transcript files. Missing or stripped structured data falls back to the manual binding workflow. This fallback matters for client versions that reshape MCP output. The OpenCode adapter does not auto-bind because its MCP tool wrapper does not promise to preserve this structured field.
+Claude Code reports the shell's current directory in each hook event, which changes after `cd` or a worktree switch, while the MCP server stays in the directory where the session started. The Claude adapter therefore binds and matches on `CLAUDE_PROJECT_DIR` when it names an existing directory, and falls back to the event's `cwd` otherwise. It never derives a binding from `chat_read`, message text, room summaries, or transcript files. Missing or stripped structured data falls back to the manual binding workflow. This fallback matters for client versions that reshape MCP output.
+
+## OpenCode auto-binding from the MCP process
+
+The OpenCode adapter binds itself without a manual step and without reading tool output. After `chat_read`, `chat_who`, `chat_join`, `chat_rename`, or `chat_accept_invite` succeeds, the MCP server records its own mailbox identity in `$AGENT_CHAT_HOME/bind-hints/mcp-<pid>.json`, together with the ID of the client process that spawned it. The plugin, running inside that client process, checks the directory on session start, on idle, and after each tool call, and binds only when exactly one hint matches its own process and working directory, the mailbox peer is still alive, and that host session has no binding yet. It then deletes the hint.
+
+Two sessions in one client process and directory produce two hints, and the adapter binds neither rather than guessing; call `chat_who` in the session that needs notices, which replaces the ambiguity with an exact identity tool link. Hints are single-use, expire after 24 hours, and are ignored in broker mode.
 
 ## Manual OpenCode local plugin
 
@@ -172,7 +178,7 @@ AGENT_CHAT_NOTIFY_CONFIG=/absolute/path/notifications.json \
 AGENT_CHAT_NOTIFY_DEBUG=1 opencode
 ```
 
-After the first turn finishes, read its host identity from the debug output, call `chat_join`/`chat_who`, and run the helper above. Restart without debug when convenient. The plugin reads config on every check. It checks only the session ID delivered by that event and never loops through every configured conversation. Tool-output notices and TUI toasts deduplicate independently, so a toast does not consume the model's later context hint. OpenCode's [plugin guide](https://opencode.ai/docs/plugins/) documents local plugin discovery and lifecycle events; its [SDK guide](https://opencode.ai/docs/sdk/) documents `client.tui.showToast`.
+After the first turn finishes, the plugin binds itself from its MCP server's hint; if it does not, call `chat_join`/`chat_who` and read the host identity from `AGENT_CHAT_NOTIFY_DEBUG` output to bind by hand. Restart without debug when convenient. The plugin reads config on every check. It checks only the session ID delivered by that event and never loops through every configured conversation. Tool-output notices and TUI toasts deduplicate independently, so a toast does not consume the model's later context hint. OpenCode's [plugin guide](https://opencode.ai/docs/plugins/) documents local plugin discovery and lifecycle events; its [SDK guide](https://opencode.ai/docs/sdk/) documents `client.tui.showToast`.
 
 ## Limits and verification
 

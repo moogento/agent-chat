@@ -4,6 +4,7 @@ import path from 'node:path';
 import { createMailbox } from '../../lib/mailbox.mjs';
 import { createPresence } from '../../lib/presence.mjs';
 import { bindNotification } from '../../hooks/bind.mjs';
+import { scanBindHints, claimBindHint } from '../../lib/bind-hint.mjs';
 import { canonicalCwd, findBinding, notifySession, supportedSessionTitle, syncBoundSessionTitle, registerHostPresence, notifyHostInvitations } from '../../hooks/notifications.mjs';
 import { CHAT_LABEL } from '../../lib/presentation.mjs';
 import { inspectRemoteReplyWait } from '../../lib/broker-client.mjs';
@@ -221,6 +222,26 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
   };
   const notify = (sessionID, deliver) => notifySession({ client: 'opencode', hostSessionId: sessionID,
     cwd: directory, env, mailbox, remoteInspector, deliver });
+  // Bind from the hint its own MCP server wrote, so notices need no identity tool call the host can see.
+  const autoBind = sessionID => {
+    if (!env.AGENT_CHAT_NOTIFY_CONFIG || env.AGENT_CHAT_BROKER_URL) return 'disabled';
+    if (findBinding({ client: 'opencode', hostSessionId: sessionID, cwd: directory, env })) return 'bound';
+    const home = env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat');
+    const hints = scanBindHints({ home, hostPid: process.pid, cwd: directory });
+    if (hints.length !== 1) return hints.length ? 'ambiguous' : 'none';
+    const hint = hints[0];
+    const currentCwd = canonicalCwd(directory);
+    const store = mailbox || createMailbox({ home, cwd: directory });
+    const room = { id: hint.room, label: hint.room };
+    const peer = store.listPeers(room).find(candidate => candidate.sessionId === hint.mailboxSessionId
+      && canonicalCwd(candidate.cwd) === currentCwd && candidate.client.toLowerCase().includes('opencode')
+      && store.isPeerAlive(candidate));
+    if (!peer) return 'peer-missing';
+    bindNotification({ configFile: env.AGENT_CHAT_NOTIFY_CONFIG, binding: { client: 'opencode', hostSessionId: sessionID,
+      cwd: directory, room: hint.room, mailboxSessionId: hint.mailboxSessionId } });
+    claimBindHint({ home, mcpPid: hint.mcpPid });
+    return 'linked';
+  };
   // Returns why a link was skipped; recorded so a host-side failure can be diagnosed without debug logging.
   const linkIdentity = (input, output) => {
     const response = output.output;
@@ -292,6 +313,7 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
       await registerHostPresence({ client: 'opencode', hostSessionId: input.sessionID, cwd: directory,
         activity: 'working', env, mailbox });
       await safely(() => linkIdentityTool(input, { output: text }));
+      await safely(() => autoBind(input.sessionID));
       await safely(() => syncTitle(input.sessionID));
       await safely(() => notifyHostInvitations({ client: 'opencode', hostSessionId: input.sessionID,
         cwd: directory, env, mailbox, deliver: append }));
@@ -303,6 +325,7 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
         if (childSessions.has(sessionID) || closedSessions.has(sessionID)) return;
         if (event.properties.status?.type === 'idle') {
           idleSessions.add(sessionID);
+          await safely(() => autoBind(sessionID));
           await safely(() => checkWatch(sessionID));
           await safely(async () => startMessageWatch(sessionID));
         } else {
@@ -344,6 +367,7 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
           return;
         }
         if (childSessions.has(info.id)) return;
+        await safely(() => autoBind(info.id));
         const title = supportedSessionTitle(info?.title);
         if (title) {
           titles.delete(info.id);
@@ -376,6 +400,7 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
       if (event?.type !== 'session.idle' || typeof event.properties?.sessionID !== 'string'
         || childSessions.has(event.properties.sessionID) || closedSessions.has(event.properties.sessionID)) return;
       idleSessions.add(event.properties.sessionID);
+      await safely(() => autoBind(event.properties.sessionID));
       await safely(() => checkWatch(event.properties.sessionID));
       await safely(async () => startMessageWatch(event.properties.sessionID));
       await registerHostPresence({ client: 'opencode', hostSessionId: event.properties.sessionID, cwd: directory,
