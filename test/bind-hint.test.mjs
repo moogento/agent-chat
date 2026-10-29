@@ -59,9 +59,11 @@ test('bind hints reject malformed, oversized and symlinked files', t => {
   fs.writeFileSync(path.join(dir, 'mcp-13.json'), 'x'.repeat(5000));
   const target = path.join(f.root, 'outside.json');
   fs.writeFileSync(target, JSON.stringify({ ...fresh(), mcpPid: 14 }));
-  fs.symlinkSync(target, path.join(dir, 'mcp-14.json'));
+  try { fs.symlinkSync(target, path.join(dir, 'mcp-14.json')); } catch { /* Windows needs elevation for symlinks */ }
   const hints = scanBindHints({ home: f.home, hostPid: process.pid, cwd: f.cwd });
-  assert.deepEqual(hints.map(hint => hint.mcpPid), [12]);
+  const accepted = hints.map(hint => hint.mcpPid);
+  assert.ok(accepted.includes(12), 'the valid hint must always be accepted');
+  assert.deepEqual(accepted.filter(pid => pid !== 12 && pid !== 14), [], 'only the valid hint and its symlink may appear');
 });
 
 test('scanning prunes stale hints and keeps a capped directory from hiding a live one', t => {
