@@ -25,7 +25,9 @@ test('the shipped OpenCode adapter imports nothing from the filesystem', async (
   assert.ok(source.includes('__AGENT_CHAT_NOTIFY_CONFIG__'), 'notify-config placeholder missing');
   assert.ok(source.includes('__AGENT_CHAT_EMBEDDED_ENV__'), 'embedded-env placeholder missing');
   const module = await import(`${pathToFileURL(standalonePath).href}?probe=${Date.now()}`);
-  assert.deepEqual(Object.keys(module), ['AgentChat']);
+  assert.deepEqual(Object.keys(module), ['AgentChat', 'default']);
+  assert.equal(typeof module.default, 'function', 'the OpenCode loader invokes the default export');
+  assert.equal(module.default, module.AgentChat, 'both exports must reach the same adapter');
 });
 
 test('installer writes a self-contained plugin without substituting an import path', t => {
@@ -46,4 +48,15 @@ test('installer writes a self-contained plugin without substituting an import pa
     AGENT_CHAT_BROKER_TOKEN_FILE: '',
     AGENT_CHAT_ROOM: canonical(f.project),
   });
+});
+
+test('the installed adapter exposes the default export the loader invokes', async t => {
+  const f = fixture(t);
+  installProject({ ...f, clients: ['opencode'], hooks: true });
+  const installed = path.join(f.project, '.opencode/plugins/agent-chat.js');
+  const probe = path.join(f.project, 'agent-chat.plugin.mjs');
+  fs.copyFileSync(installed, probe);
+  const module = await import(`${pathToFileURL(probe).href}?probe=${Date.now()}`);
+  assert.deepEqual(Object.keys(module), ['AgentChat', 'default']);
+  assert.equal(typeof module.default, 'function');
 });

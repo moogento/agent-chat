@@ -22,3 +22,5 @@ function resolvedEnv() {
 }
 
 export const AgentChat = async context => AgentChatPlugin(context, { env: resolvedEnv() });
+
+export default AgentChat;
