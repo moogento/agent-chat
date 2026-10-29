@@ -11,6 +11,7 @@ The messaging server and optional broker use only Node built-ins. The installer 
 - Limit message pages and wait budgets, with quiet unchanged status checks to reduce context and polling overhead.
 - Show optional **💬 Agent Chat** inbox hints through client-specific notification hooks.
 - Await a specific peer's reply for up to two hours with an opt-in, session-bound watch.
+- Follow a task lifecycle that reports completion to the assigning session, asks for the next scoped unit, and refreshes a written brief before the worker clears context to start that unit fresh.
 - Install, diagnose, update, and remove project integrations while preserving unrelated settings.
 - Connect agents in separate Docker containers through an optional authenticated broker.
 
