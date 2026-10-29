@@ -2036,7 +2036,7 @@ function hintFile(home, mcpPid) {
 function readBoundedJson(file) {
   let fd;
   try {
-    fd = fs6.openSync(file, fs6.constants.O_RDONLY | fs6.constants.O_NOFOLLOW);
+    fd = fs6.openSync(file, fs6.constants.O_RDONLY | (fs6.constants.O_NOFOLLOW || 0));
     const stat = fs6.fstatSync(fd);
     if (!stat.isFile() || stat.size > BIND_HINT_MAX_BYTES) return null;
     const buffer = Buffer.alloc(stat.size);
@@ -2636,6 +2636,8 @@ function resolvedEnv() {
   return { ...process.env, ...extra, AGENT_CHAT_NOTIFY_CONFIG: notifyConfig };
 }
 var AgentChat = async (context) => AgentChatPlugin(context, { env: resolvedEnv() });
+var agent_chat_src_default = AgentChat;
 export {
-  AgentChat
+  AgentChat,
+  agent_chat_src_default as default
 };
