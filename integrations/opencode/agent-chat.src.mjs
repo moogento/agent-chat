@@ -6,6 +6,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { AgentChatPlugin } from './agent-chat.mjs';
+import { createV2Plugin } from './v2.mjs';
 
 const embeddedNotifyConfig = '__AGENT_CHAT_NOTIFY_CONFIG__';
 const embeddedEnv = '__AGENT_CHAT_EMBEDDED_ENV__';
@@ -23,4 +24,7 @@ function resolvedEnv() {
 
 export const AgentChat = async context => AgentChatPlugin(context, { env: resolvedEnv() });
 
-export default AgentChat;
+export default {
+  id: 'agent-chat',
+  setup: context => createV2Plugin(context, { env: resolvedEnv() }),
+};

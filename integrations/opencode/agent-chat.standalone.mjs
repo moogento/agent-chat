@@ -1964,10 +1964,19 @@ function bindNotification({ configFile, binding }) {
     fs5.rmSync(lock, { force: true });
   }
 }
+var invokedScript;
 var init_bind = __esm({
   "hooks/bind.mjs"() {
     init_notifications();
-    if (process.argv[1] && fs5.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+    invokedScript = (() => {
+      if (!process.argv[1]) return null;
+      try {
+        return fs5.realpathSync(process.argv[1]);
+      } catch {
+        return null;
+      }
+    })();
+    if (invokedScript === fileURLToPath(import.meta.url)) {
       try {
         const flags = {};
         for (let index = 2; index < process.argv.length; index += 2) {
@@ -2626,6 +2635,60 @@ var AgentChatPlugin = async ({ client, directory }, options = {}) => {
   };
 };
 
+// integrations/opencode/v2.mjs
+var EVENT_TYPES = ["session.created", "session.updated", "session.deleted", "session.status", "session.idle", "message.updated"];
+var warn = (message) => {
+  console.warn(`[agent-chat] ${message}`);
+};
+var disposable = (value) => {
+  if (typeof value === "function") return value;
+  if (value && typeof value.dispose === "function") return () => value.dispose();
+  return () => {
+  };
+};
+var mutableResult = (payload) => {
+  if (payload?.status !== "completed" || !payload.result) return null;
+  if (Array.isArray(payload.result.content)) return { field: "content", value: { content: payload.result.content } };
+  if (typeof payload.result.output === "string") return { field: "output", value: { output: payload.result.output } };
+  return null;
+};
+var createV2Client = (ctx) => ({
+  session: {
+    get: async ({ path: { id } }) => ({ data: await ctx.session.get({ sessionID: id }) }),
+    // The V2 prompt call starts a turn and may resolve only when that turn ends, so the wake must not be awaited.
+    promptAsync: async ({ path: { id }, body }) => {
+      const pending = ctx.session.prompt({ sessionID: id, ...body });
+      if (pending && typeof pending.then === "function") {
+        pending.then(() => {
+        }, (error) => warn(`wake prompt failed: ${error?.message || error}`));
+      }
+      return { data: true };
+    }
+  }
+});
+var createV2Plugin = async (ctx, options = {}) => {
+  const directory = ctx?.location?.directory || ctx?.worktree || process.cwd();
+  const hooks = await AgentChatPlugin({ client: createV2Client(ctx), directory }, options);
+  const cleanups = [
+    disposable(await ctx.event.subscribe({ types: EVENT_TYPES }, (event) => hooks.event({ event }))),
+    disposable(await ctx.tool.hook("execute.after", async (payload) => {
+      const target = mutableResult(payload);
+      if (!target) return;
+      await hooks["tool.execute.after"]({ sessionID: payload.sessionID, tool: payload.tool }, target.value);
+      payload.result[target.field] = target.value[target.field];
+    }))
+  ];
+  return () => {
+    for (const cleanup of cleanups) {
+      try {
+        cleanup();
+      } catch (error) {
+        warn(`cleanup failed: ${error?.message || error}`);
+      }
+    }
+  };
+};
+
 // integrations/opencode/agent-chat.src.mjs
 var embeddedNotifyConfig = "__AGENT_CHAT_NOTIFY_CONFIG__";
 var embeddedEnv = "__AGENT_CHAT_EMBEDDED_ENV__";
@@ -2636,7 +2699,10 @@ function resolvedEnv() {
   return { ...process.env, ...extra, AGENT_CHAT_NOTIFY_CONFIG: notifyConfig };
 }
 var AgentChat = async (context) => AgentChatPlugin(context, { env: resolvedEnv() });
-var agent_chat_src_default = AgentChat;
+var agent_chat_src_default = {
+  id: "agent-chat",
+  setup: (context) => createV2Plugin(context, { env: resolvedEnv() })
+};
 export {
   AgentChat,
   agent_chat_src_default as default
