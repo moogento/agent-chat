@@ -26,8 +26,20 @@ test('the shipped OpenCode adapter imports nothing from the filesystem', async (
   assert.ok(source.includes('__AGENT_CHAT_EMBEDDED_ENV__'), 'embedded-env placeholder missing');
   const module = await import(`${pathToFileURL(standalonePath).href}?probe=${Date.now()}`);
   assert.deepEqual(Object.keys(module), ['AgentChat', 'default']);
-  assert.equal(typeof module.default, 'function', 'the OpenCode loader invokes the default export');
-  assert.equal(module.default, module.AgentChat, 'both exports must reach the same adapter');
+  assert.equal(typeof module.default.id, 'string', 'the loader requires a non-empty id');
+  assert.ok(module.default.id.length > 0);
+  assert.equal(typeof module.default.setup, 'function', 'OpenCode 2.x calls setup(), not the module function');
+});
+
+test('the bundle still imports when argv[1] is a path the host only invents', async () => {
+  const previous = process.argv[1];
+  process.argv[1] = process.platform === 'win32' ? 'C:\\$bunfs\\root\\opencode' : '/$bunfs/root/opencode';
+  try {
+    const module = await import(`${pathToFileURL(standalonePath).href}?argv=${Date.now()}`);
+    assert.equal(typeof module.default.setup, 'function');
+  } finally {
+    process.argv[1] = previous;
+  }
 });
 
 test('installer writes a self-contained plugin without substituting an import path', t => {
@@ -58,5 +70,5 @@ test('the installed adapter exposes the default export the loader invokes', asyn
   fs.copyFileSync(installed, probe);
   const module = await import(`${pathToFileURL(probe).href}?probe=${Date.now()}`);
   assert.deepEqual(Object.keys(module), ['AgentChat', 'default']);
-  assert.equal(typeof module.default, 'function');
+  assert.equal(typeof module.default.setup, 'function');
 });

@@ -435,4 +435,8 @@ export async function cli(argv) {
     default: throw new Error(`Unknown command: ${cmd}. Use --help.`);
   }
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) cli(process.argv.slice(2)).catch((error) => { console.error(error.message || error); process.exitCode = 1; });
+const invokedScript = (() => {
+  if (!process.argv[1]) return null;
+  try { return fs.realpathSync(process.argv[1]); } catch { return null; }
+})();
+if (invokedScript && import.meta.url === pathToFileURL(invokedScript).href) cli(process.argv.slice(2)).catch((error) => { console.error(error.message || error); process.exitCode = 1; });

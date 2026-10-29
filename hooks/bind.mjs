@@ -34,7 +34,13 @@ export function bindNotification({ configFile, binding }) {
   } finally { fs.rmSync(lock, { force: true }); }
 }
 
-if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// A host that imports this file instead of running it (the OpenCode plugin bundle) may pass
+// an argv[1] that does not exist on disk, so an unreadable path must mean "not the entrypoint".
+const invokedScript = (() => {
+  if (!process.argv[1]) return null;
+  try { return fs.realpathSync(process.argv[1]); } catch { return null; }
+})();
+if (invokedScript === fileURLToPath(import.meta.url)) {
   try {
     const flags = {};
     for (let index = 2; index < process.argv.length; index += 2) {
