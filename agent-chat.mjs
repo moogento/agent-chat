@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { createMailbox, safeName, safeSessionId, pidAlive, LIMITS, LOCK_LIMITS } from './lib/mailbox.mjs';
 import { CHAT_LABEL } from './lib/presentation.mjs';
 import { createPresence } from './lib/presence.mjs';
+import { writeBindHint } from './lib/bind-hint.mjs';
 
 export const VERSION = '0.10.0';
 function envValue(name) {
@@ -295,6 +296,13 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
           const me = state.identity;
           const text = await pending;
           const structuredContent = ['chat_join', 'chat_rename', 'chat_who', 'chat_accept_invite'].includes(params.name) && me ? { agentChatIdentity: { version: 1, sessionId: me.sessionId, cwd: me.cwd, room: me.room.id, roomId: me.room.id, roomLabel: me.room.label, name: me.name, ...identityExtras(me) } } : undefined;
+          if (me && !process.env.AGENT_CHAT_BROKER_URL
+            && ['chat_join', 'chat_rename', 'chat_who', 'chat_accept_invite', 'chat_read'].includes(params.name)) {
+            try {
+              writeBindHint({ home: mailbox.home, hostPid: process.ppid, mcpPid: process.pid,
+                cwd: me.cwd, room: me.room.id, mailboxSessionId: me.sessionId, name: me.name });
+            } catch { /* binding is a convenience; a failed hint never fails the tool call */ }
+          }
           return respond({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }], ...(structuredContent ? { structuredContent } : {}) } });
         } catch (error) {
           if (error.code && typeof error.code === 'number') throw error;
