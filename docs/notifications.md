@@ -165,11 +165,7 @@ Two sessions in one client process and directory mean two MCP servers and theref
 
 This is an alternative to the managed OpenCode wrapper. If you used `agent-chat install --clients opencode --hooks`, keep its existing wrapper and use the managed binding steps above; its project-local config path overrides this section's environment example.
 
-Create `.opencode/plugins/agent-chat.js` in the project you want to enable:
-
-```js
-export { AgentChatPlugin } from "/absolute/path/to/agent-chat/integrations/opencode/agent-chat.mjs";
-```
+Create `.opencode/plugins/agent-chat.js` in the project you want to enable by copying `integrations/opencode/agent-chat.standalone.mjs` from this package and replacing `__AGENT_CHAT_NOTIFY_CONFIG__` with the absolute path to that project's `notifications.json`. The bundled file must stay self-contained: the OpenCode desktop runtime cannot import files outside its own bundle, so a plugin file that imports `file:///...` or a relative module loads as nothing at all. Managed installs write this bundle for you.
 
 Keep the full agent-chat checkout or extracted package at that path. Copying only the adapter breaks its relative imports. Start OpenCode with the hook config available in its process environment:
 
