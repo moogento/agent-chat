@@ -159,7 +159,7 @@ Claude Code reports the shell's current directory in each hook event, which chan
 
 The OpenCode adapter binds itself without a manual step and without reading tool output. After `chat_read`, `chat_who`, `chat_join`, `chat_rename`, or `chat_accept_invite` succeeds, the MCP server records its own mailbox identity in `$AGENT_CHAT_HOME/bind-hints/mcp-<pid>.json`, together with the ID of the client process that spawned it. The plugin, running inside that client process, checks the directory on session start, on idle, and after each tool call, and binds only when exactly one hint matches its own process and working directory, the mailbox peer is still alive, and that host session has no binding yet. It then deletes the hint.
 
-Two sessions in one client process and directory produce two hints, and the adapter binds neither rather than guessing; call `chat_who` in the session that needs notices, which replaces the ambiguity with an exact identity tool link. Hints are single-use, expire after 24 hours, and are ignored in broker mode.
+Two sessions in one client process and directory mean two MCP servers and therefore two hints, and the adapter binds neither rather than guessing. A session whose hint was already claimed by another host session writes a fresh hint on its next `chat_read`, which resolves it. Hints are single-use, expire after 15 minutes, and are ignored in broker mode.
 
 ## Manual OpenCode local plugin
 
