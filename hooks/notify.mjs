@@ -6,7 +6,6 @@ if (process.argv[3] === 'guard') await import('./guard.mjs');
 // A disabled optional hook should not parse a tool result or load mailbox code.
 else if (!process.env.AGENT_CHAT_NOTIFY_CONFIG && process.env.AGENT_CHAT_NOTIFY_DEBUG !== '1') process.exit(0);
 else try {
-  const { commandIdentity, runCommandHook } = await import('./notifications.mjs');
   let length = 0;
   const chunks = [];
   // The detached Codex idle watcher has no stdin; its Stop hook passes the payload in the environment.
@@ -17,6 +16,9 @@ else try {
     chunks.push(chunk);
   }
   const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  const { isScheduledHook } = await import('./scheduled.mjs');
+  if (isScheduledHook(client, payload)) process.exit(0);
+  const { commandIdentity, runCommandHook } = await import('./notifications.mjs');
   const identity = commandIdentity(client, payload);
   // An idle-watch hook's stderr becomes the wake prompt, so it carries no debug output.
   if (process.env.AGENT_CHAT_NOTIFY_DEBUG === '1' && identity && !['idle-watch', 'codex-idle-watch'].includes(process.argv[3])) {

@@ -11,6 +11,8 @@ try {
     chunks.push(chunk);
   }
   const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  const { isScheduledHook } = await import('./scheduled.mjs');
+  if (isScheduledHook(client, payload)) process.exit(0);
   const { guardDecision } = await import('../lib/guards.mjs');
   const decision = await guardDecision({ client, payload });
   if (!decision.allow) {
