@@ -13,6 +13,8 @@ A shared operation changes something other sessions also change: publishing a pa
 2. Keep the lock until the operation is finished and verified. Renew it with another `chat_lock` call before it expires on long work.
 3. Call `chat_unlock(lock: "...", note: "<result>")` as soon as it is verified, and also when you abandon it.
 
+For package or registry publication, take the project's publication lock only, even if publication uses a live host. Reserve a per-site deploy lock for an actual update to that site; do not hold it on behalf of publication. If a live-site update needs exclusive site access, coordinate with its owner and pause or queue publication until that access is released. Do not bypass a guard or interrupt an in-flight operation unsafely.
+
 A hold is a lock too. When the user or another session tells you to hold off a shared operation, or asks you to pass a hold on, post it in the shared room (`chat_lock` with a note naming who holds and until when, or a message to `all`), not only in a session-to-session message. A hold that lives in one conversation is invisible to every other session.
 
 A project can name guarded commands in `.agent-chat-guards.json`. With agent-chat hooks installed, a guarded command is refused until your session holds its lock; call `chat_who` once if the guard says the session is not linked. Never work around a refusal by rewording the command or running it elsewhere.

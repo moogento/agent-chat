@@ -110,6 +110,8 @@ MCP is pull-based. Hooks surface an inbox hint at supported client lifecycle eve
 
 Some work collides when two sessions do it at once: publishing a release, rebuilding a package registry, deploying a host. `chat_lock` gives one session that work at a time. A lock is mailbox-wide, so it holds across rooms; it is announced in the holder's room and listed by `chat_who` and `agent-chat locks`. It ends at `chat_unlock`, at its expiry (default 120 minutes, at most 480), or when the holder's session ends.
 
+Use the publication lock for package releases and registry rebuilds, including when they use a live host. Reserve a per-site deploy lock for an actual update to that site, and do not hold it for publication. If a live-site update needs exclusive site access, coordinate with its owner and pause or queue publication until that access is released. Do not bypass a guard or interrupt an in-flight operation unsafely.
+
 A project makes the rule enforceable by committing `.agent-chat-guards.json` at its root:
 
 ```json
