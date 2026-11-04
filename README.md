@@ -112,9 +112,9 @@ Some work collides when two sessions do it at once: publishing a release, rebuil
 
 Use the publication lock for package releases and registry rebuilds, including when they use a live host. Reserve a per-site deploy lock for an actual update to that site, and do not hold it for publication. If a live-site update needs exclusive site access, coordinate with its owner and pause or queue publication until that access is released. Do not bypass a guard or interrupt an in-flight operation unsafely.
 
-Resolve approvals and blocking questions before acquiring a lock where possible. If the protected operation is blocked by an issue, or a blocking question remains unanswered, for more than 10 minutes, record the state, pause safely, and release your own affected locks; do not renew a lock merely to wait. Unrelated work and status checks do not restart that deadline. Before resuming, reacquire the required locks and revalidate the state. If pausing an in-flight operation would create a concrete risk, retain only the necessary protective lock, explain the risk, and perform bounded recovery to a safe pause. This limit applies to blocked or idle work, not an operation making active progress.
+Resolve approvals and blocking questions before acquiring a lock where possible. If the protected operation is blocked by an issue, or a blocking question remains unanswered, for more than 10 minutes, record the state, pause safely, and release your own affected locks; do not renew a lock merely to wait. Unrelated work and status checks do not restart that deadline. Releasing an operational lock does not lift a separate user-requested hold. Record the hold's scope and end condition in a durable room message or status, and honor it until the user lifts it or its stated end condition is met. Before resuming, reacquire the required locks and revalidate the state. If pausing an in-flight operation would create a concrete risk, retain only the necessary protective lock, explain the risk, and perform bounded recovery to a safe pause. This limit applies to blocked or idle work, not an operation making active progress.
 
-A project makes the rule enforceable by committing `.agent-chat-guards.json` at its root:
+A project makes the lock-first rule enforceable by committing `.agent-chat-guards.json` at its root:
 
 ```json
 { "version": 1, "guards": [
