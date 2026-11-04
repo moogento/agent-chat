@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createMailbox, LOCK_LIMITS } from '../lib/mailbox.mjs';
 import { createServer } from '../agent-chat.mjs';
-import { guardDecision, commandText, loadGuards, GUARD_FILE } from '../lib/guards.mjs';
+import { guardDecision, guardLocks, commandText, loadGuards, parseGuards, GUARD_FILE } from '../lib/guards.mjs';
 import { installProject } from '../lib/install.mjs';
 import { bindNotification } from '../hooks/bind.mjs';
 
@@ -146,6 +146,33 @@ test('the guard passes unguarded commands without the mailbox and blocks guarded
   assert.equal(broken.allow, false);
   assert.match(broken.reason, /Fix the guard file/);
   assert.deepEqual(await decide('cat .agent-chat-guards.json', { mailbox: untouchable }), { allow: true });
+});
+
+test('a per-site guard needs the lock for each site the command names and refuses a command that names none', async t => {
+  const { home, project, mailbox, room, claim } = fixture(t);
+  const DEPLOY = [{ lock: 'deploy', siteLock: 'deploy-$<site>', pattern: 'zdd\\.sh\\s+(?:prepare|go|cleanup)\\b', why: 'a deploy changes one docroot',
+    site: ['--site\\s+[\'"]?(?<site>[A-Za-z0-9.-]+)', '--url\\s+[\'"]?https?://(?<site>[A-Za-z0-9.-]+)'] }];
+  writeGuards(project, DEPLOY);
+  const [guard] = loadGuards([project], home);
+  assert.deepEqual(guardLocks(guard, 'zdd.sh prepare --url https://Moogento.com/ --root x'), ['deploy-moogento.com']);
+  assert.deepEqual(guardLocks(guard, 'zdd.sh go --site a.example --site b.example'), ['deploy-a.example', 'deploy-b.example']);
+  assert.deepEqual(guardLocks(guard, 'zdd.sh go --site WWW.Moogento.com --url https://moogento.com'), ['deploy-moogento.com']);
+  assert.deepEqual(guardLocks(guard, 'zdd.sh cleanup --build ~/zdd/x'), []);
+  assert.throws(() => parseGuards({ version: 1, guards: [{ lock: 'deploy', siteLock: 'deploy-$<site>', pattern: 'x' }] }, 'f'), /go together/);
+  assert.throws(() => parseGuards({ version: 1, guards: [{ lock: 'deploy', pattern: 'x', site: ['(?<site>x)'] }] }, 'f'), /go together/);
+  assert.throws(() => parseGuards({ version: 1, guards: [{ lock: 'deploy', siteLock: 'deploy', pattern: 'x', site: ['(?<site>x)'] }] }, 'f'), /one \$<site>/);
+  assert.throws(() => parseGuards({ version: 1, guards: [{ lock: 'deploy', siteLock: 'deploy-$<site>', pattern: 'x', site: ['(x)'] }] }, 'f'), /\(\?<site>/);
+
+  const env = { AGENT_CHAT_HOME: home, AGENT_CHAT_NOTIFY_CONFIG: path.join(home, 'notifications.json') };
+  const decide = command => guardDecision({ client: 'codex', payload: bash(command, { cwd: project }), env, mailbox });
+  const me = claim('deployer', 'mailbox-me'); const other = claim('other', 'mailbox-other');
+  bindNotification({ configFile: env.AGENT_CHAT_NOTIFY_CONFIG, binding: { client: 'codex', hostSessionId: 'host-1', cwd: project, room: room.id, mailboxSessionId: me.sessionId } });
+  assert.match((await decide('bash zdd.sh cleanup --build ~/zdd/x')).reason, /needs a per-site deploy-<site> lock \(a deploy changes one docroot\), but it names no site/);
+  mailbox.acquireResource(other, 'deploy-livefish.com.au', 'notifyme');
+  mailbox.acquireResource(me, 'deploy-moogento.com', 'semanticsearch');
+  assert.deepEqual(await decide('bash zdd.sh go --build x --site moogento.com'), { allow: true, locks: ['deploy-moogento.com'] });
+  assert.match((await decide('bash zdd.sh go --site livefish.com.au')).reason, /deploy-livefish\.com\.au is held by other/);
+  assert.match((await decide('bash zdd.sh go --site moogento.dev')).reason, /Call chat_lock\(lock: "deploy-moogento\.dev"/);
 });
 
 test('installed launchers register the guard and block a guarded command through the real hook process', t => {

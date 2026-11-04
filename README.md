@@ -120,6 +120,15 @@ A project makes the rule enforceable by committing `.agent-chat-guards.json` at 
 
 Each `pattern` is a case-insensitive regular expression tested against the shell command. With hooks installed (`agent-chat install --hooks`), a `PreToolUse` guard refuses a matching command in Claude Code (`Bash` and terminal tools) and Codex until the calling session holds the named lock. Commands that match no guard pass without reading the mailbox. A session must be linked once with `chat_who` before it can pass a guard. The nearest guard file above the session directory applies, together with an optional mailbox-wide `guards.json` in the agent-chat home. A Claude subagent runs under its parent's session and shares its locks. Broker sessions can take locks, but the hook cannot read the broker's mailbox, so in broker mode guarded commands are not enforced. Broker, OpenCode and plugin-only setups follow the skill's lock rule without hook enforcement. A guard file that cannot be read refuses every shell command except ones that name `agent-chat-guards`, so it can be repaired.
 
+A guard can lock one site instead of all of them. Give it a `siteLock` name containing `$<site>` and up to 10 `site` patterns, each with a `(?<site>...)` group that reads the site from the command. Its `lock` stays as the whole-host name that versions before per-site guards enforce, so one guard file works with both:
+
+```json
+{ "lock": "host-deploy", "siteLock": "host-deploy-$<site>", "pattern": "zdd\\.sh\\b[^;&|\\n]*\\s(?:prepare|go|cleanup)\\b",
+  "site": ["--site\\s+['\"]?(?<site>[A-Za-z0-9.-]+)", "--url\\s+['\"]?https?://(?<site>[A-Za-z0-9.-]+)"] }
+```
+
+`zdd.sh go --site example.com` then needs `host-deploy-example.com`, and a deploy on another site runs under its own lock at the same time. A leading `www.` is dropped, so both host forms share one lock. A command that names two sites needs both locks. A matching command that names no readable site is refused with an instruction to name it, so no lock covers every site.
+
 ## Rooms and identities
 
 In local mode, the default room is the current Git worktree, or the current directory outside Git. Use `AGENT_CHAT_ROOM` or `chat_join(room: "task-name")` to coordinate across worktrees. Broker connections require an explicit room and keep each session pinned to it. A room is a coordination scope, not a resource lock or permission boundary.
