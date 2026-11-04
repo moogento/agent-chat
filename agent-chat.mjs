@@ -9,7 +9,7 @@ import { CHAT_LABEL } from './lib/presentation.mjs';
 import { createPresence } from './lib/presence.mjs';
 import { writeBindHint } from './lib/bind-hint.mjs';
 
-export const VERSION = '0.10.0';
+export const VERSION = '0.11.0';
 function envValue(name) {
   const value = process.env[name];
   return value === undefined || !value.trim() ? undefined : value;
