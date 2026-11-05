@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createMailbox } from '../lib/mailbox.mjs';
 import { createServer } from '../agent-chat.mjs';
-import { autoBindCommand, findBinding, runCommandHook } from '../hooks/notifications.mjs';
+import { autoBindCommand, findBinding, notifySession, runCommandHook, waitForReplyAtStop } from '../hooks/notifications.mjs';
 
 function fixture(t) {
   const cwd = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-conversation-')));
@@ -153,6 +153,8 @@ test('an existing exact host binding seeds durable identity during an upgrade', 
   const next = await f.connect('upgrade-provisional');
   await f.bind(next);
   assert.match(await next.server.callTool('chat_who'), /Session: legacy-original/);
+  assert.equal(next.server.state.identity.name, old.name);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.mailbox.roomDir(f.room), 'identities', 'legacy-original.json'))).untilAt, undefined);
   assert.ok(f.mailbox.takeUnread(next.server.state.identity).messages.some(message => message.text === 'retained upgrade inbox'));
 });
 
@@ -223,4 +225,87 @@ test('a verified legacy peer without routing records can enroll durably', t => {
     room: f.room, sessionId: legacy.sessionId });
   assert.equal(bound.sessionId, legacy.sessionId);
   assert.equal(bound.persistent, true);
+});
+
+test('harmless lookups before identity verification do not prevent reconnect', async t => {
+  const f = fixture(t);
+  const first = await f.connect('first');
+  await f.bind(first);
+  first.server.stop();
+  const next = await f.connect('next');
+  for (const name of ['chat_presence', 'chat_rooms', 'chat_invitations', 'chat_wait_status']) await next.server.callTool(name);
+  await f.bind(next);
+  assert.match(await next.server.callTool('chat_who'), /Session: first/);
+});
+
+test('offline notices restore identity first without deduplicating unread mail', async t => {
+  const f = fixture(t);
+  const first = await f.connect('first');
+  await f.bind(first);
+  const old = first.server.state.identity;
+  f.mailbox.appendMessage(f.room, 'sender', old.name, 'offline message', 'sender');
+  first.server.stop();
+  const peerFile = path.join(f.mailbox.roomDir(f.room), 'peers', `${old.name}.json`);
+  const detached = JSON.parse(fs.readFileSync(peerFile));
+  fs.writeFileSync(peerFile, JSON.stringify({ ...detached, lastSeen: '2000-01-01T00:00:00Z' }));
+  const next = await f.connect('next');
+  const notices = [];
+  const notify = () => notifySession({ client: 'codex', hostSessionId: 'same-host-conversation', cwd: f.cwd,
+    env: f.env, mailbox: f.mailbox, deliver: text => notices.push(text) });
+  assert.equal((await notify()).reason, 'reconnect-required');
+  assert.match(notices.at(-1), /Call chat_who first/);
+  assert.deepEqual(fs.readdirSync(path.join(f.home, 'notifications')), []);
+  assert.equal((await notify()).reason, 'reconnect-required');
+  await f.bind(next);
+  assert.equal((await notify()).delivered, true);
+  assert.match(notices.at(-1), /Call chat_read now/);
+  assert.match(await next.server.callTool('chat_read'), /offline message/);
+});
+
+test('offline reply-watch continuations restore identity before reading the watch', async t => {
+  const f = fixture(t);
+  const first = await f.connect('first');
+  await f.bind(first);
+  const peer = f.mailbox.claimIdentity(f.room, 'peer', 'claude-code', 'peer');
+  await first.server.callTool('chat_send', { to: peer.name, text: 'reply please', await_reply_minutes: 1 });
+  const watchId = f.mailbox.replyWaitStatus(first.server.state.identity).watchId;
+  first.server.stop();
+  const notices = [];
+  const result = await waitForReplyAtStop({ identity: { client: 'codex', hostSessionId: 'same-host-conversation', cwd: f.cwd },
+    env: f.env, mailbox: f.mailbox, write: text => notices.push(JSON.parse(text)) });
+  assert.equal(result.state, 'reconnect-required');
+  assert.match(notices[0].reason, /Call chat_who first/);
+  assert.equal(f.mailbox.replyWaitStatus({ room: f.room, sessionId: 'first' }).watchId, watchId);
+});
+
+test('a different host receives a recovery notice without inheriting the original conversation', async t => {
+  const f = fixture(t);
+  const first = await f.connect('first');
+  await f.bind(first);
+  const notices = [];
+  const result = await runCommandHook({ client: 'codex', payload: { hook_event_name: 'PostToolUse',
+    session_id: 'another-host', cwd: f.cwd, model: 'gpt-6.1-sol', tool_name: 'mcp__agent-chat__chat_who',
+    tool_response: first.response }, env: f.env, mailbox: f.mailbox, write: text => notices.push(JSON.parse(text)) });
+  assert.equal(result.reason, 'binding-refused');
+  assert.match(notices[0].hookSpecificOutput.additionalContext, /Reconnect a separate MCP connection/);
+  assert.equal(findBinding({ client: 'codex', hostSessionId: 'another-host', cwd: f.cwd, env: f.env }), null);
+  assert.equal(findBinding({ client: 'codex', hostSessionId: 'same-host-conversation', cwd: f.cwd, env: f.env }).mailboxSessionId, 'first');
+  assert.match(await first.server.callTool('chat_who'), /Session: first/);
+});
+
+test('mail notified before disconnection still requests identity restoration until read', async t => {
+  const f = fixture(t);
+  const first = await f.connect('first');
+  await f.bind(first);
+  f.mailbox.appendMessage(f.room, 'sender', first.server.state.identity.name, 'notified but unread', 'sender');
+  const notices = [];
+  const notify = () => notifySession({ client: 'codex', hostSessionId: 'same-host-conversation', cwd: f.cwd,
+    env: f.env, mailbox: f.mailbox, deliver: text => notices.push(text) });
+  assert.equal((await notify()).delivered, true);
+  const files = fs.readdirSync(path.join(f.home, 'notifications'));
+  const before = files.map(file => fs.readFileSync(path.join(f.home, 'notifications', file), 'utf8'));
+  first.server.stop();
+  assert.equal((await notify()).reason, 'reconnect-required');
+  assert.match(notices.at(-1), /Call chat_who first/);
+  assert.deepEqual(files.map(file => fs.readFileSync(path.join(f.home, 'notifications', file), 'utf8')), before);
 });

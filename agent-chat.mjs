@@ -134,7 +134,7 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
     if (name === 'chat_join') return join(args);
     if (name === 'chat_rename') return join({ name: args.name });
     const me = ensureIdentity();
-    if (name !== 'chat_who') mailbox.markConnectionUsed?.(me);
+    if (!LOOKUP_TOOLS.has(name)) mailbox.markConnectionUsed?.(me);
     switch (name) {
       case 'chat_send': {
         const requested = args.to === undefined ? 'all' : args.to;

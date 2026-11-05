@@ -297,17 +297,21 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
   const linkIdentityTool = (input, output) => {
     if (!env.AGENT_CHAT_NOTIFY_CONFIG || env.AGENT_CHAT_BROKER_URL
       || !['agent-chat_chat_who', 'agent-chat_chat_join', 'agent-chat_chat_rename', 'agent-chat_chat_accept_invite'].includes(input.tool)) return;
-    let reason;
-    try { reason = linkIdentity(input, output); } catch (error) { reason = `error: ${String(error?.message).slice(0, 200)}`; }
+    let reason; let failure;
+    try { reason = linkIdentity(input, output); } catch (error) { failure = error; reason = `error: ${String(error?.message).slice(0, 200)}`; }
     try {
       const dir = path.join(path.dirname(env.AGENT_CHAT_NOTIFY_CONFIG), 'notification-state');
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       fs.writeFileSync(path.join(dir, 'opencode-link.json'), JSON.stringify({ at: new Date().toISOString(), tool: input.tool,
         hostSessionId: input.sessionID, directory, reason }) + '\n', { mode: 0o600 });
     } catch { /* diagnostics only */ }
+    if (failure?.code === 'AGENT_CHAT_BIND_REFUSED') throw failure;
   };
   const safely = async operation => {
     try { await operation(); } catch (error) {
+      if (error.code === 'AGENT_CHAT_BIND_REFUSED') {
+        try { await showWakeFallback(undefined, error.message); } catch { /* optional notice */ }
+      }
       if (env.AGENT_CHAT_NOTIFY_DEBUG === '1') console.error(`agent-chat OpenCode hook: ${error.message}`);
     }
   };
