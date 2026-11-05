@@ -551,9 +551,13 @@ test('initialization preserves configured agent types and upgrades qualified unk
 
 test('old proxy provisional handles migrate on creation without a duplicated prefix', async t => {
   const f=await fixture(t),token=fs.readFileSync(f.tokenFile,'utf8');
-  const response=await raw(f.broker.url,'/v1/sessions',token,{room:'shared',name:'codex-agent-chat-a1b2c3',client:'codex',clientCwd:'/remote/worktree/pr28'});
+  const response=await raw(f.broker.url,'/v1/sessions',token,{room:'shared',name:'codex-agent-chat-a1b2c3',client:'codex',clientCwd:'/remote/worktree/pr28',resumable:true});
   assert.equal(response.status,201);
-  assert.match((await response.json()).peer.name,/^codex-agentchat-untitled-[a-f0-9]{6}$/);
+  const old=await response.json();
+  assert.match(old.peer.name,/^codex-agentchat-untitled-[a-f0-9]{6}$/);
+  const session={...old,url:f.broker.url,repo:'m2moo'};
+  await closeRemoteSession(session);
+  assert.equal((await resumeRemoteSession(session)).peer.name,old.peer.name.replace('codex-agentchat-','codex-m2moo-'));
 });
 
 test('updated clients retry session creation once without repo for an older broker', async t => {
