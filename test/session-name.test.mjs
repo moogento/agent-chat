@@ -132,3 +132,59 @@ test('held locks show the current canonical owner after a title change', t => {
   assert.throws(() => mailbox.acquireResource(other, 'runtime', 'another update'), /held by codex-m2moo-reviewpr4649/);
   assert.equal(mailbox.releaseResource(renamed, 'runtime').released, true);
 });
+
+test('unknown punctuation recipients never resolve to an untitled session', t => {
+  const {mailbox,cwd}=fixture(t), room=mailbox.resolveRoom('names');
+  const peer=mailbox.claimIdentity(room,sessionName({client:'codex',cwd,sessionId:'untitled'}),'codex','untitled');
+  assert.equal(mailbox.resolveRecipient(room,'---'),null);
+  assert.equal(mailbox.resolveRecipient(room,'レビュー'),null);
+  assert.equal(mailbox.resolveRecipient(room,peer.name).sessionId,peer.sessionId);
+});
+
+test('full identifiers normalize punctuation and cannot omit the title', () => {
+  const args={client:'codex',repo:'m2moo',sessionId:'same'};
+  assert.equal(sessionName({...args,title:'codex-m2moo-Review-PR-4649'}),'codex-m2moo-reviewpr4649');
+  assert.match(sessionName({...args,title:'codex-m2moo-'}),/^codex-m2moo-untitled-[a-f0-9]{6}$/);
+});
+
+test('automatic title sync caps legacy runtimes and a reconnect enables long names', t => {
+  const {mailbox,cwd}=fixture(t), room=mailbox.resolveRoom('names');
+  let peer=mailbox.claimIdentity(room,'legacy','opencode','legacy-runtime');
+  const file=path.join(mailbox.roomPath(room),'peers',`${peer.name}.json`);
+  const stored=JSON.parse(fs.readFileSync(file));delete stored.nameLimit;fs.writeFileSync(file,JSON.stringify(stored));
+  const input={room,sessionId:peer.sessionId,client:peer.client,cwd,title:'Review code and plugin options in a long session'};
+  peer=mailbox.syncSessionTitle(input);
+  assert.equal(peer.nameLimit,40);assert.equal(peer.name.length,40);
+  mailbox.updatePeer(peer,{task:'still active'});
+  peer=mailbox.claimIdentity(room,peer.name,peer.client,peer.sessionId);
+  assert.equal(peer.nameLimit,120);
+  peer=mailbox.syncSessionTitle(input);assert.ok(peer.name.length>40);
+});
+
+test('canonical pinned handles survive missing worktrees and Git', t => {
+  const {mailbox,cwd}=fixture(t),room=mailbox.resolveRoom('names');
+  const peer=mailbox.claimIdentity(room,'codex-m2moo-review','codex','pinned',{nameSource:'explicit'});
+  fs.rmSync(cwd,{recursive:true});
+  const updated=mailbox.syncSessionTitle({room,sessionId:peer.sessionId,client:peer.client,cwd,title:'Different host title'});
+  assert.equal(updated.name,peer.name);
+});
+
+test('a unique title shorthand can still target a released session', t => {
+  const {mailbox}=fixture(t),room=mailbox.resolveRoom('names');
+  const peer=mailbox.claimIdentity(room,'codex-m2moo-review','codex','released');
+  mailbox.releaseIdentity(peer);
+  assert.equal(mailbox.resolveRecipient(room,'review').sessionId,peer.sessionId);
+});
+
+test('bare repository worktrees and symlinked directories use the repository identity', t => {
+  const {directory,cwd}=fixture(t);
+  const git=(...args)=>execFileSync('git',args,{encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
+  git('-C',cwd,'init','-q');
+  git('-C',cwd,'-c','user.name=Test','-c','user.email=test@example.invalid','-c','commit.gpgsign=false','commit','--allow-empty','-qm','fixture');
+  const bare=path.join(directory,'parent.git');git('clone','--bare',cwd,bare);
+  const worktree=path.join(directory,'pr-1');git('--git-dir',bare,'worktree','add','--detach',worktree);
+  assert.equal(sessionName({client:'codex',cwd:worktree,title:'Review'}),'codex-parent-review');
+  const link=path.join(directory,'different-name');
+  fs.symlinkSync(cwd,link,process.platform==='win32'?'junction':'dir');
+  assert.equal(sessionName({client:'codex',cwd:link,title:'Review'}),'codex-m2moo-review');
+});

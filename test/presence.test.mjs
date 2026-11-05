@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createMailbox } from '../lib/mailbox.mjs';
 import { createPresence } from '../lib/presence.mjs';
+import { sessionName } from '../lib/session-name.mjs';
 import { createServer } from '../agent-chat.mjs';
 
 function fixture(t) {
@@ -65,10 +66,10 @@ test('same-repo unlinked MCP peers are grouped without guessing host identity', 
   first.state.client = 'codex-mcp-client'; second.state.client = 'codex-mcp-client';
   await first.callTool('chat_who'); await second.callTool('chat_who');
   const output = await first.callTool('chat_presence');
-  assert.match(output, /codex-agentchat-firsttask.*host not linked/);
-  assert.match(output, /codex-agentchat-secondtask.*host not linked/);
+  assert.match(output, new RegExp(`${sessionName({client:'codex',cwd:process.cwd(),title:'first task'})}.*host not linked`));
+  assert.match(output, new RegExp(`${sessionName({client:'codex',cwd:process.cwd(),title:'second task'})}.*host not linked`));
   assert.equal((output.match(/Unlinked MCP connections/g) || []).length, 1);
-  assert.match(output, /peer-first|peer-second|codex-agentchat/);
+  assert.match(output, /peer-first|peer-second|codex-/);
   assert.equal(presence.linkedHostIds(first.state.identity.room, first.state.identity.sessionId).length, 0);
 });
 
@@ -180,4 +181,16 @@ test('a stale linked host prevents a newer host invitation being claimed by anot
   await sender.callTool('chat_invite', { to_id: newer.id });
   assert.equal(await receiver.callTool('chat_invitations'), 'No pending invitations.');
   assert.equal(presence.linkedHostIds(receiver.state.identity.room, receiver.state.identity.sessionId).length, 0);
+});
+
+test('pre-upgrade presence names and repository caches refresh without a new title', t => {
+  const {home,presence}=fixture(t);
+  const host=presence.registerHost({client:'codex',hostSessionId:'legacy-cache',cwd:process.cwd(),title:'Review code'});
+  const file=path.join(home,'presence','registry.json');
+  const registry=JSON.parse(fs.readFileSync(file));
+  const stored=registry.hosts.find(x=>x.id===host.id);delete stored.namingVersion;stored.repo='/old/worktree/pr-1';stored.name='Review-code';
+  fs.writeFileSync(file,JSON.stringify(registry));
+  const updated=presence.registerHost({client:'codex',hostSessionId:'legacy-cache',cwd:process.cwd()});
+  assert.equal(updated.name,sessionName({client:'codex',cwd:process.cwd(),title:'Review code'}));
+  assert.equal(updated.namingVersion,1);
 });

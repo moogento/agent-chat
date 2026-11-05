@@ -7,8 +7,11 @@ import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
+import { remoteRepo, sessionRepo } from '../lib/session-name.mjs';
 import { createMailbox, LIMITS } from '../lib/mailbox.mjs';
 import { createServer } from '../agent-chat.mjs';
+
+const testRepo = remoteRepo(sessionRepo(process.cwd()));
 
 function fixture(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-core-'));
@@ -517,9 +520,9 @@ test('pending reads retain old identity and stop safely on rename and join', asy
 
 test('repeated joins preserve a suffixed identity, status and pending read', async (t) => {
   const { mailbox, room } = fixture(t); const { server } = serverFor(t, mailbox);
-  const builder = mailbox.claimIdentity(room, 'unknown-agentchat-builder');
+  const builder = mailbox.claimIdentity(room, `unknown-${testRepo}-builder`);
   await server.callTool('chat_join', { name: 'builder', room: room.id });
-  const identity = server.state.identity; assert.equal(identity.name, 'unknown-agentchat-builder-2');
+  const identity = server.state.identity; assert.equal(identity.name, `unknown-${testRepo}-builder-2`);
   await server.callTool('chat_status', { mine: 'working' });
   const pending = server.callTool('chat_read', { wait_seconds: 2 });
   await server.callTool('chat_join', { name: 'builder', room: room.id });
@@ -542,7 +545,7 @@ test('explicitly joining with the current handle pins it against later title cha
   await server.callTool('chat_join', { name: 'claude' });
   assert.equal(server.state.identity.nameSource, 'explicit');
   mailbox.syncSessionTitle({ room, sessionId: server.state.identity.sessionId, title: 'New host title', client: server.state.client, cwd: server.state.identity.cwd });
-  assert.match(await server.callTool('chat_who'), /You are "claude-agentchat-claude"/);
+  assert.match(await server.callTool('chat_who'), new RegExp(`You are "claude-${testRepo}-claude"`));
 });
 
 test('stopping after a host title rename removes the current peer record', async t => {
@@ -572,8 +575,8 @@ test('chat_join refreshes the current handle after a hook title rename', async t
   server.state.client = 'claude-mcp-client';
   await server.callTool('chat_who');
   mailbox.syncSessionTitle({ room, sessionId: server.state.identity.sessionId, title: 'renamed-title', client: server.state.client, cwd: server.state.identity.cwd });
-  assert.match(await server.callTool('chat_join', {}), /You are "claude-agentchat-renamedtitle"/);
-  assert.equal(server.state.identity.name, 'claude-agentchat-renamedtitle');
+  assert.match(await server.callTool('chat_join', {}), new RegExp(`You are "claude-${testRepo}-renamedtitle"`));
+  assert.equal(server.state.identity.name, `claude-${testRepo}-renamedtitle`);
 });
 
 test('cancelled pending read does not consume messages', async (t) => {
@@ -736,10 +739,10 @@ test('chat_rename changes only the handle, keeps the room and session, and route
   for (const item of [renamed, sender]) await item.server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'opencode' } } });
   await renamed.server.handle({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'chat_rename', arguments: { name: 'deepseek' } } });
   const result = renamed.responses.find(response => response.id === 2).result;
-  assert.match(result.content[0].text, /^You are "opencode-agentchat-deepseek" in room rename-room/);
-  assert.equal(result.structuredContent.agentChatIdentity.name, 'opencode-agentchat-deepseek');
+  assert.match(result.content[0].text, new RegExp(`^You are "opencode-${testRepo}-deepseek" in room rename-room`));
+  assert.equal(result.structuredContent.agentChatIdentity.name, `opencode-${testRepo}-deepseek`);
   assert.equal(result.structuredContent.agentChatIdentity.sessionId, 'rename-session');
-  await sender.server.callTool('chat_send', { to: 'opencode-agentchat-opencodem2moo3dc651', text: 'to the old handle' });
+  await sender.server.callTool('chat_send', { to: `opencode-${testRepo}-opencodem2moo3dc651`, text: 'to the old handle' });
   assert.match(await renamed.server.callTool('chat_read'), /to the old handle/);
   await renamed.server.handle({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'chat_rename', arguments: {} } });
   assert.equal(renamed.responses.find(response => response.id === 3).error.code, -32602);

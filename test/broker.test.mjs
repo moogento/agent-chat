@@ -505,3 +505,32 @@ test('Linux private launch locks distinguish replacement containers reusing a li
   const session = await f.make('replacement', 'shared', { sessionFile });
   await closeRemoteSession(session); assert.ok(!fs.existsSync(sessionFile + '.lock'));
 });
+
+test('broker uses client repository metadata for foreign paths, renames, and resume', async t => {
+  const f=await fixture(t);
+  const clientCwd='C:\\repos\\worktrees\\pr-4649-review';
+  const session=await f.make('unknown-m2moo-reviewpr4649','shared',{repo:'m2moo',client:'unknown',clientCwd,resumable:true});
+  let result=await remoteRpc(session,{jsonrpc:'2.0',id:900001,method:'initialize',params:{clientInfo:{name:'claude-code'}}});
+  await acknowledgeRemoteResponse(session,result.receipt);
+  assert.match((await call(session,'chat_who')).text,/claude-m2moo-reviewpr4649/);
+  await call(session,'chat_rename',{name:'Review code and plugin options'});
+  const renamed=(await call(session,'chat_who')).response.result.structuredContent.agentChatIdentity.name;
+  assert.equal(renamed,'claude-m2moo-reviewcodeandpluginoptions');
+  const saved=JSON.parse(fs.readFileSync(path.join(f.home,'.broker-sessions',`${session.sessionId}.json`)));
+  assert.equal(saved.client,'claude-code');assert.equal(saved.repo,'m2moo');
+  assert.equal((await inspectRemoteNotifications({url:f.broker.url,tokenFile:f.tokenFile,room:'shared',sessionId:session.sessionId,sessionDir:f.creds})).peer.clientCwd,clientCwd);
+  await closeRemoteSession(session);
+  const resumed=await resumeRemoteSession(session);assert.equal(resumed.peer.name,renamed);
+  const master=fs.readFileSync(f.tokenFile,'utf8');
+  assert.equal((await raw(f.broker.url,'/v1/sessions',master,{room:'shared',client:'codex',clientCwd,repo:'../bad'})).status,400);
+});
+
+test('legacy broker provisional names migrate to a repository-qualified untitled name', async t => {
+  const f=await fixture(t);
+  const session=await f.make('old','shared',{client:'codex',resumable:true});
+  await closeRemoteSession(session);
+  const file=path.join(f.home,'.broker-sessions',`${session.sessionId}.json`);
+  const record=JSON.parse(fs.readFileSync(file));delete record.repo;record.name='codex-agent-chat-a1b2c3';fs.writeFileSync(file,JSON.stringify(record));
+  const resumed=await resumeRemoteSession(session);
+  assert.match(resumed.peer.name,/^codex-agentchat-untitled-[a-f0-9]{6}$/);
+});
