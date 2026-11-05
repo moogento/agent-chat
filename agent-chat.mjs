@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 // A dependency-free local MCP mailbox and CLI.
 import fs from 'node:fs';
-import path from 'node:path';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { createMailbox, safeName, safeSessionId, pidAlive, LIMITS, LOCK_LIMITS } from './lib/mailbox.mjs';
@@ -277,14 +276,15 @@ export function createServer({ mailbox = createMailbox(), output = (obj) => proc
       }
       const params = req.params || {};
       if (req.method === 'initialize') {
-        if (params.clientInfo !== undefined && (!object(params.clientInfo) || typeof params.clientInfo.name !== 'string')) throw protocolError('clientInfo.name must be a string');
+        if (params.clientInfo !== undefined && (!object(params.clientInfo) || (typeof params.clientInfo.name !== 'string' || params.clientInfo.name.length > 128 || /[\x00-\x1f\x7f]/.test(params.clientInfo.name)))) throw protocolError('clientInfo.name must be a string of at most 128 characters without controls');
         if (params.protocolVersion !== undefined && typeof params.protocolVersion !== 'string') throw protocolError('protocolVersion must be a string');
-        state.client = params.clientInfo?.name || 'unknown';
+        const reportedClient = params.clientInfo?.name || 'unknown';
+        if (agentType(reportedClient) !== 'unknown' || agentType(state.client) === 'unknown') state.client = reportedClient;
         try {
           const previous = refreshIdentity();
-          if (previous && agentType(previous.client) !== agentType(state.client)) {
+          if (previous && agentType(state.client) !== 'unknown' && agentType(previous.client) !== agentType(state.client)) {
             const parsed = parseSessionName(previous.name);
-            const title = parsed?.title.startsWith('untitled-') ? undefined : parsed?.title || previous.sessionTitle || nameSpec;
+            const title = parsed?.title.startsWith('untitled-') ? undefined : parsed ? previous.name : previous.sessionTitle || nameSpec;
             state.identity = mailbox.claimIdentity(previous.room, sessionName({ client: state.client, repo: namingRepo, title, sessionId }), state.client, sessionId, previous);
           }
           ensureIdentity();

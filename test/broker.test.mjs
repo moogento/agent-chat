@@ -48,7 +48,7 @@ test('unique session credentials isolate directed messages and notification insp
   const alice = await f.make('alice'); const bob = await f.make('bob'); const bob2 = await f.make('bob');
   assert.notEqual(alice.sessionId, bob.sessionId); assert.notEqual(alice.sessionToken, bob.sessionToken);
   assert.match((await call(bob2, 'chat_who')).text, /bob-2/);
-  await call(alice, 'chat_send', { to: 'bob', text: 'PRIVATE PAYLOAD' });
+  await call(alice, 'chat_send', { to: bob.peer.name, text: 'PRIVATE PAYLOAD' });
   const info = await inspectRemoteNotifications({ url: f.broker.url, tokenFile: f.tokenFile, room: 'shared', sessionId: bob.sessionId, sessionDir: f.creds });
   assert.equal(info.messages.length, 1); assert.deepEqual(Object.keys(info.messages[0]), ['id', 'directed']); assert.equal(info.messages[0].directed, true); assert.equal(info.peer.clientCwd, f.base);
   assert.doesNotMatch(JSON.stringify(info), /PRIVATE PAYLOAD/);
@@ -533,4 +533,42 @@ test('legacy broker provisional names migrate to a repository-qualified untitled
   const record=JSON.parse(fs.readFileSync(file));delete record.repo;record.name='codex-agent-chat-a1b2c3';fs.writeFileSync(file,JSON.stringify(record));
   const resumed=await resumeRemoteSession(session);
   assert.match(resumed.peer.name,/^codex-agentchat-untitled-[a-f0-9]{6}$/);
+});
+
+test('initialization preserves configured agent types and upgrades qualified unknown names', async t => {
+  const f=await fixture(t);
+  const session=await f.make('claude-m2moo-review-2','shared',{repo:'m2moo',client:'unknown',resumable:true});
+  const initialize=async name=>{const r=await remoteRpc(session,{jsonrpc:'2.0',id:900002,method:'initialize',params:{clientInfo:{name}}});await acknowledgeRemoteResponse(session,r.receipt);return r;};
+  await initialize('claude-code');
+  assert.match((await call(session,'chat_who')).text,/claude-m2moo-review-2/);
+  await initialize('custom-host');
+  assert.match((await call(session,'chat_who')).text,/claude-m2moo-review-2/);
+  const oversized=await initialize('x'.repeat(9000));assert.equal(oversized.responses[0].error.code,-32602);
+  await closeRemoteSession(session);
+  assert.equal((await resumeRemoteSession(session)).peer.name,'claude-m2moo-review-2');
+});
+
+test('old proxy provisional handles migrate on creation without a duplicated prefix', async t => {
+  const f=await fixture(t),token=fs.readFileSync(f.tokenFile,'utf8');
+  const response=await raw(f.broker.url,'/v1/sessions',token,{room:'shared',name:'codex-agent-chat-a1b2c3',client:'codex',clientCwd:'/remote/worktree/pr28'});
+  assert.equal(response.status,201);
+  assert.match((await response.json()).peer.name,/^codex-agentchat-untitled-[a-f0-9]{6}$/);
+});
+
+test('updated clients retry session creation once without repo for an older broker', async t => {
+  const f=await fixture(t),http=await import('node:http');
+  const requests=[];
+  const server=http.createServer(async(req,res)=>{
+    const chunks=[];for await(const chunk of req)chunks.push(chunk);
+    const body=JSON.parse(Buffer.concat(chunks).toString()||'{}');
+    if(req.url!=='/v1/sessions'){res.writeHead(200,{'Content-Type':'application/json'});res.end('{}');return;}
+    requests.push(body);
+    if('repo' in body){res.writeHead(400,{'Content-Type':'application/json'});res.end('{"error":"Unexpected request field"}');return;}
+    res.writeHead(201,{'Content-Type':'application/json'});res.end(JSON.stringify({sessionId:crypto.randomUUID(),sessionToken:crypto.randomBytes(32).toString('hex'),leaseMs:30000,room:body.room}));
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const session=await createRemoteSession({url:`http://127.0.0.1:${server.address().port}`,tokenFile:f.tokenFile,room:'shared',client:'codex',clientCwd:f.base,sessionDir:f.creds});
+  assert.equal(requests.length,2);assert.ok(requests[0].repo);assert.equal(requests[1].repo,undefined);
+  await closeRemoteSession(session);
 });

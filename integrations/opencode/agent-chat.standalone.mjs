@@ -25,16 +25,31 @@ function parseSessionName(name) {
   const match = /^(codex|claude|opencode|unknown)-([a-z0-9]{1,32})-((?:untitled-[a-f0-9]{6}|[a-z0-9]+)(?:-[0-9]+)?)$/.exec(name || "");
   return match ? { agent: match[1], repo: match[2], title: match[3] } : null;
 }
+function titleBase(title) {
+  return /^untitled-[a-f0-9]{6}$/.test(title) ? title : title.replace(/-[0-9]+$/, "");
+}
 function remoteRepo(cwd) {
   return (slug(String(cwd).replace(/\\/g, "/").split("/").filter(Boolean).at(-1) || "root") || "root").slice(0, 32);
 }
 function sessionRepo(cwd = process.cwd()) {
   try {
     const real = fs.realpathSync.native(cwd);
-    const git = (flag) => execFileSync("git", ["-C", real, "rev-parse", flag], { encoding: "utf8", timeout: 1e3, stdio: ["ignore", "pipe", "ignore"] }).trim();
-    const common = path.resolve(real, git("--git-common-dir"));
-    if (path.basename(common) === ".git" || path.basename(common) === ".bare") return path.dirname(common);
-    return common.endsWith(".git") ? common.slice(0, -4) : common;
+    const options = { encoding: "utf8", timeout: 1e3, stdio: ["ignore", "pipe", "ignore"] };
+    const dirs = execFileSync("git", ["-C", real, "rev-parse", "--git-dir", "--git-common-dir"], options).trim().split(/\r?\n/).map((dir) => fs.realpathSync.native(path.resolve(real, dir)));
+    if (dirs[0] === dirs[1]) {
+      try {
+        return path.resolve(execFileSync("git", ["-C", real, "rev-parse", "--show-toplevel"], options).trim());
+      } catch {
+      }
+    }
+    const output = execFileSync("git", ["-C", real, "worktree", "list", "--porcelain", "-z"], options);
+    const fields = output.split("\0");
+    const first = fields.slice(0, fields.indexOf(""));
+    if (!first[0]?.startsWith("worktree ")) throw new Error("Missing primary worktree");
+    const root = path.resolve(first[0].slice(9));
+    if (!first.includes("bare")) return root;
+    if ([".git", ".bare"].includes(path.basename(root))) return path.dirname(root);
+    return root.endsWith(".git") ? root.slice(0, -4) : root;
   } catch {
     return path.resolve(cwd);
   }
@@ -44,9 +59,10 @@ function sessionName({ client, cwd, repo = sessionRepo(cwd), title, sessionId = 
   const repoLimit = Math.min(32, limit - family.length - 2 - 15);
   const prefix = `${family}-${(slug(path.basename(repo)) || "root").slice(0, repoLimit)}-`;
   let supplied = typeof title === "string" ? title.trim().toLowerCase() : "";
-  if (supplied.startsWith(prefix)) {
-    if (parseSessionName(supplied)) return supplied.slice(0, limit).replace(/-+$/, "");
-    supplied = supplied.slice(prefix.length);
+  const qualified = /^(codex|claude|opencode|unknown)-[a-z0-9]{1,32}-(.*)$/.exec(supplied);
+  if (qualified) {
+    if (parseSessionName(supplied)) return (prefix + qualified[2]).slice(0, limit).replace(/-+$/, "");
+    supplied = qualified[2];
   }
   const suffix = slug(supplied) || `untitled-${crypto.createHash("sha256").update(sessionId).digest("hex").slice(0, 6)}`;
   return prefix + suffix.slice(0, limit - prefix.length);
@@ -328,10 +344,12 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
     const reserved = (name2) => peers.some((peer) => peer.name === name2 && peer.sessionId !== sessionId && peerAlive(peer)) || records.some((record2) => record2.sessionId !== sessionId && rememberedAliases(record2, now).some((alias) => alias.name === name2 && !alias.untilAt));
     const nameLimit = !owner || owner.nameLimit === NAME_LIMIT ? NAME_LIMIT : LEGACY_NAME_LIMIT;
     base = base.slice(0, nameLimit);
+    const parsedBase = parseSessionName(base);
+    const collisionBase = parsedBase ? `${parsedBase.agent}-${parsedBase.repo}-${titleBase(parsedBase.title)}` : base;
     let name = base;
     for (let i = 2; reserved(name); i++) {
       const suffix = `-${i}`;
-      name = `${base.slice(0, nameLimit - suffix.length)}${suffix}`;
+      name = `${collisionBase.slice(0, nameLimit - suffix.length)}${suffix}`;
     }
     const handleFile = plainFile(path2.join(dir, "handles", `${name}.json`));
     const priorHandle = readJson(handleFile);
@@ -387,7 +405,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
     if (typeof title !== "string" || !title.trim() || title.length > 256 || /[\x00-\x1f\x7f]/.test(title)) throw new Error("Session title must be 1 to 256 characters without controls");
     if (typeof expectedCwd !== "string" || typeof client !== "string") return null;
     const current = getIdentity({ room, sessionId });
-    const repo = current?.repo || parseSessionName(current?.name)?.repo || sessionRepo(expectedCwd);
+    const repo = current?.repo || (current?.nameLimit === NAME_LIMIT ? parseSessionName(current?.name)?.repo : void 0) || sessionRepo(expectedCwd);
     return withLock(room, () => {
       const peers = listPeers(room, { includeStale: true });
       const peer = peers.find((peer2) => peer2.sessionId === sessionId && peer2.client === client && typeof peer2.cwd === "string" && path2.resolve(peer2.cwd) === path2.resolve(expectedCwd));
@@ -417,13 +435,15 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
     if (legacy) return { name: legacy.name, sessionId: legacy.sessionId, alias: false };
     const title = slug(target);
     if (!title) return null;
-    const candidates = /* @__PURE__ */ new Map();
-    for (const item of [...peers, ...identityRecords(room)]) {
+    const matchesTitle = (item) => {
       const parsed = parseSessionName(item.name);
-      if (parsed?.title === title) candidates.set(item.sessionId, item);
-    }
-    if (candidates.size === 1) {
-      const item = [...candidates.values()][0];
+      return parsed && slug(titleBase(parsed.title)) === title;
+    };
+    const live = peers.filter((item) => peerAlive(item) && matchesTitle(item));
+    const candidates = live.length ? live : identityRecords(room).filter((item) => !item.untilAt && matchesTitle(item));
+    const unique = new Map(candidates.map((item) => [item.sessionId, item]));
+    if (unique.size === 1) {
+      const item = [...unique.values()][0];
       return { name: item.name, sessionId: item.sessionId, alias: true };
     }
     return null;
@@ -1305,6 +1325,7 @@ function prepareSessionStorage({ sessionDir, home, sessionFile: explicitFile }) 
 async function createRemoteSession({ url, tokenFile, room, name, client = "unknown", clientCwd = process.cwd(), repo, sessionDir, home, sessionFile: explicitFile, resumable = Boolean(explicitFile) } = {}) {
   url = canonicalBrokerUrl(url);
   validateRemoteRoom(room);
+  if (repo !== void 0 && (typeof repo !== "string" || !/^[a-z0-9]{1,32}$/.test(repo))) throw new Error("Invalid repository slug");
   const bootstrapHash = tokenHash(readBrokerToken(tokenFile));
   const storage = prepareSessionStorage({ sessionDir, home, sessionFile: explicitFile });
   let session;
@@ -1322,7 +1343,16 @@ async function createRemoteSession({ url, tokenFile, room, name, client = "unkno
       session = { ...previous, leaseMs: resumed.leaseMs };
       if (resumed.peer?.room !== room) throw new Error("Resumed broker room does not match");
     } else {
-      const result = await request(url, "/v1/sessions", { token: readBrokerToken(tokenFile), body: { room, ...name === void 0 ? {} : { name }, repo: repo ?? remoteRepo(sessionRepo(clientCwd)), client, clientCwd, resumable }, timeoutMs: 1e4 });
+      const body = { room, ...name === void 0 ? {} : { name }, repo: repo ?? remoteRepo(sessionRepo(clientCwd)), client, clientCwd, resumable };
+      const options = { token: readBrokerToken(tokenFile), body, timeoutMs: 1e4 };
+      let result;
+      try {
+        result = await request(url, "/v1/sessions", options);
+      } catch (error) {
+        if (error.status !== 400) throw error;
+        const { repo: ignoredRepo, ...legacyBody } = body;
+        result = await request(url, "/v1/sessions", { ...options, body: legacyBody });
+      }
       session = { ...result, url, clientCwd, resumable };
     }
     const credentialFile = saveSession(session, { sessionDir, home, tokenFile, sessionFile: explicitFile });

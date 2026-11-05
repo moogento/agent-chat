@@ -72,10 +72,10 @@ test('directed reply watches match exact sessions without reading the inbox', as
   await alice.server.callTool('chat_who'); await bob.server.callTool('chat_who'); await impostor.server.callTool('chat_who');
   await assert.rejects(alice.server.callTool('chat_send', { text: 'request', await_reply_minutes: 5 }), /resolved directed peer/);
   await assert.rejects(alice.server.callTool('chat_send', { to: 'missing', text: 'request', await_reply_minutes: 5 }), /resolved directed peer/);
-  await assert.rejects(alice.server.callTool('chat_send', { to: 'bob', text: 'request', await_reply_minutes: 121 }), /out of range/);
-  await assert.rejects(alice.server.callTool('chat_send', { to: 'bob', text: '', await_reply_minutes: 5 }), /text is required/);
+  await assert.rejects(alice.server.callTool('chat_send', { to: bob.server.state.identity.name, text: 'request', await_reply_minutes: 121 }), /out of range/);
+  await assert.rejects(alice.server.callTool('chat_send', { to: bob.server.state.identity.name, text: '', await_reply_minutes: 5 }), /text is required/);
   assert.equal(await alice.server.callTool('chat_wait_status'), 'No active reply watch.');
-  assert.match(await alice.server.callTool('chat_send', { to: 'bob', text: 'request', await_reply_minutes: 5 }), /Watching for a reply/);
+  assert.match(await alice.server.callTool('chat_send', { to: bob.server.state.identity.name, text: 'request', await_reply_minutes: 5 }), /Watching for a reply/);
   assert.match(await alice.server.callTool('chat_wait_status'), /No matching reply yet/);
   await impostor.server.callTool('chat_send', { to: 'alice', text: 'wrong sender' });
   await bob.server.callTool('chat_send', { to: 'all', text: 'broadcast' });
@@ -737,12 +737,13 @@ test('chat_rename changes only the handle, keeps the room and session, and route
   const renamed = serverFor(t, mailbox, { sessionId: 'rename-session', roomSpec: 'rename-room', nameSpec: 'opencode-m2-moo-3dc651' });
   const sender = serverFor(t, mailbox, { sessionId: 'rename-sender', roomSpec: 'rename-room', nameSpec: 'sender' });
   for (const item of [renamed, sender]) await item.server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'opencode' } } });
+  const originalName = renamed.server.state.identity.name;
   await renamed.server.handle({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'chat_rename', arguments: { name: 'deepseek' } } });
   const result = renamed.responses.find(response => response.id === 2).result;
   assert.match(result.content[0].text, new RegExp(`^You are "opencode-${testRepo}-deepseek" in room rename-room`));
   assert.equal(result.structuredContent.agentChatIdentity.name, `opencode-${testRepo}-deepseek`);
   assert.equal(result.structuredContent.agentChatIdentity.sessionId, 'rename-session');
-  await sender.server.callTool('chat_send', { to: `opencode-${testRepo}-opencodem2moo3dc651`, text: 'to the old handle' });
+  await sender.server.callTool('chat_send', { to: originalName, text: 'to the old handle' });
   assert.match(await renamed.server.callTool('chat_read'), /to the old handle/);
   await renamed.server.handle({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'chat_rename', arguments: {} } });
   assert.equal(renamed.responses.find(response => response.id === 3).error.code, -32602);

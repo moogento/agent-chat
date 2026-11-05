@@ -188,3 +188,44 @@ test('bare repository worktrees and symlinked directories use the repository ide
   fs.symlinkSync(cwd,link,process.platform==='win32'?'junction':'dir');
   assert.equal(sessionName({client:'codex',cwd:link,title:'Review'}),'codex-m2moo-review');
 });
+
+test('title shorthand rejects duplicate live titles and prefers the current owner', t => {
+  const {mailbox}=fixture(t), room=mailbox.resolveRoom('names');
+  const first=mailbox.claimIdentity(room,'codex-m2moo-review','codex','one');
+  const second=mailbox.claimIdentity(room,'codex-m2moo-review','codex','two');
+  assert.equal(mailbox.resolveRecipient(room,'review'),null);
+  mailbox.releaseIdentity(first);
+  assert.equal(mailbox.resolveRecipient(room,'review').sessionId,second.sessionId);
+  const third=mailbox.claimIdentity(room,first.name,'codex','three');
+  mailbox.releaseIdentity(second);
+  assert.equal(mailbox.resolveRecipient(room,'review').sessionId,third.sessionId);
+});
+
+test('collisions on qualified numeric suffixes remain canonical', t => {
+  const {mailbox,cwd}=fixture(t),room=mailbox.resolveRoom('names');
+  mailbox.claimIdentity(room,'codex-m2moo-review-2','codex','one');
+  const peer=mailbox.claimIdentity(room,'codex-m2moo-review-2','codex','two',{nameSource:'explicit'});
+  assert.equal(peer.name,'codex-m2moo-review-3');
+  const updated=mailbox.syncSessionTitle({room,sessionId:peer.sessionId,client:peer.client,cwd,title:'Other'});
+  assert.equal(updated.name,peer.name);
+});
+
+test('legacy worktree fallback handles do not override the parent repository', t => {
+  const {directory,cwd,mailbox}=fixture(t);
+  const git=(...args)=>execFileSync('git',['-C',cwd,...args],{encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
+  git('init','-q');git('-c','user.name=Test','-c','user.email=test@example.invalid','-c','commit.gpgsign=false','commit','--allow-empty','-qm','fixture');
+  const worktree=path.join(directory,'pr28');git('worktree','add','--detach',worktree);
+  const other=createMailbox({home:mailbox.home,cwd:worktree}),room=other.resolveRoom('names');
+  const peer=other.claimIdentity(room,'claude-pr28-a1b2c3','claude','legacy');
+  const file=path.join(other.roomPath(room),'peers',`${peer.name}.json`),stored=JSON.parse(fs.readFileSync(file));
+  delete stored.nameLimit;delete stored.repo;fs.writeFileSync(file,JSON.stringify(stored));
+  const updated=other.syncSessionTitle({room,sessionId:peer.sessionId,client:peer.client,cwd:worktree,title:'Review code'});
+  assert.equal(updated.name,'claude-m2moo-reviewcode');
+});
+
+test('separate Git metadata directories do not become the repository name', t => {
+  const {directory,cwd}=fixture(t);
+  execFileSync('git',['-C',cwd,'init','-q','--separate-git-dir',path.join(directory,'metadata')]);
+  assert.equal(sessionName({client:'codex',cwd,title:'Review'}),'codex-m2moo-review');
+  assert.equal(sessionName({client:'unknown',repo:'m2moo',title:'claude-m2moo-review'}),'unknown-m2moo-review');
+});

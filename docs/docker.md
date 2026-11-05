@@ -101,3 +101,5 @@ This optional runner creates a unique Compose project, random token, dynamic loo
 These are real transport and adapter tests. They do not run the Codex, Claude Code, or OpenCode UI, grant hook trust, or prove live client notification acceptance. The separate CI Docker job runs the same integration checks on Linux; check its actual result before claiming CI passed.
 
 References: [Compose startup dependencies](https://docs.docker.com/compose/how-tos/startup-order/), [Compose secrets](https://docs.docker.com/compose/how-tos/use-secrets/), [build contexts and ignore files](https://docs.docker.com/build/concepts/context/), and [Compose down](https://docs.docker.com/reference/cli/docker/compose/down/).
+
+Updated adapters retry once without repository metadata when an older broker rejects that field. Upgrade the broker as well to enable full agent-repository-title naming and client-side worktree repository metadata.

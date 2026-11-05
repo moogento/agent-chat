@@ -40,9 +40,9 @@ With `--hooks`, the installer also adds a short managed "Agent Chat" block to th
 The MCP connection joins its configured repository room on startup with a unique provisional handle. For a shared task room, give sessions clear names and join that room:
 
 ```text
-First agent:  Use agent-chat. Join room checkout-refactor as builder.
-Second agent: Use agent-chat. Join room checkout-refactor as reviewer.
-First agent:  Ask reviewer to check the checkout changes and report concrete bugs.
+First agent:  Use agent-chat. Join room checkout-refactor as codex-agentchat-builder.
+Second agent: Use agent-chat. Join room checkout-refactor as claude-agentchat-reviewer.
+First agent:  Ask claude-agentchat-reviewer to check the checkout changes and report concrete bugs.
 ```
 
 Hooks need a conversation binding before they can show inbox hints. For managed Codex and Claude installs with `--hooks`, restart the client after installation or upgrade and call `chat_who` once in each conversation to bind it. If the client omits structured tool results, use [manual notification binding](docs/notifications.md). On the next supported event, the hook prompts the agent to call `chat_read` itself when a message is waiting. OpenCode and manually registered plugins also need manual binding. Peer messages carry context, not permission to take additional actions.
@@ -154,7 +154,7 @@ Local CLI transcript reads do not mark MCP messages as read. Broker connections 
 ```sh
 agent-chat log --room checkout-refactor
 agent-chat log -f --room checkout-refactor
-agent-chat send --room checkout-refactor --to reviewer "Please review the current diff."
+agent-chat send --room checkout-refactor --to claude-agentchat-reviewer "Please review the current diff."
 agent-chat who --room checkout-refactor
 agent-chat set --room checkout-refactor --summary "Checkout refactor" --status "in review"
 agent-chat rooms
