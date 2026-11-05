@@ -385,4 +385,44 @@ test('OpenCode refusal is included in the tool result without a toast API', asyn
   await plugin['tool.execute.after']({ sessionID: 'different-host', tool: 'agent-chat_chat_who' }, output);
   assert.match(output.content.map(item => item.text).join('\n'), /Reconnect a separate MCP connection/);
   assert.equal(findBinding({ client: 'opencode', hostSessionId: 'different-host', cwd: f.cwd, env: f.env }), null);
+  const repeated = { content: [{ type: 'text', text: output.content[0].text }] };
+  await plugin['tool.execute.after']({ sessionID: 'different-host', tool: 'agent-chat_chat_who' }, repeated);
+  assert.equal(repeated.content.length, 1, 'the same refusal must not repeat in subsequent tool results');
+});
+
+test('a duplicate client refusal does not suppress the live owner reply-watch Stop', async t => {
+  const f = fixture(t);
+  const owner = await f.connect('owner');
+  await f.bind(owner);
+  const peer = f.mailbox.claimIdentity(f.room, 'peer', 'claude-code', 'peer');
+  await owner.server.callTool('chat_send', { to: peer.name, text: 'reply please', await_reply_minutes: 1 });
+  const duplicate = await f.connect('duplicate');
+  const outputs = [];
+  const payload = { session_id: 'same-host-conversation', cwd: f.cwd, model: 'deepseek-chat' };
+  const hook = value => runCommandHook({ client: 'codex', payload: value, env: f.env, mailbox: f.mailbox,
+    write: text => outputs.push(JSON.parse(text)) });
+  await hook({ ...payload, hook_event_name: 'PostToolUse', tool_name: 'mcp__agent-chat__chat_who', tool_response: duplicate.response });
+  assert.equal((await hook({ ...payload, hook_event_name: 'Stop' })).reason, 'binding-refused');
+  f.mailbox.appendMessage(f.room, peer.name, owner.server.state.identity.name, 'requested reply', peer.sessionId);
+  const result = await hook({ ...payload, hook_event_name: 'Stop' });
+  assert.equal(result.reason, 'reply-wait-replied');
+  assert.match(outputs.at(-1).reason, /Call chat_read now/);
+});
+
+test('a human recovery toast does not consume the agent recovery notice', async t => {
+  const f = fixture(t);
+  const first = await f.connect('first');
+  await f.bind(first);
+  f.mailbox.appendMessage(f.room, 'sender', first.server.state.identity.name, 'waiting mail', 'sender');
+  first.server.stop();
+  const notices = [];
+  const notify = channel => notifySession({ client: 'codex', hostSessionId: 'same-host-conversation', cwd: f.cwd,
+    env: f.env, mailbox: f.mailbox, channel, deliver: text => notices.push(text) });
+  assert.equal((await notify('toast')).delivered, true);
+  assert.match(notices.at(-1), /Ask your agent/);
+  assert.doesNotMatch(notices.at(-1), /Call chat_who first/);
+  assert.equal((await notify('context')).delivered, true);
+  assert.match(notices.at(-1), /Call chat_who first/);
+  assert.equal((await notify('toast')).delivered, false);
+  assert.equal((await notify('context')).delivered, false);
 });

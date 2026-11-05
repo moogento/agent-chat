@@ -307,11 +307,17 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
     } catch { /* diagnostics only */ }
     if (failure?.code === 'AGENT_CHAT_BIND_REFUSED') throw failure;
   };
-  const safely = async (operation, refusalNotice) => {
+  const refusalNotices = new Set();
+  const safely = async (operation, refusalNotice, sessionID) => {
     try { await operation(); } catch (error) {
       if (error.code === 'AGENT_CHAT_BIND_REFUSED') {
+        const key = JSON.stringify([sessionID, error.connectionId, error.message, refusalNotice ? 'context' : 'toast']);
+        if (refusalNotices.has(key)) return;
         try { if (refusalNotice) await refusalNotice(`${CHAT_LABEL}: ${error.message}`);
-          else await showWakeFallback(undefined, error.message); } catch { /* optional notice */ }
+          else await showWakeFallback(sessionID, error.message);
+          refusalNotices.add(key);
+          if (refusalNotices.size > 200) refusalNotices.delete(refusalNotices.values().next().value);
+        } catch { /* optional notice */ }
       }
       if (env.AGENT_CHAT_NOTIFY_DEBUG === '1') console.error(`agent-chat OpenCode hook: ${error.message}`);
     }
@@ -333,8 +339,8 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
       stopMessageWatch(input.sessionID);
       await registerHostPresence({ client: 'opencode', hostSessionId: input.sessionID, cwd: directory,
         activity: 'working', env, mailbox });
-      await safely(() => linkIdentityTool(input, { output: text }), append);
-      await safely(() => recordBindReason(input.sessionID, autoBind(input.sessionID)), append);
+      await safely(() => linkIdentityTool(input, { output: text }), append, input.sessionID);
+      await safely(() => recordBindReason(input.sessionID, autoBind(input.sessionID)), append, input.sessionID);
       await safely(() => syncTitle(input.sessionID));
       await safely(() => notifyHostInvitations({ client: 'opencode', hostSessionId: input.sessionID,
         cwd: directory, env, mailbox, deliver: append }));
@@ -346,7 +352,7 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
         if (childSessions.has(sessionID) || closedSessions.has(sessionID)) return;
         if (event.properties.status?.type === 'idle') {
           idleSessions.add(sessionID);
-          await safely(() => recordBindReason(sessionID, autoBind(sessionID)));
+          await safely(() => recordBindReason(sessionID, autoBind(sessionID)), undefined, sessionID);
           await safely(() => checkWatch(sessionID));
           await safely(async () => startMessageWatch(sessionID));
         } else {
@@ -388,7 +394,7 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
           return;
         }
         if (childSessions.has(info.id)) return;
-        await safely(() => recordBindReason(info.id, autoBind(info.id)));
+        await safely(() => recordBindReason(info.id, autoBind(info.id)), undefined, info.id);
         const title = supportedSessionTitle(info?.title);
         if (title) {
           titles.delete(info.id);
@@ -421,7 +427,7 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
       if (event?.type !== 'session.idle' || typeof event.properties?.sessionID !== 'string'
         || childSessions.has(event.properties.sessionID) || closedSessions.has(event.properties.sessionID)) return;
       idleSessions.add(event.properties.sessionID);
-      await safely(() => recordBindReason(event.properties.sessionID, autoBind(event.properties.sessionID)));
+      await safely(() => recordBindReason(event.properties.sessionID, autoBind(event.properties.sessionID)), undefined, event.properties.sessionID);
       await safely(() => checkWatch(event.properties.sessionID));
       await safely(async () => startMessageWatch(event.properties.sessionID));
       await registerHostPresence({ client: 'opencode', hostSessionId: event.properties.sessionID, cwd: directory,

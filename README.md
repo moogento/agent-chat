@@ -173,7 +173,7 @@ agent-chat tidy
 | `AGENT_CHAT_SESSION_ID` | Unset | Alias for `AGENT_CHAT_SESSION` |
 | `AGENT_CHAT_MAX_WAIT` | `50` | Maximum wait per read, in seconds; older values above `50` are capped at `50` with a stderr notice |
 | `AGENT_CHAT_WAIT_BUDGET` | `300` | Total wait budget per MCP process, in seconds |
-| `AGENT_CHAT_TTL_DAYS` | `7` | Retention for local inactive rooms |
+| `AGENT_CHAT_TTL_DAYS` | `7` | Retention for unbound local inactive rooms; verified local conversations are retained |
 
 Empty or whitespace-only local numeric settings and `AGENT_CHAT_ROOM` use their defaults. Explicit numeric `0` is preserved. Broker connections still require an explicit room.
 
