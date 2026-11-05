@@ -221,7 +221,7 @@ function stopNoticeFile({ binding, client, hostSessionId, mailbox, remote, env, 
 
 async function writeStopDecision({ reason, decision, watch, identity, binding, env, write, once = false, scope,
   render = text => JSON.stringify({ decision: 'block', reason: text }) + '\n' }) {
-  if (!once) { await write(render(reason)); return true; }
+  if (!once) return await write(render(reason)) !== false;
   const file = stopNoticeFile({ binding, ...identity, mailbox: watch.mailbox, remote: watch.remote, env, scope });
   const lock = `${file}.lock`;
   if (!acquireLock(lock)) return false;
@@ -232,7 +232,7 @@ async function writeStopDecision({ reason, decision, watch, identity, binding, e
     // clocks differ. Each terminal outcome needs its own one-shot notice.
     const fingerprint = `${watch.wait.watchId}:${decision}`;
     if (previous?.fingerprint === fingerprint) return false;
-    await write(render(reason));
+    if (await write(render(reason)) === false) return false;
     const temporary = `${file}.${process.pid}.tmp`;
     try { fs.writeFileSync(temporary, JSON.stringify({ fingerprint }) + '\n', { flag: 'wx', mode: 0o600 });
       fs.renameSync(temporary, file); }
@@ -246,7 +246,7 @@ async function writeStopDecision({ reason, decision, watch, identity, binding, e
 async function deliverReconnectNotice({ binding, client, hostSessionId, env, mailbox, peer, deliver, reason = RECONNECT_INSTRUCTIONS, channel = 'context' }) {
   return writeStopDecision({ reason, decision: 'reconnect',
     watch: { mailbox, remote: false, wait: { watchId: `connection-${peer.ownerId || peer.sessionId}` } },
-    identity: { client, hostSessionId }, binding, env, write: deliver, once: true,
+    identity: { client, hostSessionId }, binding, env, write: text => deliver(text, { reconnectRequired: true }), once: true,
     scope: channel === 'toast' ? 'reconnect-toast' : undefined, render: text => text });
 }
 

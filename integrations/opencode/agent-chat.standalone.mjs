@@ -1889,10 +1889,7 @@ async function writeStopDecision({
   scope,
   render = (text) => JSON.stringify({ decision: "block", reason: text }) + "\n"
 }) {
-  if (!once) {
-    await write(render(reason));
-    return true;
-  }
+  if (!once) return await write(render(reason)) !== false;
   const file = stopNoticeFile({ binding, ...identity, mailbox: watch.mailbox, remote: watch.remote, env, scope });
   const lock = `${file}.lock`;
   if (!acquireLock(lock)) return false;
@@ -1905,7 +1902,7 @@ async function writeStopDecision({
     }
     const fingerprint = `${watch.wait.watchId}:${decision}`;
     if (previous?.fingerprint === fingerprint) return false;
-    await write(render(reason));
+    if (await write(render(reason)) === false) return false;
     const temporary = `${file}.${process.pid}.tmp`;
     try {
       fs5.writeFileSync(temporary, JSON.stringify({ fingerprint }) + "\n", { flag: "wx", mode: 384 });
@@ -1926,7 +1923,7 @@ async function deliverReconnectNotice({ binding, client, hostSessionId, env, mai
     identity: { client, hostSessionId },
     binding,
     env,
-    write: deliver,
+    write: (text) => deliver(text, { reconnectRequired: true }),
     once: true,
     scope: channel === "toast" ? "reconnect-toast" : void 0,
     render: (text) => text
@@ -2624,14 +2621,15 @@ var AgentChatPlugin = async ({ client, directory }, options = {}) => {
       mailbox,
       remoteInspector,
       wake: true,
-      deliver: async (notice) => {
+      deliver: async (notice, { reconnectRequired = false } = {}) => {
         const profile = await currentProfile(sessionID);
         if (!idleSessions.has(sessionID) || messageWatches.get(sessionID) !== watch || wokeSessions.has(sessionID)) throw new Error("OpenCode session is no longer idle");
         stopMessageWatch(sessionID);
         claimWake(sessionID);
+        const fallback = reconnectRequired ? "Agent Chat needs reconnection. Ask your agent to call chat_who first, then read Agent Chat." : "New Agent Chat messages are addressed to this session. Ask your agent to call chat_read.";
         if (!profile) {
-          await showWakeFallback(sessionID, "New Agent Chat messages are addressed to this session. Ask your agent to call chat_read.");
-          return;
+          await showWakeFallback(sessionID, fallback);
+          return false;
         }
         const result = await client.session.promptAsync({ path: { id: sessionID }, body: { parts: [{ type: "text", text: notice.trim() }], ...profile } });
         if (result?.error || result?.data === false || result === false) {
@@ -2639,7 +2637,7 @@ var AgentChatPlugin = async ({ client, directory }, options = {}) => {
           startMessageWatch(sessionID);
           throw new Error("OpenCode rejected the wake prompt");
         }
-        confirmWake(sessionID, "New Agent Chat messages are addressed to this session. Ask your agent to call chat_read. OpenCode did not confirm a resumed turn.");
+        confirmWake(sessionID, `${fallback} OpenCode did not confirm a resumed turn.`);
       }
     });
   };

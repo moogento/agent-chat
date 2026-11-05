@@ -306,3 +306,28 @@ test('OpenCode falls back to a toast when a directed wake prompt is not confirme
   await new Promise(resolve => setTimeout(resolve, 60));
   assert.equal(f.prompts.length, 1, 'an unconfirmed prompt is not repeated');
 });
+
+for (const toastApi of [true, false]) {
+  test(`OpenCode missing-profile recovery leaves the agent notice available (toast API: ${toastApi})`, async t => {
+    const f = fixture(t);
+    const durable = f.mailbox.bindConversation({ client: 'opencode', hostSessionId: 'host-opencode', cwd: f.cwd,
+      room: f.room, sessionId: f.receiver.sessionId });
+    f.mailbox.releaseIdentity(durable);
+    let profileChecks = 0;
+    f.client.session.get = async () => { profileChecks++; return { data: { id: 'host-opencode' } }; };
+    if (!toastApi) delete f.client.tui;
+    const adapter = await AgentChatPlugin({ client: f.client, directory: f.cwd },
+      { env: f.env, mailbox: f.mailbox, watchPollMs: 10, wakeConfirmMs: 25 });
+    t.adapter = adapter;
+    f.mailbox.appendMessage(f.room, f.sender.name, durable.name, 'retained directed mail', f.sender.sessionId);
+    await adapter.event({ event: { type: 'session.idle', properties: { sessionID: 'host-opencode' } } });
+    await until(() => profileChecks > 0);
+    assert.equal(f.prompts.length, 0);
+    if (toastApi) assert.ok(f.toasts.some(toast => /chat_who first/.test(toast.body.message)));
+    const result = { output: 'ordinary tool result' };
+    await adapter['tool.execute.after']({ sessionID: 'host-opencode', tool: 'Bash' }, result);
+    assert.match(result.output, /Call chat_who first/);
+    assert.equal(f.mailbox.inspectNotifications({ room: f.room, name: durable.name, sessionId: durable.sessionId,
+      unreadOnly: true }).messages.some(message => message.text === 'retained directed mail'), true);
+  });
+}

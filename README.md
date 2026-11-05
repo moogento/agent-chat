@@ -108,7 +108,7 @@ MCP is pull-based. Hooks surface an inbox hint at supported client lifecycle eve
 
 ## Shared-operation locks
 
-Some work collides when two sessions do it at once: publishing a release, rebuilding a package registry, deploying a host. `chat_lock` gives one session that work at a time. A lock is mailbox-wide, so it holds across rooms; it is announced in the holder's room and listed by `chat_who` and `agent-chat locks`. It ends at `chat_unlock`, at its expiry (default 120 minutes, at most 480), or when the holder's session ends.
+Some work collides when two sessions do it at once: publishing a release, rebuilding a package registry, deploying a host. `chat_lock` gives one session that work at a time. A lock is mailbox-wide, so it holds across rooms; it is announced in the holder's room and listed by `chat_who` and `agent-chat locks`. It ends at `chat_unlock` or its expiry (default 120 minutes, at most 480). Verified local conversation locks survive disconnects until that original expiry or explicit unlock. An unbound session's locks also end when its holder ends.
 
 Acquire the smallest affected resource lock at the last moment, immediately before protected shared writes. Complete preliminary questions, planning, reviews, local tests, and read-only discovery first. Hold it only through those writes and necessary verification or recovery, and release it before unrelated or preliminary work and between independently safe publication windows. Check applicable holds before acquiring a lock and again before a shared write; a free mutex never lifts a separate hold.
 

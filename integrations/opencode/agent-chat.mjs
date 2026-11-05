@@ -191,19 +191,22 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
     }
     if (wokeSessions.has(sessionID) || wakesThisHour(sessionID).length >= IDLE_WAKES_PER_HOUR) return;
     await notifySession({ client: 'opencode', hostSessionId: sessionID, cwd: directory, env, mailbox, remoteInspector, wake: true,
-      deliver: async notice => {
+      deliver: async (notice, { reconnectRequired = false } = {}) => {
         const profile = await currentProfile(sessionID);
         if (!idleSessions.has(sessionID) || messageWatches.get(sessionID) !== watch || wokeSessions.has(sessionID)) throw new Error('OpenCode session is no longer idle');
         stopMessageWatch(sessionID);
         claimWake(sessionID);
-        if (!profile) { await showWakeFallback(sessionID, 'New Agent Chat messages are addressed to this session. Ask your agent to call chat_read.'); return; }
+        const fallback = reconnectRequired
+          ? 'Agent Chat needs reconnection. Ask your agent to call chat_who first, then read Agent Chat.'
+          : 'New Agent Chat messages are addressed to this session. Ask your agent to call chat_read.';
+        if (!profile) { await showWakeFallback(sessionID, fallback); return false; }
         const result = await client.session.promptAsync({ path: { id: sessionID }, body: { parts: [{ type: 'text', text: notice.trim() }], ...profile } });
         if (result?.error || result?.data === false || result === false) {
           wokeSessions.delete(sessionID);
           startMessageWatch(sessionID);
           throw new Error('OpenCode rejected the wake prompt');
         }
-        confirmWake(sessionID, 'New Agent Chat messages are addressed to this session. Ask your agent to call chat_read. OpenCode did not confirm a resumed turn.');
+        confirmWake(sessionID, `${fallback} OpenCode did not confirm a resumed turn.`);
       } });
   };
   const startMessageWatch = sessionID => {
