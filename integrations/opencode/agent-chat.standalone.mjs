@@ -379,7 +379,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
       repo: parseSessionName(name)?.repo || priorPeer?.repo,
       sessionId,
       client,
-      pid: owner?.pid ?? process.pid,
+      pid: owner ? owner.pid : process.pid,
       cwd: owner?.cwd ?? cwd,
       ownerId: owner?.ownerId || priorPeer?.pid === process.pid && priorPeer.ownerId || crypto2.randomUUID(),
       ...metadata.conversationKey ? { persistent: true } : {}
@@ -461,10 +461,10 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
       if (!source || !peerAlive(source) || fs2.realpathSync.native(source.cwd) !== realCwd || !["unknown", agentType(client)].includes(agentType(source.client))) throw new Error("Conversation binding requires its live verified connection");
       const file = routingFile(room, "conversations", key);
       const saved = readJson(file);
-      const sourceRecord = readIdentity(room, sessionId);
+      const sourceRecord = readIdentity(room, sessionId) || { sessionId, name: source.name, claimedAt: source.lastSeen, firstClaim: true, aliases: [] };
       if (sourceRecord.conversationKey && sourceRecord.conversationKey !== key) throw new Error("Connection already belongs to another conversation");
       const stableId = saved?.sessionId || (previousSessionId && readIdentity(room, safeSessionId(previousSessionId)) ? previousSessionId : sessionId);
-      const previous = readIdentity(room, stableId);
+      const previous = stableId === sessionId ? sourceRecord : readIdentity(room, stableId);
       if (!previous || previous.conversationKey && previous.conversationKey !== key) throw new Error("Invalid saved conversation identity");
       if (stableId !== sessionId) {
         if (peers.some((peer) => peer.sessionId === stableId && peerAlive(peer))) throw new Error("Conversation is already connected; leave its ongoing work running");
@@ -518,11 +518,13 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
     const handle = readJson(routingFile(room, "handles", target));
     let record = handle?.sessionId ? readIdentity(room, safeSessionId(handle.sessionId)) : null;
     if (!record) record = identityRecords(room).find((record2) => record2.sessionId === target);
-    if (record?.redirectTo) {
-      const stable = readIdentity(room, record.redirectTo);
-      if (stable) return { name: stable.name, sessionId: stable.sessionId, alias: true };
+    if (record && (record.name === target || record.sessionId === target || rememberedAliases(record).some((alias) => alias.name === target && !alias.untilAt))) {
+      if (record.redirectTo) {
+        const stable = readIdentity(room, record.redirectTo);
+        if (stable) return { name: stable.name, sessionId: stable.sessionId, alias: true };
+      }
+      return { name: record.name, sessionId: record.sessionId, alias: record.name !== target };
     }
-    if (record && (record.name === target || record.sessionId === target || rememberedAliases(record).some((alias) => alias.name === target && !alias.untilAt))) return { name: record.name, sessionId: record.sessionId, alias: record.name !== target };
     const legacy = peers.find((peer2) => peer2.name === target);
     if (legacy) return { name: legacy.name, sessionId: legacy.sessionId, alias: false };
     const title = requestedTitle;
@@ -532,7 +534,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
       return parsed && slug(titleBase(parsed.title)) === title;
     };
     const live = peers.filter((item) => peerAlive(item) && matchesTitle(item));
-    const candidates = live.length ? live : identityRecords(room).filter((item) => !item.untilAt && matchesTitle(item));
+    const candidates = live.length ? live : identityRecords(room).filter((item) => !item.redirectTo && !item.untilAt && matchesTitle(item));
     const unique = new Map(candidates.map((item) => [item.sessionId, item]));
     if (unique.size === 1) {
       const item = [...unique.values()][0];
@@ -690,7 +692,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
   }
   function appendMessageLocked(room, from, to, text, fromSessionId, recipientSessionId) {
     const target = to ? safeName(to) : "all";
-    const toSessionId = target === "all" ? void 0 : recipientSessionId ? canonicalSessionId(room, recipientSessionId) : resolveRecipient(room, target)?.sessionId;
+    const toSessionId = target === "all" ? void 0 : recipientSessionId ? canonicalSessionId(room, safeSessionId(recipientSessionId)) : resolveRecipient(room, target)?.sessionId;
     const msg = { id: crypto2.randomUUID(), ts: (/* @__PURE__ */ new Date()).toISOString(), from: safeName(from), to: target, text, ...fromSessionId ? { fromSessionId } : {}, ...toSessionId ? { toSessionId } : {} };
     const line = JSON.stringify(msg) + "\n";
     if (Buffer.byteLength(line) + 128 > LIMITS.pageBytes) throw new Error("Encoded message exceeds the default read page; shorten text");

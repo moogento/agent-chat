@@ -177,3 +177,50 @@ test('a terminated adapter process recovers its original mailbox and lock in a n
   assert.equal(f.mailbox.heldLock('crash-lock').expiresAt, before.expiresAt);
   assert.ok(f.mailbox.takeUnread(next.server.state.identity).messages.some(message => message.text === 'survives process exit'));
 });
+
+test('offline title sync preserves detached ownership and allows Claude reattachment', t => {
+  const f = fixture(t);
+  const old = f.mailbox.claimIdentity(f.room, 'claude-project-original', 'claude-code', 'claude-original');
+  f.mailbox.bindConversation({ client: 'claude-code', hostSessionId: 'claude-host', cwd: f.cwd, room: f.room, sessionId: old.sessionId });
+  f.mailbox.releaseIdentity(f.mailbox.getIdentity(old));
+  const renamed = f.mailbox.syncSessionTitle({ room: f.room, sessionId: old.sessionId, title: 'Updated offline title',
+    client: 'claude-code', cwd: f.cwd, titleSource: 'claude-code:session_title' });
+  assert.equal(renamed.pid, null);
+  assert.equal(f.mailbox.isPeerAlive(renamed), false);
+  const replacement = f.mailbox.claimIdentity(f.room, 'claude-project-temporary', 'claude-code', 'claude-temporary');
+  const attached = f.mailbox.bindConversation({ client: 'claude-code', hostSessionId: 'claude-host', cwd: f.cwd,
+    room: f.room, sessionId: replacement.sessionId });
+  assert.equal(attached.sessionId, old.sessionId);
+  assert.equal(attached.name, renamed.name);
+});
+
+test('redirected connections respect alias expiry and do not duplicate offline title candidates', async t => {
+  const f = fixture(t);
+  const first = await f.connect('first');
+  await f.bind(first);
+  first.server.stop();
+  const next = await f.connect('temporary');
+  await next.server.callTool('chat_rename', { name: 'Another provisional name' });
+  const source = next.server.state.identity;
+  const file = path.join(f.mailbox.roomDir(f.room), 'identities', 'temporary.json');
+  const record = JSON.parse(fs.readFileSync(file));
+  const expired = record.aliases[0].name;
+  record.aliases.forEach(alias => { alias.expiresAt = 1; });
+  fs.writeFileSync(file, JSON.stringify(record));
+  const attached = f.mailbox.bindConversation({ client: 'codex', hostSessionId: 'same-host-conversation', cwd: f.cwd,
+    room: f.room, sessionId: source.sessionId });
+  assert.equal(f.mailbox.resolveRecipient(f.room, expired), null);
+  assert.equal(f.mailbox.resolveRecipient(f.room, source.name).sessionId, 'first');
+  f.mailbox.releaseIdentity(attached);
+  assert.equal(f.mailbox.resolveRecipient(f.room, 'Review code and plugin options').sessionId, 'first');
+});
+
+test('a verified legacy peer without routing records can enroll durably', t => {
+  const f = fixture(t);
+  const legacy = f.mailbox.claimIdentity(f.room, 'legacy', 'codex', 'legacy');
+  fs.rmSync(path.join(f.mailbox.roomDir(f.room), 'identities', 'legacy.json'));
+  const bound = f.mailbox.bindConversation({ client: 'codex', hostSessionId: 'host', cwd: f.cwd,
+    room: f.room, sessionId: legacy.sessionId });
+  assert.equal(bound.sessionId, legacy.sessionId);
+  assert.equal(bound.persistent, true);
+});
