@@ -307,10 +307,11 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
     } catch { /* diagnostics only */ }
     if (failure?.code === 'AGENT_CHAT_BIND_REFUSED') throw failure;
   };
-  const safely = async operation => {
+  const safely = async (operation, refusalNotice) => {
     try { await operation(); } catch (error) {
       if (error.code === 'AGENT_CHAT_BIND_REFUSED') {
-        try { await showWakeFallback(undefined, error.message); } catch { /* optional notice */ }
+        try { if (refusalNotice) await refusalNotice(`${CHAT_LABEL}: ${error.message}`);
+          else await showWakeFallback(undefined, error.message); } catch { /* optional notice */ }
       }
       if (env.AGENT_CHAT_NOTIFY_DEBUG === '1') console.error(`agent-chat OpenCode hook: ${error.message}`);
     }
@@ -332,8 +333,8 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
       stopMessageWatch(input.sessionID);
       await registerHostPresence({ client: 'opencode', hostSessionId: input.sessionID, cwd: directory,
         activity: 'working', env, mailbox });
-      await safely(() => linkIdentityTool(input, { output: text }));
-      await safely(() => recordBindReason(input.sessionID, autoBind(input.sessionID)));
+      await safely(() => linkIdentityTool(input, { output: text }), append);
+      await safely(() => recordBindReason(input.sessionID, autoBind(input.sessionID)), append);
       await safely(() => syncTitle(input.sessionID));
       await safely(() => notifyHostInvitations({ client: 'opencode', hostSessionId: input.sessionID,
         cwd: directory, env, mailbox, deliver: append }));

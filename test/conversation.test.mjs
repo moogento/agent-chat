@@ -119,6 +119,7 @@ test('crash recovery fences late cleanup and retains durable state through idle 
   assert.notEqual(resumed.ownerId, old.ownerId);
   assert.equal(f.mailbox.touchPeer(old), false);
   assert.equal(f.mailbox.updatePeer(old, { task: 'stale update' }), false);
+  assert.throws(() => f.mailbox.commitCursor(old, 0), /Connection identity changed/);
   first.server.stop();
   assert.equal(f.mailbox.getIdentity(resumed).ownerId, resumed.ownerId);
   const { record } = f.mailbox.acquireResource(resumed, 'expires', 'bounded', 1);
@@ -254,8 +255,13 @@ test('offline notices restore identity first without deduplicating unread mail',
     env: f.env, mailbox: f.mailbox, deliver: text => notices.push(text) });
   assert.equal((await notify()).reason, 'reconnect-required');
   assert.match(notices.at(-1), /Call chat_who first/);
-  assert.deepEqual(fs.readdirSync(path.join(f.home, 'notifications')), []);
-  assert.equal((await notify()).reason, 'reconnect-required');
+  const recoveryState = fs.readdirSync(path.join(f.home, 'notifications')).map(file => JSON.parse(fs.readFileSync(path.join(f.home, 'notifications', file))));
+  assert.equal(recoveryState.length, 1);
+  assert.equal(recoveryState[0].offset, undefined);
+  assert.equal(recoveryState[0].ids, undefined);
+  const repeat = await notify();
+  assert.equal(repeat.reason, 'reconnect-required');
+  assert.equal(repeat.delivered, false);
   await f.bind(next);
   assert.equal((await notify()).delivered, true);
   assert.match(notices.at(-1), /Call chat_read now/);
@@ -276,6 +282,9 @@ test('offline reply-watch continuations restore identity before reading the watc
   assert.equal(result.state, 'reconnect-required');
   assert.match(notices[0].reason, /Call chat_who first/);
   assert.equal(f.mailbox.replyWaitStatus({ room: f.room, sessionId: 'first' }).watchId, watchId);
+  const repeat = await waitForReplyAtStop({ identity: { client: 'codex', hostSessionId: 'same-host-conversation', cwd: f.cwd },
+    env: f.env, mailbox: f.mailbox, write: () => assert.fail('recovery Stop must not block twice') });
+  assert.equal(repeat.continued, false);
 });
 
 test('a different host receives a recovery notice without inheriting the original conversation', async t => {
@@ -308,4 +317,72 @@ test('mail notified before disconnection still requests identity restoration unt
   assert.equal((await notify()).reason, 'reconnect-required');
   assert.match(notices.at(-1), /Call chat_who first/);
   assert.deepEqual(files.map(file => fs.readFileSync(path.join(f.home, 'notifications', file), 'utf8')), before);
+});
+
+test('a failed unlock before verification leaves the connection recoverable', async t => {
+  const f = fixture(t);
+  const first = await f.connect('first');
+  await f.bind(first);
+  f.mailbox.acquireResource(first.server.state.identity, 'held-before-reconnect', 'continuing work', 2);
+  first.server.stop();
+  const next = await f.connect('next');
+  await assert.rejects(next.server.callTool('chat_unlock', { lock: 'held-before-reconnect' }), /Only the holder/);
+  await f.bind(next);
+  assert.match(await next.server.callTool('chat_unlock', { lock: 'held-before-reconnect' }), /Unlocked/);
+});
+
+test('actual provisional profile changes still prevent merging independent work', async t => {
+  const f = fixture(t);
+  const first = await f.connect('first');
+  await f.bind(first);
+  first.server.stop();
+  const next = await f.connect('next');
+  await next.server.callTool('chat_status', { task: 'independent work' });
+  await assert.rejects(f.bind(next), /before starting new mailbox work/);
+});
+
+test('Codex recovery without mail blocks at most one Stop when identity cannot reconnect', async t => {
+  const f = fixture(t);
+  const first = await f.connect('first');
+  await f.bind(first);
+  first.server.stop();
+  const outputs = [];
+  const stop = () => runCommandHook({ client: 'codex', payload: { hook_event_name: 'Stop', session_id: 'same-host-conversation',
+    cwd: f.cwd, model: 'deepseek-chat' }, env: f.env, mailbox: f.mailbox, write: text => outputs.push(JSON.parse(text)) });
+  assert.equal((await stop()).delivered, true);
+  assert.match(outputs[0].reason, /Call chat_who first/);
+  assert.equal((await stop()).delivered, false);
+  assert.deepEqual(outputs.at(-1), {});
+  assert.equal((await stop()).delivered, false);
+});
+
+test('Codex provider-safe refusal fallback blocks once even after repeated refused identity attempts', async t => {
+  const f = fixture(t);
+  const first = await f.connect('first');
+  await f.bind(first);
+  const payload = { hook_event_name: 'PostToolUse', session_id: 'another-host', cwd: f.cwd, model: 'deepseek-chat',
+    tool_name: 'mcp__agent-chat__chat_who', tool_response: first.response };
+  const outputs = [];
+  const hook = value => runCommandHook({ client: 'codex', payload: value, env: f.env, mailbox: f.mailbox,
+    write: text => outputs.push(JSON.parse(text)) });
+  await hook(payload);
+  assert.deepEqual(outputs, []);
+  const stop = { ...payload, hook_event_name: 'Stop' };
+  assert.equal((await hook(stop)).reason, 'binding-refused');
+  assert.match(outputs.at(-1).reason, /Reconnect a separate MCP connection/);
+  await hook(payload);
+  assert.equal((await hook(stop)).delivered, false);
+  assert.deepEqual(outputs.at(-1), {});
+});
+
+test('OpenCode refusal is included in the tool result without a toast API', async t => {
+  const f = fixture(t);
+  const { AgentChatPlugin } = await import('../integrations/opencode/agent-chat.mjs');
+  const peer = f.mailbox.claimIdentity(f.room, 'opencode-project-work', 'opencode', 'opencode-owner');
+  f.mailbox.bindConversation({ client: 'opencode', hostSessionId: 'original-host', cwd: f.cwd, room: f.room, sessionId: peer.sessionId });
+  const plugin = await AgentChatPlugin({ directory: f.cwd, client: {} }, { env: f.env, mailbox: f.mailbox });
+  const output = { content: [{ type: 'text', text: `You are "${peer.name}" in room conversation\nSession: ${peer.sessionId}\nRoom id: ${f.room.id}` }] };
+  await plugin['tool.execute.after']({ sessionID: 'different-host', tool: 'agent-chat_chat_who' }, output);
+  assert.match(output.content.map(item => item.text).join('\n'), /Reconnect a separate MCP connection/);
+  assert.equal(findBinding({ client: 'opencode', hostSessionId: 'different-host', cwd: f.cwd, env: f.env }), null);
 });
