@@ -386,8 +386,11 @@ async function cancelBoundReplyWatch({ identity, env, mailbox, remoteInspector }
     await cancelRemoteReplyWait({ url: binding.brokerUrl, tokenFile: env.AGENT_CHAT_BROKER_TOKEN_FILE,
       room: binding.room, sessionId: binding.mailboxSessionId, sessionDir: env.AGENT_CHAT_BROKER_SESSION_DIR,
       home: env.AGENT_CHAT_HOME });
-  } else watch.mailbox.cancelReplyWait({ room: { id: binding.room, label: binding.room },
-    sessionId: binding.mailboxSessionId, name: watch.peer.name });
+  } else {
+    if (watch.peer.persistent) return false;
+    watch.mailbox.cancelReplyWait({ room: { id: binding.room, label: binding.room },
+      sessionId: binding.mailboxSessionId, name: watch.peer.name });
+  }
   return true;
 }
 
@@ -645,6 +648,7 @@ export async function autoBindCommand({ client, payload, env = process.env, mail
   if (remote && (metadata.transport !== 'broker' || !metadata.brokerUrl)) return false;
   const binding = validateBinding({ ...identity, room: metadata.room, mailboxSessionId: metadata.sessionId,
     ...(remote ? { brokerUrl: metadata.brokerUrl } : {}) });
+  const existing = findBinding({ ...identity, env });
   if (remote) {
     if (remoteMode(binding, env) !== true) return false;
     const result = await inspectRemote(binding, env, undefined, remoteInspector);
@@ -656,8 +660,11 @@ export async function autoBindCommand({ client, payload, env = process.env, mail
     const matches = mailbox.listPeers(room).filter(peer => peer.sessionId === binding.mailboxSessionId
       && peer.name === metadata.name && sameBindingCwd(canonicalCwd(peer.cwd), binding.cwd));
     if (matches.length !== 1) return false;
+    const attached = mailbox.bindConversation({ client, hostSessionId: identity.hostSessionId, cwd: identity.cwd,
+      room, sessionId: binding.mailboxSessionId,
+      previousSessionId: existing?.room === binding.room && !existing.brokerUrl ? existing.mailboxSessionId : undefined });
+    binding.mailboxSessionId = attached.sessionId;
   }
-  const existing = findBinding({ ...identity, env });
   if (existing?.room === binding.room && existing.mailboxSessionId === binding.mailboxSessionId
     && existing.brokerUrl === binding.brokerUrl && existing.boundAt !== undefined
     && existing.boundAt <= Date.now() && Date.now() - existing.boundAt < NOTIFICATION_LIMITS.refreshMs) return true;

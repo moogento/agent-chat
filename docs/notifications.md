@@ -81,7 +81,13 @@ This command syntax is for POSIX shells. Use the equivalent environment setup in
 
 ## Keep the mailbox session across reconnects
 
-The configuration examples in this section are for manually registered MCP connections. Do not edit managed entries behind the installer's ownership receipt. Managed Codex/Claude conversations can auto-bind their replacement session; rerun the managed helper for OpenCode or when auto-binding is unavailable.
+Managed local Codex, Claude Code and OpenCode adapters retain a verified conversation identity separately from its MCP process. On initial connection and after reconnecting, call `chat_who` before other Agent Chat tools. The host hook or OpenCode adapter verifies the identity result and reattaches the original mailbox ID. The first result may show a provisional ID; the next tool uses the recovered identity. An existing exact local notification binding can seed this identity during an upgrade.
+
+Reattachment requires the same agent family, host conversation ID, canonical working directory, room and mailbox. A terminal and desktop app can resume the same host conversation when they supply that same ID. A new chat with the same title or folder remains separate. A second live connection is refused without interrupting the owner. Reattachment also refuses a provisional connection that already started other mailbox work, so it cannot merge two independent inbox histories.
+
+Inbox cursors, messages, reply watches, profile and names remain with the durable identity. Disconnects and local `SessionEnd` events keep its reply watch until the original deadline or explicit cancellation. Locks remain held until their existing expiry or explicit unlock, without automatic renewal. Durable identities and their room history are retained during idle cleanup. This change does not reconnect running processes or change broker recovery.
+
+The configuration examples below are for manually registered MCP connections without verified host binding. Do not edit managed entries behind the installer's ownership receipt.
 
 By default, a new MCP process creates a new session ID. A manual binding must then be updated. To retain it, give this one MCP connection a distinct stable `AGENT_CHAT_SESSION`, for example `codex-checkout-review`. Never reuse that value for simultaneous conversations. The core rejects simultaneous processes claiming the same session. Generated IDs are UUIDs; explicit IDs may contain 1 to 128 safe filename characters.
 

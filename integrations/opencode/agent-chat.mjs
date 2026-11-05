@@ -235,7 +235,6 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
   // Bind from the hint its own MCP server wrote, so notices need no identity tool call the host can see.
   const autoBind = sessionID => {
     if (!env.AGENT_CHAT_NOTIFY_CONFIG || env.AGENT_CHAT_BROKER_URL) return 'disabled';
-    if (findBinding({ client: 'opencode', hostSessionId: sessionID, cwd: directory, env })) return 'bound';
     const currentCwd = canonicalCwd(directory);
     if (!currentCwd) return 'directory-invalid';
     const home = env.AGENT_CHAT_HOME || path.join(os.homedir(), '.agent-chat');
@@ -249,8 +248,11 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
       && canonicalCwd(candidate.cwd) === currentCwd && candidate.client.toLowerCase().includes('opencode')
       && store.isPeerAlive(candidate));
     if (!peer) return 'peer-missing';
+    const existing = findBinding({ client: 'opencode', hostSessionId: sessionID, cwd: directory, env });
+    const attached = store.bindConversation({ client: 'opencode', hostSessionId: sessionID, cwd: directory,
+      room, sessionId: peer.sessionId, previousSessionId: existing?.room === room.id && !existing.brokerUrl ? existing.mailboxSessionId : undefined });
     bindNotification({ configFile: env.AGENT_CHAT_NOTIFY_CONFIG, binding: { client: 'opencode', hostSessionId: sessionID,
-      cwd: directory, room: hint.room, mailboxSessionId: hint.mailboxSessionId } });
+      cwd: directory, room: hint.room, mailboxSessionId: attached.sessionId } });
     claimBindHint({ home, mcpPid: hint.mcpPid });
     return 'linked';
   };
@@ -283,11 +285,13 @@ export const AgentChatPlugin = async ({ client, directory }, options = {}) => {
     if (!host) return 'host-missing';
     if (canonicalCwd(host.cwd) !== currentCwd) return 'host-cwd-mismatch';
     const binding = findBinding({ client: 'opencode', hostSessionId: input.sessionID, cwd: directory, env });
-    if (binding?.room !== roomId || binding.mailboxSessionId !== sessionId) {
+    const attached = store.bindConversation({ client: 'opencode', hostSessionId: input.sessionID, cwd: directory,
+      room, sessionId, previousSessionId: binding?.room === roomId && !binding.brokerUrl ? binding.mailboxSessionId : undefined });
+    if (binding?.room !== roomId || binding.mailboxSessionId !== attached.sessionId) {
       bindNotification({ configFile: env.AGENT_CHAT_NOTIFY_CONFIG, binding: { client: 'opencode', hostSessionId: input.sessionID,
-        cwd: directory, room: roomId, mailboxSessionId: sessionId } });
+        cwd: directory, room: roomId, mailboxSessionId: attached.sessionId } });
     }
-    presence.linkHost({ client: 'opencode', hostSessionId: input.sessionID, sessionId, room, name: candidates[0].name });
+    presence.linkHost({ client: 'opencode', hostSessionId: input.sessionID, sessionId: attached.sessionId, room, name: attached.name });
     return 'linked';
   };
   const linkIdentityTool = (input, output) => {

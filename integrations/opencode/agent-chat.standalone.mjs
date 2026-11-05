@@ -188,6 +188,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
     plainDir(path2.join(dir, "identities"));
     plainDir(path2.join(dir, "handles"));
     plainDir(path2.join(dir, "reply-waits"));
+    plainDir(path2.join(dir, "conversations"));
     const file = plainFile(path2.join(dir, "room.json"));
     try {
       fs2.writeFileSync(file, JSON.stringify({ id: room.id, label: room.label }) + "\n", { flag: "wx", mode: 384 });
@@ -344,13 +345,13 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
       throw error;
     }
   }
-  function writeIdentity(room, base, client, sessionId, peers, metadata = {}, owner) {
+  function writeIdentity(room, base, client, sessionId, peers, metadata = {}, owner, extraWrites = [], extraRemovals = []) {
     const dir = roomDir(room);
     const now = Date.now();
     const records = identityRecords(room);
     const priorPeer = peers.find((peer) => peer.sessionId === sessionId);
     const previous = readIdentity(room, sessionId) || (priorPeer ? { name: priorPeer.name, claimedAt: priorPeer.lastSeen, firstClaim: true } : null);
-    const reserved = (name2) => peers.some((peer) => peer.name === name2 && peer.sessionId !== sessionId && peerAlive(peer)) || records.some((record2) => record2.sessionId !== sessionId && rememberedAliases(record2, now).some((alias) => alias.name === name2 && !alias.untilAt));
+    const reserved = (name2) => peers.some((peer) => peer.name === name2 && peer.sessionId !== sessionId && peerAlive(peer)) || records.some((record2) => record2.sessionId !== sessionId && (record2.conversationKey && !record2.redirectTo && record2.name === name2 || rememberedAliases(record2, now).some((alias) => alias.name === name2 && !alias.untilAt)));
     const nameLimit = !owner || owner.nameLimit === NAME_LIMIT ? NAME_LIMIT : LEGACY_NAME_LIMIT;
     base = base.slice(0, nameLimit);
     const parsedBase = parseSessionName(base);
@@ -370,11 +371,31 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
       aliases.push({ name: previous.name, claimedAt: previous.claimedAt, firstClaim: previous.firstClaim, ...previous.untilAt ? { untilAt: previous.untilAt } : {}, expiresAt: now + IDENTITY_LIMITS.aliasTtlMs });
     }
     aliases = aliases.slice(-IDENTITY_LIMITS.aliases);
-    const identity = { ...priorPeer, room, name, nameLimit, repo: parseSessionName(name)?.repo || priorPeer?.repo, sessionId, client, pid: owner?.pid ?? process.pid, cwd: owner?.cwd ?? cwd };
+    const identity = {
+      ...priorPeer,
+      room,
+      name,
+      nameLimit,
+      repo: parseSessionName(name)?.repo || priorPeer?.repo,
+      sessionId,
+      client,
+      pid: owner?.pid ?? process.pid,
+      cwd: owner?.cwd ?? cwd,
+      ownerId: owner?.ownerId || priorPeer?.pid === process.pid && priorPeer.ownerId || crypto2.randomUUID(),
+      ...metadata.conversationKey ? { persistent: true } : {}
+    };
     Object.assign(identity, peerMetadata(identity));
     for (const key of ["nameSource", "sessionTitle", "titleSource", "task", "availability", "model", "effort"]) if (typeof metadata[key] === "string") identity[key] = metadata[key];
     if (Number.isSafeInteger(metadata.context_remaining_percent)) identity.context_remaining_percent = metadata.context_remaining_percent;
-    const record = { sessionId, name, claimedAt: claim.claimedAt, firstClaim: claim.firstClaim === true, aliases };
+    const record = {
+      ...previous,
+      sessionId,
+      name,
+      claimedAt: claim.claimedAt,
+      firstClaim: claim.firstClaim === true,
+      aliases,
+      ...metadata.conversationKey ? { conversationKey: metadata.conversationKey } : {}
+    };
     let previousOwner;
     if (priorHandle?.sessionId && priorHandle.sessionId !== sessionId) {
       previousOwner = readIdentity(room, safeSessionId(priorHandle.sessionId));
@@ -389,8 +410,9 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
       ...previousOwner ? [[identityFile(room, previousOwner.sessionId), previousOwner]] : [],
       [identityFile(room, sessionId), record],
       [handleFile, { sessionId, claimedAt: record.claimedAt }],
-      [peerFile, { ...identity, room: void 0, status: priorPeer?.status ?? "", lastSeen: new Date(now).toISOString() }]
-    ], removals);
+      [peerFile, { ...identity, room: void 0, status: priorPeer?.status ?? "", lastSeen: new Date(now).toISOString() }],
+      ...extraWrites
+    ], [.../* @__PURE__ */ new Set([...removals, ...extraRemovals])].filter((file) => file !== peerFile));
     return identity;
   }
   function claimIdentity(room, base, client = "unknown", sessionId = crypto2.randomUUID(), metadata = {}) {
@@ -399,6 +421,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
     sessionId = safeSessionId(sessionId);
     return withLock(room, () => {
       roomDir(room);
+      sessionId = canonicalSessionId(room, sessionId);
       const peers = listPeers(room, { includeStale: true });
       if (peers.some((peer) => peer.sessionId === sessionId && peer.pid !== process.pid && peerAlive(peer))) throw new Error("Session is already active in another process; choose a unique AGENT_CHAT_SESSION");
       return writeIdentity(room, base, client, sessionId, peers, metadata);
@@ -406,8 +429,63 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
   }
   function getIdentity(identity) {
     if (!identity) return null;
-    const peer = listPeers(identity.room, { includeStale: true }).find((peer2) => peer2.sessionId === safeSessionId(identity.sessionId));
+    const peer = listPeers(identity.room, { includeStale: true }).find((peer2) => peer2.sessionId === canonicalSessionId(identity.room, identity.sessionId));
+    if (identity.ownerId && peer?.ownerId !== identity.ownerId) return null;
     return peer ? { ...peer, room: identity.room } : null;
+  }
+  function canonicalSessionId(room, id) {
+    if (id === void 0) return void 0;
+    try {
+      safeSessionId(id);
+    } catch {
+      return id;
+    }
+    return readIdentity(room, id)?.redirectTo || id;
+  }
+  function markConnectionUsed(identity) {
+    return withLock(identity.room, () => {
+      const current = getIdentity(identity);
+      if (!current || current.sessionId !== identity.sessionId) throw new Error("Connection identity changed; retry the tool");
+      const record = readIdentity(identity.room, identity.sessionId);
+      if (record && !record.used) atomicWrite(identityFile(identity.room, identity.sessionId), { ...record, used: true });
+    });
+  }
+  function bindConversation({ client, hostSessionId, cwd: hostCwd, room, sessionId, previousSessionId }) {
+    if (!["codex", "claude-code", "opencode"].includes(client) || typeof hostSessionId !== "string" || !hostSessionId.trim() || hostSessionId.length > 256 || /[\x00-\x1f\x7f]/.test(hostSessionId)) throw new Error("Invalid host conversation");
+    const realCwd = fs2.realpathSync.native(hostCwd);
+    const key = crypto2.createHash("sha256").update(JSON.stringify([agentType(client), hostSessionId, realCwd, room.id])).digest("hex");
+    return withLock(room, () => {
+      roomDir(room);
+      const peers = listPeers(room, { includeStale: true });
+      const source = peers.find((peer) => peer.sessionId === safeSessionId(sessionId));
+      if (!source || !peerAlive(source) || fs2.realpathSync.native(source.cwd) !== realCwd || !["unknown", agentType(client)].includes(agentType(source.client))) throw new Error("Conversation binding requires its live verified connection");
+      const file = routingFile(room, "conversations", key);
+      const saved = readJson(file);
+      const sourceRecord = readIdentity(room, sessionId);
+      if (sourceRecord.conversationKey && sourceRecord.conversationKey !== key) throw new Error("Connection already belongs to another conversation");
+      const stableId = saved?.sessionId || (previousSessionId && readIdentity(room, safeSessionId(previousSessionId)) ? previousSessionId : sessionId);
+      const previous = readIdentity(room, stableId);
+      if (!previous || previous.conversationKey && previous.conversationKey !== key) throw new Error("Invalid saved conversation identity");
+      if (stableId !== sessionId) {
+        if (peers.some((peer) => peer.sessionId === stableId && peerAlive(peer))) throw new Error("Conversation is already connected; leave its ongoing work running");
+        if (sourceRecord.used || fs2.existsSync(routingFile(room, "cursors", sessionId)) || fs2.existsSync(replyWaitFile({ room, sessionId }))) throw new Error("Reconnect with an identity tool before starting new mailbox work");
+      }
+      const priorPeer = peers.find((peer) => peer.sessionId === stableId);
+      const writes = [[file, { version: 1, sessionId: stableId }]];
+      if (stableId !== sessionId) writes.push([identityFile(room, sessionId), { ...sourceRecord, redirectTo: stableId, conversationKey: key }]);
+      const result = writeIdentity(
+        room,
+        previous.name,
+        source.client,
+        stableId,
+        peers,
+        { ...priorPeer, conversationKey: key },
+        source,
+        writes,
+        stableId !== sessionId ? [routingFile(room, "peers", source.name)] : []
+      );
+      return result;
+    });
   }
   function syncSessionTitle({ room, sessionId, title, client, cwd: expectedCwd, titleSource, replaceExplicitTitle = false } = {}) {
     safeSessionId(sessionId);
@@ -440,6 +518,10 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
     const handle = readJson(routingFile(room, "handles", target));
     let record = handle?.sessionId ? readIdentity(room, safeSessionId(handle.sessionId)) : null;
     if (!record) record = identityRecords(room).find((record2) => record2.sessionId === target);
+    if (record?.redirectTo) {
+      const stable = readIdentity(room, record.redirectTo);
+      if (stable) return { name: stable.name, sessionId: stable.sessionId, alias: true };
+    }
     if (record && (record.name === target || record.sessionId === target || rememberedAliases(record).some((alias) => alias.name === target && !alias.untilAt))) return { name: record.name, sessionId: record.sessionId, alias: record.name !== target };
     const legacy = peers.find((peer2) => peer2.name === target);
     if (legacy) return { name: legacy.name, sessionId: legacy.sessionId, alias: false };
@@ -462,7 +544,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
     return withLock(identity.room, () => {
       const file = plainFile(path2.join(roomDir(identity.room), "peers", `${safeName(identity.name)}.json`));
       const prev = readJson(file);
-      if (prev?.sessionId !== identity.sessionId) return false;
+      if (prev?.sessionId !== identity.sessionId || identity.ownerId && prev.ownerId !== identity.ownerId) return false;
       atomicWrite(file, { ...prev, ...peerMetadata(identity), status: status ?? prev.status ?? "", lastSeen: (/* @__PURE__ */ new Date()).toISOString() });
       return true;
     });
@@ -471,7 +553,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
     return withLock(identity.room, () => {
       const file = plainFile(path2.join(roomDir(identity.room), "peers", `${safeName(identity.name)}.json`));
       const previous = readJson(file);
-      if (previous?.sessionId !== identity.sessionId) return false;
+      if (previous?.sessionId !== identity.sessionId || identity.ownerId && previous.ownerId !== identity.ownerId) return false;
       const allowed = ["task", "availability", "model", "effort", "context_remaining_percent"];
       const profile = Object.fromEntries(Object.entries(changes).filter(([key]) => allowed.includes(key)));
       atomicWrite(file, { ...previous, ...profile, ...peerMetadata(identity), lastSeen: (/* @__PURE__ */ new Date()).toISOString() });
@@ -482,10 +564,12 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
     if (!identity || !fs2.existsSync(roomPath(identity.room))) return;
     withLock(identity.room, () => {
       const file = plainFile(path2.join(roomPath(identity.room), "peers", `${safeName(identity.name)}.json`));
-      if (readJson(file)?.sessionId === identity.sessionId) {
+      const peer = readJson(file);
+      if (peer?.sessionId === identity.sessionId && (!identity.ownerId || peer.ownerId === identity.ownerId)) {
         const record = readIdentity(identity.room, safeSessionId(identity.sessionId));
         if (record?.name === identity.name) atomicWrite(identityFile(identity.room, identity.sessionId), { ...record, releasedAt: Date.now() });
-        fs2.rmSync(file, { force: true });
+        if (record?.conversationKey) atomicWrite(file, { ...peer, pid: null, lastSeen: (/* @__PURE__ */ new Date()).toISOString() });
+        else fs2.rmSync(file, { force: true });
       }
     });
   }
@@ -543,7 +627,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
       let matched;
       for (let page = 0; page < 8; page++) {
         const scan = inspectNotifications({ room: identity.room, afterOffset: offset, limit: LIMITS.maxMessages, maxBytes: LIMITS.scanBytes });
-        matched = scan.messages.find((message) => message.fromSessionId === wait2.expectedSenderSessionId && message.toSessionId === identity.sessionId && Date.parse(message.ts) >= wait2.startedAt && Date.parse(message.ts) <= wait2.deadlineAt);
+        matched = scan.messages.find((message) => canonicalSessionId(identity.room, message.fromSessionId) === canonicalSessionId(identity.room, wait2.expectedSenderSessionId) && canonicalSessionId(identity.room, message.toSessionId) === identity.sessionId && Date.parse(message.ts) >= wait2.startedAt && Date.parse(message.ts) <= wait2.deadlineAt);
         if (scan.nextOffset <= offset) break;
         offset = scan.nextOffset;
         if (matched || !scan.hasMore) break;
@@ -561,7 +645,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
         wait2 = readReplyWait(identity) || wait2;
       }
     }
-    const expectedPeerActive = listPeers(identity.room).some((peer) => peer.sessionId === wait2.expectedSenderSessionId && peerAlive(peer));
+    const expectedPeerActive = listPeers(identity.room).some((peer) => peer.sessionId === canonicalSessionId(identity.room, wait2.expectedSenderSessionId) && peerAlive(peer));
     if (wait2.replyCount > 0) return {
       state: "replied",
       watchId: wait2.id,
@@ -595,7 +679,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
     if (!Array.isArray(messages) || !messages.length) return false;
     return withLock(identity.room, () => {
       const wait2 = readReplyWait(identity);
-      if (!wait2 || !messages.some((message) => message.fromSessionId === wait2.expectedSenderSessionId && message.toSessionId === identity.sessionId && Date.parse(message.ts) >= wait2.startedAt && Date.parse(message.ts) <= wait2.deadlineAt)) return false;
+      if (!wait2 || !messages.some((message) => canonicalSessionId(identity.room, message.fromSessionId) === canonicalSessionId(identity.room, wait2.expectedSenderSessionId) && canonicalSessionId(identity.room, message.toSessionId) === identity.sessionId && Date.parse(message.ts) >= wait2.startedAt && Date.parse(message.ts) <= wait2.deadlineAt)) return false;
       fs2.rmSync(replyWaitFile(identity), { force: true });
       return true;
     });
@@ -606,16 +690,20 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
   }
   function appendMessageLocked(room, from, to, text, fromSessionId, recipientSessionId) {
     const target = to ? safeName(to) : "all";
-    const toSessionId = target === "all" ? void 0 : recipientSessionId ? safeSessionId(recipientSessionId) : resolveRecipient(room, target)?.sessionId;
+    const toSessionId = target === "all" ? void 0 : recipientSessionId ? canonicalSessionId(room, recipientSessionId) : resolveRecipient(room, target)?.sessionId;
     const msg = { id: crypto2.randomUUID(), ts: (/* @__PURE__ */ new Date()).toISOString(), from: safeName(from), to: target, text, ...fromSessionId ? { fromSessionId } : {}, ...toSessionId ? { toSessionId } : {} };
     const line = JSON.stringify(msg) + "\n";
     if (Buffer.byteLength(line) + 128 > LIMITS.pageBytes) throw new Error("Encoded message exceeds the default read page; shorten text");
+    if (fromSessionId) {
+      const record = readIdentity(room, fromSessionId);
+      if (record && !record.used) atomicWrite(identityFile(room, fromSessionId), { ...record, used: true });
+    }
     fs2.appendFileSync(plainFile(path2.join(roomDir(room), "messages.jsonl")), line, { mode: 384 });
     if (toSessionId && fromSessionId) {
       try {
         const recipient = { room, sessionId: toSessionId };
         const wait2 = readReplyWait(recipient);
-        if (wait2 && Date.now() < wait2.deadlineAt && wait2.expectedSenderSessionId === fromSessionId) {
+        if (wait2 && Date.now() < wait2.deadlineAt && canonicalSessionId(room, wait2.expectedSenderSessionId) === canonicalSessionId(room, fromSessionId)) {
           atomicWrite(replyWaitFile(recipient), {
             ...wait2,
             replyCount: wait2.replyCount + 1,
@@ -675,7 +763,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
   function lockHolderAlive(record) {
     if (!isObject(record?.room) || typeof record.sessionId !== "string") return false;
     try {
-      return listPeers(record.room, { includeStale: true }).some((peer) => peer.sessionId === record.sessionId && peerAlive(peer));
+      return Boolean(readIdentity(record.room, record.sessionId)?.conversationKey) || listPeers(record.room, { includeStale: true }).some((peer) => peer.sessionId === record.sessionId && peerAlive(peer));
     } catch {
       return false;
     }
@@ -784,10 +872,10 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
       const legacyClaims = routing ? [{ name: routing.name, claimedAt: routing.claimedAt, firstClaim: routing.firstClaim, untilAt: routing.untilAt }, ...rememberedAliases(routing)] : [{ name, firstClaim: true }];
       const addressedToReader = (message) => {
         if (message.to === "all") return true;
-        if (message.toSessionId !== void 0) return !!sessionId && message.toSessionId === sessionId;
+        if (message.toSessionId !== void 0) return !!sessionId && canonicalSessionId(room, message.toSessionId) === sessionId;
         return legacyClaims.some((claim) => claim.name === message.to && (!claim.untilAt || Date.parse(message.ts) < Date.parse(claim.untilAt)) && (claim.firstClaim === true || Date.parse(message.ts) > Date.parse(claim.claimedAt)));
       };
-      const eligible = (m) => m && typeof m.text === "string" && typeof m.from === "string" && typeof m.to === "string" && (!name || (sessionId ? m.fromSessionId !== sessionId : m.from !== name) && addressedToReader(m));
+      const eligible = (m) => m && typeof m.text === "string" && typeof m.from === "string" && typeof m.to === "string" && (!name || (sessionId ? canonicalSessionId(room, m.fromSessionId) !== sessionId : m.from !== name) && addressedToReader(m));
       while (pos < data.length) {
         const end = data.indexOf(10, pos);
         if (end < 0) break;
@@ -874,7 +962,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
     const active = new Set(peers.filter((peer) => peerAlive(peer) || retainRecentPeers && now - Date.parse(peer.lastSeen) < PEER_TTL).map((peer) => peer.sessionId));
     const lastSeen = new Map(peers.filter((peer) => typeof peer.sessionId === "string").map((peer) => [peer.sessionId, Date.parse(peer.lastSeen) || 0]));
     for (const record of identityRecords(room)) {
-      if (active.has(record.sessionId) || rememberedAliases(record, now).length) continue;
+      if (record.conversationKey || active.has(record.sessionId) || rememberedAliases(record, now).length) continue;
       const file = identityFile(room, record.sessionId);
       let lastActivity;
       try {
@@ -908,7 +996,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
         }
         const peers = listPeers(room, { includeStale: true });
         const now = Date.now();
-        if (peers.some((p) => peerAlive(p) || retainRecentPeers && now - Date.parse(p.lastSeen) < PEER_TTL)) {
+        if (identityRecords(room).some((record) => record.conversationKey) || peers.some((p) => peerAlive(p) || retainRecentPeers && now - Date.parse(p.lastSeen) < PEER_TTL)) {
           pruneReleasedIdentities(room, peers, now, identityTtlMs);
           return;
         }
@@ -920,7 +1008,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
     }
     return removed;
   }
-  return { home, cwd, resolveRoom, roomDir, roomPath, readMeta, listPeers, claimIdentity, getIdentity, syncSessionTitle, resolveRecipient, touchPeer, updatePeer, releaseIdentity, appendMessage, appendWatchedMessage, updateMeta, inspectNotifications, takeUnread, commitCursor, beginReplyWait, replyWaitStatus, cancelReplyWait, clearReplyWaitOnRead, isPeerAlive: peerAlive, listRooms, tidyRooms, heldLock, listLocks, acquireResource, releaseResource, describeLock };
+  return { home, cwd, resolveRoom, roomDir, roomPath, readMeta, listPeers, claimIdentity, getIdentity, bindConversation, markConnectionUsed, syncSessionTitle, resolveRecipient, touchPeer, updatePeer, releaseIdentity, appendMessage, appendWatchedMessage, updateMeta, inspectNotifications, takeUnread, commitCursor, beginReplyWait, replyWaitStatus, cancelReplyWait, clearReplyWaitOnRead, isPeerAlive: peerAlive, listRooms, tidyRooms, heldLock, listLocks, acquireResource, releaseResource, describeLock };
 }
 var LIMITS, IDENTITY_LIMITS, LOCK_LIMITS, PEER_TTL, EXPIRED_REPLY_WAIT_RETENTION, pause, isObject;
 var init_mailbox = __esm({
@@ -2476,7 +2564,6 @@ var AgentChatPlugin = async ({ client, directory }, options = {}) => {
   });
   const autoBind = (sessionID) => {
     if (!env.AGENT_CHAT_NOTIFY_CONFIG || env.AGENT_CHAT_BROKER_URL) return "disabled";
-    if (findBinding({ client: "opencode", hostSessionId: sessionID, cwd: directory, env })) return "bound";
     const currentCwd = canonicalCwd(directory);
     if (!currentCwd) return "directory-invalid";
     const home = env.AGENT_CHAT_HOME || path8.join(os4.homedir(), ".agent-chat");
@@ -2487,12 +2574,21 @@ var AgentChatPlugin = async ({ client, directory }, options = {}) => {
     const room = { id: hint.room, label: hint.room };
     const peer = store.listPeers(room).find((candidate) => candidate.sessionId === hint.mailboxSessionId && candidate.name === hint.name && canonicalCwd(candidate.cwd) === currentCwd && candidate.client.toLowerCase().includes("opencode") && store.isPeerAlive(candidate));
     if (!peer) return "peer-missing";
+    const existing = findBinding({ client: "opencode", hostSessionId: sessionID, cwd: directory, env });
+    const attached = store.bindConversation({
+      client: "opencode",
+      hostSessionId: sessionID,
+      cwd: directory,
+      room,
+      sessionId: peer.sessionId,
+      previousSessionId: existing?.room === room.id && !existing.brokerUrl ? existing.mailboxSessionId : void 0
+    });
     bindNotification({ configFile: env.AGENT_CHAT_NOTIFY_CONFIG, binding: {
       client: "opencode",
       hostSessionId: sessionID,
       cwd: directory,
       room: hint.room,
-      mailboxSessionId: hint.mailboxSessionId
+      mailboxSessionId: attached.sessionId
     } });
     claimBindHint({ home, mcpPid: hint.mcpPid });
     return "linked";
@@ -2523,16 +2619,24 @@ var AgentChatPlugin = async ({ client, directory }, options = {}) => {
     if (!host) return "host-missing";
     if (canonicalCwd(host.cwd) !== currentCwd) return "host-cwd-mismatch";
     const binding = findBinding({ client: "opencode", hostSessionId: input.sessionID, cwd: directory, env });
-    if (binding?.room !== roomId || binding.mailboxSessionId !== sessionId) {
+    const attached = store.bindConversation({
+      client: "opencode",
+      hostSessionId: input.sessionID,
+      cwd: directory,
+      room,
+      sessionId,
+      previousSessionId: binding?.room === roomId && !binding.brokerUrl ? binding.mailboxSessionId : void 0
+    });
+    if (binding?.room !== roomId || binding.mailboxSessionId !== attached.sessionId) {
       bindNotification({ configFile: env.AGENT_CHAT_NOTIFY_CONFIG, binding: {
         client: "opencode",
         hostSessionId: input.sessionID,
         cwd: directory,
         room: roomId,
-        mailboxSessionId: sessionId
+        mailboxSessionId: attached.sessionId
       } });
     }
-    presence.linkHost({ client: "opencode", hostSessionId: input.sessionID, sessionId, room, name: candidates[0].name });
+    presence.linkHost({ client: "opencode", hostSessionId: input.sessionID, sessionId: attached.sessionId, room, name: attached.name });
     return "linked";
   };
   const linkIdentityTool = (input, output) => {
