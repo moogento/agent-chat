@@ -78,3 +78,17 @@ test('saved session authentication and active adapter conflicts keep their origi
   assert.deepEqual(fs.readFileSync(f.sessionFile), invalidBytes);
   assert.equal(fs.existsSync(`${f.sessionFile}.lock`), false);
 });
+
+test('a saved legacy worktree session receives the current client repository on resume', async t => {
+  const f=await fixture(t);
+  const original=await createRemoteSession({...f.options,repo:'m2moo',client:'claude'});
+  await closeRemoteSession(original);
+  const file=path.join(f.home,'.broker-sessions',`${original.sessionId}.json`),record=JSON.parse(fs.readFileSync(file));
+  delete record.repo;record.name='claude-pr28-a1b2c3';fs.writeFileSync(file,JSON.stringify(record));
+  const resumed=await createRemoteSession({...f.options,repo:'m2moo',client:'claude'});
+  assert.equal(resumed.sessionId,original.sessionId);
+  assert.match(JSON.parse(fs.readFileSync(file)).name,/^claude-m2moo-untitled-[a-f0-9]{6}$/);
+  assert.equal(resumed.peer.name,JSON.parse(fs.readFileSync(file)).name);
+  assert.equal(JSON.parse(fs.readFileSync(file)).repo,'m2moo');
+  await closeRemoteSession(resumed);
+});

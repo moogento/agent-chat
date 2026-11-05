@@ -520,6 +520,7 @@ test('broker uses client repository metadata for foreign paths, renames, and res
   assert.equal(saved.client,'claude-code');assert.equal(saved.repo,'m2moo');
   assert.equal((await inspectRemoteNotifications({url:f.broker.url,tokenFile:f.tokenFile,room:'shared',sessionId:session.sessionId,sessionDir:f.creds})).peer.clientCwd,clientCwd);
   await closeRemoteSession(session);
+  assert.equal((await raw(f.broker.url,`/v1/sessions/${session.sessionId}/resume`,session.sessionToken,{repo:'../bad'})).status,400);
   const resumed=await resumeRemoteSession(session);assert.equal(resumed.peer.name,renamed);
   const master=fs.readFileSync(f.tokenFile,'utf8');
   assert.equal((await raw(f.broker.url,'/v1/sessions',master,{room:'shared',client:'codex',clientCwd,repo:'../bad'})).status,400);
@@ -531,7 +532,7 @@ test('legacy broker provisional names migrate to a repository-qualified untitled
   await closeRemoteSession(session);
   const file=path.join(f.home,'.broker-sessions',`${session.sessionId}.json`);
   const record=JSON.parse(fs.readFileSync(file));delete record.repo;record.name='codex-agent-chat-a1b2c3';fs.writeFileSync(file,JSON.stringify(record));
-  const resumed=await resumeRemoteSession(session);
+  const resumed=await resumeRemoteSession({...session,repo:undefined});
   assert.match(resumed.peer.name,/^codex-agentchat-untitled-[a-f0-9]{6}$/);
 });
 
@@ -583,4 +584,23 @@ test('untitled names saved by an older broker retain their canonical repository 
   const file=path.join(f.home,'.broker-sessions',`${session.sessionId}.json`),record=JSON.parse(fs.readFileSync(file));
   delete record.repo;fs.writeFileSync(file,JSON.stringify(record));
   assert.equal((await resumeRemoteSession(session)).peer.name,'codex-m2moo-untitled-a1b2c3');
+});
+
+test('resume negotiates repository support before contacting an older broker', async t => {
+  const http=await import('node:http'),requests=[];
+  let active=false;
+  const server=http.createServer(async(req,res)=>{
+    res.setHeader('Content-Type','application/json');
+    if(req.url==='/health'){res.end('{"ok":true}');return;}
+    const chunks=[];for await(const chunk of req)chunks.push(chunk);
+    const body=JSON.parse(Buffer.concat(chunks).toString()||'{}');requests.push(body);
+    if(active){res.statusCode=409;res.end('{}');return;}
+    active=true;
+    if(Object.keys(body).length){res.statusCode=400;res.end('{"error":"Unexpected request field"}');return;}
+    res.end('{"leaseMs":30000}');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const result=await resumeRemoteSession({url:`http://127.0.0.1:${server.address().port}`,sessionId:crypto.randomUUID(),sessionToken:crypto.randomBytes(32).toString('hex'),repo:'m2moo'});
+  assert.equal(result.leaseMs,30000);assert.deepEqual(requests,[{}]);
 });

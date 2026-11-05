@@ -427,6 +427,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
     });
   }
   function resolveRecipient(room, target) {
+    const requestedTitle = typeof target === "string" ? slug(target) : "";
     try {
       target = safeSessionId(target);
     } catch {
@@ -442,7 +443,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
     if (record && (record.name === target || record.sessionId === target || rememberedAliases(record).some((alias) => alias.name === target && !alias.untilAt))) return { name: record.name, sessionId: record.sessionId, alias: record.name !== target };
     const legacy = peers.find((peer2) => peer2.name === target);
     if (legacy) return { name: legacy.name, sessionId: legacy.sessionId, alias: false };
-    const title = slug(target);
+    const title = requestedTitle;
     if (!title) return null;
     const matchesTitle = (item) => {
       const parsed = parseSessionName(item.name);
@@ -1345,12 +1346,12 @@ async function createRemoteSession({ url, tokenFile, room, name, client = "unkno
       if (previous.url !== url || previous.bootstrapHash !== bootstrapHash || previous.clientCwd !== clientCwd || previous.room !== room || typeof previous.sessionToken !== "string") throw new Error("Stored broker session does not match this endpoint, room, token file and client directory");
       let resumed;
       try {
-        resumed = await resumeRemoteSession(previous);
+        resumed = await resumeRemoteSession({ ...previous, repo: repo ?? remoteRepo(sessionRepo(clientCwd)) });
       } catch (error) {
         if (error.status === 404 || error.status === 410) throw Object.assign(new Error("Saved broker session expired or is no longer available. Stop adapters using this file, then remove the obsolete AGENT_CHAT_BROKER_SESSION_FILE or choose a fresh absolute path and restart. The saved credentials have been preserved."), { status: error.status });
         throw error;
       }
-      session = { ...previous, leaseMs: resumed.leaseMs };
+      session = { ...previous, repo: repo ?? remoteRepo(sessionRepo(clientCwd)), leaseMs: resumed.leaseMs };
       if (resumed.peer?.room !== room) throw new Error("Resumed broker room does not match");
     } else {
       const body = { room, ...name === void 0 ? {} : { name }, repo: repo ?? remoteRepo(sessionRepo(clientCwd)), client, clientCwd, resumable };
@@ -1363,7 +1364,7 @@ async function createRemoteSession({ url, tokenFile, room, name, client = "unkno
         const { repo: ignoredRepo, ...legacyBody } = body;
         result = await request(url, "/v1/sessions", { ...options, body: legacyBody });
       }
-      session = { ...result, url, clientCwd, resumable };
+      session = { ...result, url, clientCwd, repo: body.repo, resumable };
     }
     const credentialFile = saveSession(session, { sessionDir, home, tokenFile, sessionFile: explicitFile });
     Object.defineProperty(session, localResources, { value: { release: storage.release, credentialFile, ephemeral: !resumable } });
@@ -1381,7 +1382,17 @@ async function createRemoteSession({ url, tokenFile, room, name, client = "unkno
   }
 }
 async function resumeRemoteSession(session) {
-  return request(session.url, `/v1/sessions/${session.sessionId}/resume`, { token: session.sessionToken, body: {}, timeoutMs: 1e4 });
+  let body = {};
+  if (session.repo !== void 0) {
+    if (typeof session.repo !== "string" || !/^[a-z0-9]{1,32}$/.test(session.repo)) throw new Error("Invalid repository slug");
+    let health;
+    try {
+      health = await request(session.url, "/health", { method: "GET", token: session.sessionToken, timeoutMs: 3e3 });
+    } catch {
+    }
+    if (health?.capabilities?.resumeRepo === true) body = { repo: session.repo };
+  }
+  return request(session.url, `/v1/sessions/${session.sessionId}/resume`, { token: session.sessionToken, body, timeoutMs: 1e4 });
 }
 async function heartbeatRemoteSession(session) {
   return request(session.url, `/v1/sessions/${session.sessionId}/heartbeat`, { token: session.sessionToken, body: {}, timeoutMs: 1e4 });

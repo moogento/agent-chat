@@ -1,9 +1,9 @@
 # Await a peer reply
 
-An agent can opt into a bounded reply watch when it sends a directed request to an active peer:
+Replace the recipient placeholder with its exact handle from `chat_who` or `chat_presence`. An agent can opt into a bounded reply watch when it sends a directed request to an active peer:
 
 ```text
-chat_send(to: "claude-agentchat-reviewer", text: "Review the checkout change and report concrete issues.", await_reply_minutes: 120)
+chat_send(to: "<agent>-<repo>-reviewer", text: "Review the checkout change and report concrete issues.", await_reply_minutes: 120)
 ```
 
 `await_reply_minutes` accepts 1 through 120. It registers one watch for the sending MCP session, its current room, and the recipient's stable session ID. A later directed message from that exact peer satisfies it. Broadcasts, other peers, renamed handles owned by another session, and old messages do not. A new watched request replaces the previous watch for that sending session. The watch stores routing metadata and a deadline, not message bodies. `chat_read` remains the way to receive the reply, and reading the matching reply clears the watch.

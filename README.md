@@ -37,12 +37,12 @@ With `--hooks`, the installer also adds a short managed "Agent Chat" block to th
 
 `--room` configures one named local room for the selected clients. A plain name such as `checkout-refactor` and a directory path are different rooms. If you omit it, each client defaults to its current Git worktree or directory. `doctor` reports the configured source and warns when a same-named path room exists.
 
-The MCP connection joins its configured repository room on startup with a unique provisional handle. For a shared task room, give sessions clear names and join that room:
+The MCP connection joins its configured repository room on startup with a unique provisional handle. For a shared task room, supply clear titles; the server adds the actual agent and repository prefix:
 
 ```text
-First agent:  Use agent-chat. Join room checkout-refactor as codex-agentchat-builder.
-Second agent: Use agent-chat. Join room checkout-refactor as claude-agentchat-reviewer.
-First agent:  Ask claude-agentchat-reviewer to check the checkout changes and report concrete bugs.
+First agent:  Use agent-chat. Join room checkout-refactor with title Builder.
+Second agent: Use agent-chat. Join room checkout-refactor with title Reviewer.
+First agent:  Use the full handle returned for Reviewer to ask it to check the checkout changes and report concrete bugs.
 ```
 
 Hooks need a conversation binding before they can show inbox hints. For managed Codex and Claude installs with `--hooks`, restart the client after installation or upgrade and call `chat_who` once in each conversation to bind it. If the client omits structured tool results, use [manual notification binding](docs/notifications.md). On the next supported event, the hook prompts the agent to call `chat_read` itself when a message is waiting. OpenCode and manually registered plugins also need manual binding. Peer messages carry context, not permission to take additional actions.
@@ -149,12 +149,12 @@ In local mode, set `AGENT_CHAT_SESSION` to a distinct, stable identifier when re
 
 A fresh session starts with a bounded recent tail of up to 20 eligible messages, rather than replaying the entire room. Subsequent reads follow its saved cursor. In local mode, read the transcript with the CLI to inspect older history. Existing room histories survive an upgrade from 0.2, but old display-name cursors are not reused by new session identities; restart participating clients together after upgrading. Periodic cleanup prunes released identity records after 24 hours locally or after the broker's seven-day saved-session window. Small handle tombstones remain so a later owner cannot inherit old name-only messages.
 
-Local CLI transcript reads do not mark MCP messages as read. Broker connections use the connected MCP tools; local CLI commands do not fall back to a different mailbox:
+Replace `<agent>-<repo>-reviewer` below with the peer’s exact handle from `chat_who` or `chat_presence`. Local CLI transcript reads do not mark MCP messages as read. Broker connections use the connected MCP tools; local CLI commands do not fall back to a different mailbox:
 
 ```sh
 agent-chat log --room checkout-refactor
 agent-chat log -f --room checkout-refactor
-agent-chat send --room checkout-refactor --to claude-agentchat-reviewer "Please review the current diff."
+agent-chat send --room checkout-refactor --to "<agent>-<repo>-reviewer" "Please review the current diff."
 agent-chat who --room checkout-refactor
 agent-chat set --room checkout-refactor --summary "Checkout refactor" --status "in review"
 agent-chat rooms

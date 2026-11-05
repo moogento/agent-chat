@@ -245,3 +245,9 @@ test('linked worktree repository discovery works when Git rejects NUL porcelain 
   const run=(command,args,options)=>{if(args.includes('-z'))throw new Error('Unsupported flag');if(args.includes('core.quotePath=false'))fallback=true;return execFileSync(command,args,options);};
   assert.equal(path.basename(sessionRepo(worktree,run)),'m2-moo');assert.equal(fallback,true);
 });
+
+test('accented title shorthand is normalized from the original input', t => {
+  const {mailbox}=fixture(t),room=mailbox.resolveRoom('names');
+  const peer=mailbox.claimIdentity(room,'codex-m2moo-reviewcode','codex','accented');
+  assert.equal(mailbox.resolveRecipient(room,'Réview code').sessionId,peer.sessionId);
+});
