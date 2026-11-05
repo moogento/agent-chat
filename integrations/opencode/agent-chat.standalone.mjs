@@ -624,7 +624,8 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.hom
   function heldLock(resource, now = Date.now()) {
     const record = readJson(resourceFile(resource));
     if (!record || !Number.isSafeInteger(record.expiresAt) || record.expiresAt <= now || !lockHolderAlive(record)) return null;
-    return record;
+    const owner = getIdentity({ room: record.room, sessionId: record.sessionId });
+    return owner ? { ...record, name: owner.name } : record;
   }
   function listLocks() {
     return fs.readdirSync(resourceLocks).filter((name) => name.endsWith(".json")).map((name) => {

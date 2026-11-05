@@ -46,8 +46,8 @@ test('nested directories and Git worktrees keep the parent repository name', t =
   const nested = path.join(cwd, 'src'); fs.mkdirSync(nested);
   const worktree = path.join(directory, 'pr-4649-review');
   git('worktree', 'add', '--detach', worktree);
-  assert.equal(sessionRepo(nested), cwd);
-  assert.equal(sessionRepo(worktree), cwd);
+  assert.equal(fs.realpathSync.native(sessionRepo(nested)), fs.realpathSync.native(cwd));
+  assert.equal(fs.realpathSync.native(sessionRepo(worktree)), fs.realpathSync.native(cwd));
   assert.equal(sessionName({ client: 'codex', cwd: worktree, title: 'Review PR' }), 'codex-m2moo-reviewpr');
 });
 
@@ -115,4 +115,20 @@ test('an explicit owner-requested title replacement preserves the active process
   assert.equal(updated.nameSource, 'explicit');
   assert.equal(mailbox.resolveRecipient(room, peer.name).sessionId, peer.sessionId);
   assert.equal(mailbox.takeUnread(updated).messages[0].text, 'pending');
+});
+
+test('held locks show the current canonical owner after a title change', t => {
+  const { mailbox, cwd } = fixture(t);
+  const room = mailbox.resolveRoom('names');
+  const owner = mailbox.claimIdentity(room, 'random-owner-123456', 'codex', 'lock-owner');
+  const other = mailbox.claimIdentity(room, 'other', 'claude', 'other');
+  const original = mailbox.acquireResource(owner, 'runtime', 'update runtime').record;
+  const renamed = mailbox.syncSessionTitle({ room, sessionId: owner.sessionId, client: owner.client, cwd, title: 'Review PR 4649' });
+  const lock = mailbox.heldLock('runtime');
+  assert.equal(lock.name, renamed.name);
+  assert.equal(lock.sessionId, original.sessionId);
+  assert.equal(lock.expiresAt, original.expiresAt);
+  assert.equal(mailbox.listLocks()[0].name, renamed.name);
+  assert.throws(() => mailbox.acquireResource(other, 'runtime', 'another update'), /held by codex-m2moo-reviewpr4649/);
+  assert.equal(mailbox.releaseResource(renamed, 'runtime').released, true);
 });
