@@ -151,6 +151,8 @@ test('broker restart resumes only a proven session and preserves unread cursor',
   await call(alice, 'chat_send', { to: 'bob', text: 'already read' }); assert.match((await call(bob, 'chat_read')).text, /already read/);
   await call(alice, 'chat_send', { to: 'bob', text: 'still unread' });
   const port = f.broker.server.address().port; await f.broker.close();
+  assert.deepEqual(fs.readdirSync(path.join(f.home, 'rooms', 'shared', 'peers')), []);
+  assert.ok(JSON.parse(fs.readFileSync(path.join(f.home, 'rooms', 'shared', 'identities', `${bob.sessionId}.json`))).releasedAt);
   const broker = await createBroker({ home: f.home, tokenFile: f.tokenFile, port }); t.after(() => broker.close());
   await assert.rejects(resumeRemoteSession({ ...bob, sessionToken: alice.sessionToken }), error => error.status === 401);
   await resumeRemoteSession(bob);

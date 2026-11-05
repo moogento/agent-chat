@@ -81,7 +81,13 @@ This command syntax is for POSIX shells. Use the equivalent environment setup in
 
 ## Keep the mailbox session across reconnects
 
-The configuration examples in this section are for manually registered MCP connections. Do not edit managed entries behind the installer's ownership receipt. Managed Codex/Claude conversations can auto-bind their replacement session; rerun the managed helper for OpenCode or when auto-binding is unavailable.
+Managed local Codex, Claude Code and OpenCode adapters retain a verified conversation identity separately from its MCP process. On initial connection and after reconnecting, call `chat_who` before other Agent Chat tools. The host hook or OpenCode adapter verifies the identity result and reattaches the original mailbox ID. The first result may show a provisional ID; the next tool uses the recovered identity. An existing exact local notification binding can seed this identity during an upgrade.
+
+Reattachment requires the same agent family, host conversation ID, canonical working directory, room and mailbox. A terminal and desktop app can resume the same host conversation when they supply that same ID. A new chat with the same title or folder remains separate. A second live connection is refused without interrupting the owner. A connection already owned by a different host conversation is also refused, with a recovery notice. New host conversations, including a new conversation after a host reset, need their own MCP connection and a distinct `AGENT_CHAT_SESSION` if one is configured; they do not inherit the previous conversation's inbox through a notification-only binding. Reattachment also refuses a provisional connection that already started other mailbox work, so it cannot merge two independent inbox histories.
+
+Inbox cursors, messages, reply watches, profile and names remain with the durable identity. Disconnects and local `SessionEnd` events keep its reply watch until the original deadline or explicit cancellation. Locks remain held until their existing expiry or explicit unlock, without automatic renewal. Durable identities and their room history are retained during idle cleanup. This change does not reconnect running processes or change broker recovery.
+
+The configuration examples below are for manually registered MCP connections without verified host binding. Do not edit managed entries behind the installer's ownership receipt.
 
 By default, a new MCP process creates a new session ID. A manual binding must then be updated. To retain it, give this one MCP connection a distinct stable `AGENT_CHAT_SESSION`, for example `codex-checkout-review`. Never reuse that value for simultaneous conversations. The core rejects simultaneous processes claiming the same session. Generated IDs are UUIDs; explicit IDs may contain 1 to 128 safe filename characters.
 
@@ -157,9 +163,9 @@ Claude Code reports the shell's current directory in each hook event, which chan
 
 ## OpenCode auto-binding from the MCP process
 
-The OpenCode adapter binds itself without a manual step and without reading tool output. After `chat_read`, `chat_who`, `chat_join`, `chat_rename`, or `chat_accept_invite` succeeds, the MCP server records its own mailbox identity in `$AGENT_CHAT_HOME/bind-hints/mcp-<pid>.json`, together with the ID of the client process that spawned it. The plugin, running inside that client process, checks the directory on session start, on idle, and after each tool call, and binds only when exactly one hint matches its own process and working directory, the mailbox peer is still alive, and that host session has no binding yet. It then deletes the hint.
+The OpenCode adapter binds itself without a manual step and without reading tool output. After `chat_read`, `chat_who`, `chat_join`, `chat_rename`, or `chat_accept_invite` succeeds, the MCP server records its own mailbox identity in `$AGENT_CHAT_HOME/bind-hints/mcp-<pid>.json`, together with the ID of the client process that spawned it. The plugin, running inside that client process, checks the directory on session start, on idle, and after each tool call, and binds only when exactly one hint matches its own process and working directory, the mailbox peer is still alive, and its verified conversation can be registered or reattached without taking an active owner. It then deletes the hint after a successful bind.
 
-Two sessions in one client process and directory mean two MCP servers and therefore two hints, and the adapter binds neither rather than guessing. A session whose hint was already claimed by another host session writes a fresh hint on its next `chat_read`, which resolves it. Hints are single-use, expire after 15 minutes, and are ignored in broker mode.
+Two sessions in one client process and directory mean two MCP servers and therefore two hints, and the adapter binds neither rather than guessing. After reconnecting, call `chat_who` first to write a fresh hint and restore the verified identity. A connection already owned by another host conversation, or one that already started independent mailbox work, is refused and needs a separate fresh MCP connection. Refusals are shown once per host session, connection and message, separately in agent tool results and human toasts. Hints are single-use, expire after 15 minutes, and are ignored in broker mode.
 
 ## Manual OpenCode local plugin
 

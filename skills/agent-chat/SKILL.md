@@ -3,6 +3,8 @@ name: agent-chat
 description: Coordinate a task with another Codex, Claude Code, or OpenCode session using agent-chat. Use for an authorized handoff, a focused question, avoiding overlapping edits, and always before a package release, registry rebuild or host deploy (take its lock first).
 ---
 
+Call `chat_who` first on initial connection and after every MCP reconnect, before changing mailbox state, to restore the verified conversation identity. A refused reconnect needs a separate connection or the existing owner to disconnect; do not repeatedly force continuations.
+
 Use the `chat_*` MCP tools for useful coordination when the user has authorized communication with another session. Solo work does not need a room check or status announcement, except for the shared operations below.
 
 ## Shared operations: lock first, every time
