@@ -78,3 +78,65 @@ test('saved session authentication and active adapter conflicts keep their origi
   assert.deepEqual(fs.readFileSync(f.sessionFile), invalidBytes);
   assert.equal(fs.existsSync(`${f.sessionFile}.lock`), false);
 });
+
+test('a saved legacy worktree session receives the current client repository on resume', async t => {
+  const f=await fixture(t);
+  const original=await createRemoteSession({...f.options,repo:'m2moo',client:'claude'});
+  await closeRemoteSession(original);
+  const file=path.join(f.home,'.broker-sessions',`${original.sessionId}.json`),record=JSON.parse(fs.readFileSync(file));
+  delete record.repo;record.name='claude-pr28-a1b2c3';fs.writeFileSync(file,JSON.stringify(record));
+  const resumed=await createRemoteSession({...f.options,repo:'m2moo',client:'claude'});
+  assert.equal(resumed.sessionId,original.sessionId);
+  assert.match(JSON.parse(fs.readFileSync(file)).name,/^claude-m2moo-untitled-[a-f0-9]{6}$/);
+  assert.equal(resumed.peer.name,JSON.parse(fs.readFileSync(file)).name);
+  assert.equal(JSON.parse(fs.readFileSync(file)).repo,'m2moo');
+  await closeRemoteSession(resumed);
+});
+
+test('a broker-first legacy resume can later learn the authoritative client repository', async t => {
+  const f=await fixture(t);
+  const original=await createRemoteSession({...f.options,repo:'m2moo',client:'claude'});
+  await closeRemoteSession(original);
+  const file=path.join(f.home,'.broker-sessions',`${original.sessionId}.json`),record=JSON.parse(fs.readFileSync(file));
+  delete record.repo;record.name='claude-pr28-a1b2c3';fs.writeFileSync(file,JSON.stringify(record));
+  const {resumeRemoteSession}=await import('../lib/broker-client.mjs');
+  const first=await resumeRemoteSession({...original,repo:undefined});
+  assert.match(first.peer.name,/^claude-pr28-untitled-[a-f0-9]{6}$/);
+  await closeRemoteSession(original);
+  assert.equal(JSON.parse(fs.readFileSync(file)).repo,undefined);
+  const updated=await createRemoteSession({...f.options,repo:'m2moo',client:'claude'});
+  assert.equal(updated.peer.name,first.peer.name.replace('claude-pr28-','claude-m2moo-'));
+  assert.equal(JSON.parse(fs.readFileSync(file)).repo,'m2moo');
+  await closeRemoteSession(updated);
+});
+
+test('legacy task titles that resemble agent identifiers keep all words and the actual agent', async t => {
+  const f=await fixture(t);
+  const original=await createRemoteSession({...f.options,repo:'m2moo',client:'claude'});
+  await closeRemoteSession(original);
+  const file=path.join(f.home,'.broker-sessions',`${original.sessionId}.json`),record=JSON.parse(fs.readFileSync(file));
+  delete record.repo;record.name='codex-wake-fix';fs.writeFileSync(file,JSON.stringify(record));
+  const {resumeRemoteSession}=await import('../lib/broker-client.mjs');
+  const first=await resumeRemoteSession({...original,repo:undefined});
+  assert.match(first.peer.name,/^claude-.*-codexwakefix$/);
+  await closeRemoteSession(original);
+  const updated=await createRemoteSession({...f.options,repo:'m2moo',client:'claude'});
+  assert.equal(updated.peer.name,'claude-m2moo-codexwakefix');
+  await closeRemoteSession(updated);
+});
+
+test('an explicit title chosen while repo metadata is inferred survives its later correction', async t => {
+  const f=await fixture(t);
+  const original=await createRemoteSession({...f.options,repo:'m2moo',client:'claude'});
+  await closeRemoteSession(original);
+  const file=path.join(f.home,'.broker-sessions',`${original.sessionId}.json`),record=JSON.parse(fs.readFileSync(file));
+  delete record.repo;record.name='claude-pr28-a1b2c3';fs.writeFileSync(file,JSON.stringify(record));
+  const {resumeRemoteSession,remoteRpc,acknowledgeRemoteResponse}=await import('../lib/broker-client.mjs');
+  await resumeRemoteSession({...original,repo:undefined});
+  const renamed=await remoteRpc(original,{jsonrpc:'2.0',id:900100,method:'tools/call',params:{name:'chat_rename',arguments:{name:'Keep this title'}}});
+  await acknowledgeRemoteResponse(original,renamed.receipt);
+  await closeRemoteSession(original);
+  const updated=await createRemoteSession({...f.options,repo:'m2moo',client:'claude'});
+  assert.equal(updated.peer.name,'claude-m2moo-keepthistitle');
+  await closeRemoteSession(updated);
+});

@@ -91,7 +91,7 @@ For Codex, set the values on the actual MCP connection in `config.toml`:
 [mcp_servers.agent-chat]
 command = "node"
 args = ["/absolute/path/to/agent-chat/agent-chat.mjs"]
-env = { AGENT_CHAT_SESSION = "codex-checkout-review", AGENT_CHAT_ROOM = "checkout-refactor", AGENT_CHAT_NAME = "reviewer" }
+env = { AGENT_CHAT_SESSION = "codex-checkout-review", AGENT_CHAT_ROOM = "checkout-refactor", AGENT_CHAT_NAME = "Review checkout" }
 ```
 
 For Claude's MCP JSON, put the values under the server's `env` object:
@@ -102,7 +102,7 @@ For Claude's MCP JSON, put the values under the server's `env` object:
     "agent-chat": {
       "command": "node",
       "args": ["/absolute/path/to/agent-chat/agent-chat.mjs"],
-      "env": { "AGENT_CHAT_SESSION": "claude-checkout-review", "AGENT_CHAT_ROOM": "checkout-refactor", "AGENT_CHAT_NAME": "reviewer" }
+      "env": { "AGENT_CHAT_SESSION": "claude-checkout-review", "AGENT_CHAT_ROOM": "checkout-refactor", "AGENT_CHAT_NAME": "Review checkout" }
     }
   }
 }

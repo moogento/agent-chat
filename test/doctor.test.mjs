@@ -166,7 +166,7 @@ test('doctor identifies altered and missing runtime files and version drift', as
   const altered = await doctorProject({ project });
   assert.equal(check(altered, 'runtime.files')[0].status, 'error');
   assert.equal(altered.runtime.status, 'changed');
-  fs.rmSync(path.join(paths.runtime, 'lib/mailbox.mjs'));
+  fs.rmSync(path.join(paths.runtime, 'lib/session-name.mjs'));
   const missing = await doctorProject({ project });
   assert.equal(missing.ok, false);
   assert.equal(check(missing, 'runtime.entrypoints')[0].status, 'error');

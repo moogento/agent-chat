@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { remoteRepo, sessionRepo } from '../lib/session-name.mjs';
 import { createMailbox, IDENTITY_LIMITS } from '../lib/mailbox.mjs';
+
+const testRepo = remoteRepo(sessionRepo(process.cwd()));
 
 function fixture(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-identity-'));
@@ -122,7 +125,7 @@ test('bound title sync validates room, session, client and cwd while preserving 
   assert.equal(mailbox.syncSessionTitle({ room, sessionId: peer.sessionId, title: 'new', client: peer.client, cwd: path.join(peer.cwd, 'other') }), null);
   assert.equal(mailbox.syncSessionTitle({ room, sessionId: 'other-session', title: 'new', client: peer.client, cwd: peer.cwd }), null);
   const renamed = mailbox.syncSessionTitle({ room, sessionId: peer.sessionId, title: 'New title', client: peer.client, cwd: peer.cwd, titleSource: 'opencode:session.updated' });
-  assert.equal(renamed.name, 'New-title');
+  assert.equal(renamed.name, `opencode-${testRepo}-newtitle`);
   assert.equal(renamed.pid, peer.pid);
   assert.equal(renamed.titleSource, 'opencode:session.updated');
   assert.equal(mailbox.resolveRecipient(room, 'old').sessionId, peer.sessionId);
@@ -133,7 +136,7 @@ test('an explicit handle survives title updates and recorded title metadata stay
   const { mailbox, room } = fixture(t);
   const peer = mailbox.claimIdentity(room, 'chosen', 'opencode', 'explicit-session', { nameSource: 'explicit' });
   const updated = mailbox.syncSessionTitle({ room, sessionId: peer.sessionId, title: 'Different title', client: peer.client, cwd: peer.cwd });
-  assert.equal(updated.name, 'chosen');
+  assert.equal(updated.name, `opencode-${testRepo}-chosen`);
   assert.equal(updated.sessionTitle, 'Different title');
   assert.equal(updated.nameSource, 'explicit');
 });

@@ -590,13 +590,13 @@ test('Claude custom title changes rename the exact bound session and retain stab
   await runCommandHook({ client: 'claude-code', payload: { session_id: f.binding.hostSessionId, cwd: f.cwd,
     hook_event_name: 'SessionStart', session_title: 'agentcommerce-cx' }, env: f.env, mailbox: f.mailbox, write: () => {} });
   let peer = f.mailbox.listPeers(f.room).find(item => item.sessionId === f.peer.sessionId);
-  assert.equal(peer.name, 'agentcommerce-cx');
+  assert.equal(peer.name, 'claude-worktree-agentcommercecx');
   assert.equal(readConfig(f.configFile).bindings[0].sessionTitle, 'agentcommerce-cx');
   assert.equal(f.mailbox.takeUnread({ ...peer, room: f.room }).messages.length, 1);
   await runCommandHook({ client: 'claude-code', payload: { session_id: f.binding.hostSessionId, cwd: f.cwd,
     hook_event_name: 'UserPromptSubmit', session_title: 'agentcommerce-renamed' }, env: f.env, mailbox: f.mailbox, write: () => {} });
   peer = f.mailbox.listPeers(f.room).find(item => item.sessionId === f.peer.sessionId);
-  assert.equal(peer.name, 'agentcommerce-renamed');
+  assert.equal(peer.name, 'claude-worktree-agentcommercerenamed');
   assert.equal(readConfig(f.configFile).bindings[0].titleSource, 'claude-code:session_title');
 });
 
@@ -610,7 +610,7 @@ test('Claude startup title names the peer on its first exact chat_who binding', 
   await runCommandHook({ client: 'claude-code', payload: { ...host, hook_event_name: 'PostToolUse', tool_name: tool,
     tool_response: { structuredContent: { agentChatIdentity: { version: 1, sessionId: f.peer.sessionId,
       cwd: f.cwd, room: f.room.id, name: f.peer.name } } } }, env, mailbox: f.mailbox, write: () => {} });
-  assert.equal(f.mailbox.listPeers(f.room).find(item => item.sessionId === f.peer.sessionId).name, 'PCai-agent-registration');
+  assert.equal(f.mailbox.listPeers(f.room).find(item => item.sessionId === f.peer.sessionId).name, 'claude-worktree-pcaiagentregistration');
 });
 
 test('OpenCode supported title events sync only exact bound main sessions', async t => {
@@ -623,11 +623,11 @@ test('OpenCode supported title events sync only exact bound main sessions', asyn
   await plugin.event(event(f.binding.hostSessionId, 'bad\nname'));
   assert.equal(f.mailbox.listPeers(f.room).find(item => item.sessionId === f.peer.sessionId).name, f.peer.name);
   await plugin.event(event(f.binding.hostSessionId, 'agentcommerce-cx'));
-  assert.equal(f.mailbox.listPeers(f.room).find(item => item.sessionId === f.peer.sessionId).name, 'agentcommerce-cx');
+  assert.equal(f.mailbox.listPeers(f.room).find(item => item.sessionId === f.peer.sessionId).name, 'opencode-worktree-agentcommercecx');
   assert.equal(f.mailbox.listPeers(f.room).find(item => item.sessionId === other.sessionId).name, other.name);
   assert.equal(readConfig(f.configFile).bindings[0].sessionTitle, 'agentcommerce-cx');
   await plugin.event(event(f.binding.hostSessionId, 'agentcommerce-next'));
-  assert.equal(f.mailbox.listPeers(f.room).find(item => item.sessionId === f.peer.sessionId).name, 'agentcommerce-next');
+  assert.equal(f.mailbox.listPeers(f.room).find(item => item.sessionId === f.peer.sessionId).name, 'opencode-worktree-agentcommercenext');
 });
 
 test('OpenCode child session tool and idle events do not register invitable presence', async t => {
@@ -649,7 +649,7 @@ test('OpenCode title seen before binding is applied after a later tool event', a
   assert.equal(fs.existsSync(f.configFile), false);
   bindNotification({ configFile: f.configFile, binding: f.binding });
   await plugin['tool.execute.after']({ sessionID: f.binding.hostSessionId }, { output: 'unchanged' });
-  assert.equal(f.mailbox.listPeers(f.room).find(item => item.sessionId === f.peer.sessionId).name, 'New-session');
+  assert.equal(f.mailbox.listPeers(f.room).find(item => item.sessionId === f.peer.sessionId).name, 'opencode-worktree-newsession');
 });
 
 test('OpenCode chat_who links exact same-repo sessions and syncs their own titles', async t => {
@@ -668,7 +668,7 @@ test('OpenCode chat_who links exact same-repo sessions and syncs their own title
   assert.equal(bindings.length, 2);
   for (const item of hosts) {
     assert.equal(bindings.find(binding => binding.hostSessionId === item.host).mailboxSessionId, item.peer.sessionId);
-    assert.equal(f.mailbox.listPeers(f.room).find(peer => peer.sessionId === item.peer.sessionId).name, item.title.replace(' ', '-'));
+    assert.equal(f.mailbox.listPeers(f.room).find(peer => peer.sessionId === item.peer.sessionId).name, `opencode-worktree-${item.title.toLowerCase().replace(' ', '')}`);
   }
   await plugin.event({ event: { type: 'message.updated', properties: { sessionID: 'host-one',
     info: { role: 'assistant', providerID: 'openai', modelID: 'gpt-6.1-sol' } } } });
@@ -770,7 +770,7 @@ test('title sync rejects a forged local binding and preserves an explicit chat n
   assert.equal((await sync({ cwd: f.root })).synced, false);
   assert.equal((await sync({})).synced, true);
   const peer = f.mailbox.listPeers(f.room).find(item => item.sessionId === explicit.sessionId);
-  assert.equal(peer.name, 'chosen-name');
+  assert.equal(peer.name, 'opencode-worktree-chosenname');
   assert.equal(peer.sessionTitle, 'Host title');
 });
 
@@ -807,7 +807,7 @@ test('host lifecycle publishes title, model, activity and removes ended sessions
     return output;
   };
   await run('SessionStart');
-  let host = presence.list(f.mailbox).find(item => item.name === 'PCai-agent-registration');
+  let host = presence.list(f.mailbox).find(item => item.name === 'claude-worktree-pcaiagentregistration');
   assert.equal(host.repo, f.cwd);
   assert.equal(host.model, 'claude-opus');
   assert.equal(host.activity, 'idle');

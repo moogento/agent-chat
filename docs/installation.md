@@ -214,7 +214,7 @@ For OpenCode, merge an entry into `opencode.json`:
 }
 ```
 
-Omitting `AGENT_CHAT_NAME` gives each MCP session a unique provisional handle. Set it only when you want to pin a fixed handle, and use `chat_join(name: "...")` to match a named host conversation later.
+Omitting `AGENT_CHAT_NAME` gives each MCP session a unique provisional handle. Set it to a session title or canonical agent-repo-title identifier, and use `chat_join(name: "...")` to match a named host conversation later.
 
 Claude Code can load the full plugin with `claude --plugin-dir /absolute/path/to/agent-chat`. For a persistent marketplace install, extract `agent-chat-marketplace-0.11.0.tgz`, register its `agent-chat-marketplace/` folder with `claude plugin marketplace add PATH` or `codex plugin marketplace add PATH`, then install `agent-chat@agent-chat-local` with the respective client's plugin command. Codex plugin lifecycle hooks currently have narrower surface support than project hooks; see [distribution details](distribution.md).
 

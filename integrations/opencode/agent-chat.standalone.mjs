@@ -13,15 +13,87 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
-// lib/mailbox.mjs
+// lib/session-name.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
+function agentType(client = "") {
+  return ["codex", "claude", "opencode"].find((type) => String(client).toLowerCase().includes(type)) || "unknown";
+}
+function parseSessionName(name) {
+  const match = /^(codex|claude|opencode|unknown)-([a-z0-9]{1,32})-((?:untitled-[a-f0-9]{6}|[a-z0-9]+)(?:-[0-9]+)?)$/.exec(name || "");
+  return match ? { agent: match[1], repo: match[2], title: match[3] } : null;
+}
+function titleBase(title) {
+  return /^untitled-[a-f0-9]{6}$/.test(title) ? title : title.replace(/-[0-9]+$/, "");
+}
+function remoteRepo(cwd) {
+  return (slug(String(cwd).replace(/\\/g, "/").split("/").filter(Boolean).at(-1) || "root") || "root").slice(0, 32);
+}
+function sessionRepo(cwd = process.cwd(), runGit = execFileSync) {
+  try {
+    const real = fs.realpathSync.native(cwd);
+    const options = { encoding: "utf8", timeout: 1e3, stdio: ["ignore", "pipe", "ignore"] };
+    const dirs = runGit("git", ["-C", real, "rev-parse", "--git-dir", "--git-common-dir"], options).trim().split(/\r?\n/).map((dir) => fs.realpathSync.native(path.resolve(real, dir)));
+    if (dirs[0] === dirs[1]) {
+      try {
+        return path.resolve(runGit("git", ["-C", real, "rev-parse", "--show-toplevel"], options).trim());
+      } catch {
+      }
+    }
+    let output, separator;
+    try {
+      output = runGit("git", ["-C", real, "worktree", "list", "--porcelain", "-z"], options);
+      separator = "\0";
+    } catch {
+      output = runGit("git", ["-C", real, "-c", "core.quotePath=false", "worktree", "list", "--porcelain"], options);
+      separator = /\r?\n/;
+    }
+    const fields = output.split(separator);
+    const first = fields.slice(0, fields.indexOf(""));
+    if (!first[0]?.startsWith("worktree ")) throw new Error("Missing primary worktree");
+    const printedPath = first[0].slice(9);
+    const root = path.resolve(printedPath.startsWith('"') ? JSON.parse(printedPath) : printedPath);
+    if (!first.includes("bare")) return root;
+    if ([".git", ".bare"].includes(path.basename(root))) return path.dirname(root);
+    return root.endsWith(".git") ? root.slice(0, -4) : root;
+  } catch {
+    return path.resolve(cwd);
+  }
+}
+function sessionName({ client, cwd, repo = sessionRepo(cwd), title, sessionId = "", limit = NAME_LIMIT } = {}) {
+  const family = agentType(client);
+  const repoLimit = Math.min(32, limit - family.length - 2 - 15);
+  const repository = (slug(path.basename(repo)) || "root").slice(0, 32);
+  const prefix = `${family}-${repository.slice(0, repoLimit)}-`;
+  let supplied = typeof title === "string" ? title.trim().toLowerCase() : "";
+  const qualified = /^(codex|claude|opencode|unknown)-([a-z0-9]{1,32})-(.*)$/.exec(supplied);
+  if (qualified && qualified[2] === repository) {
+    if (parseSessionName(supplied)) return (prefix + qualified[3]).slice(0, limit).replace(/-+$/, "");
+    supplied = qualified[3];
+  }
+  const suffix = slug(supplied) || `untitled-${crypto.createHash("sha256").update(sessionId).digest("hex").slice(0, 6)}`;
+  return prefix + suffix.slice(0, limit - prefix.length);
+}
+var NAME_LIMIT, LEGACY_NAME_LIMIT, slug;
+var init_session_name = __esm({
+  "lib/session-name.mjs"() {
+    NAME_LIMIT = 120;
+    LEGACY_NAME_LIMIT = 40;
+    slug = (value) => String(value).normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  }
+});
+
+// lib/mailbox.mjs
+import fs2 from "node:fs";
+import os from "node:os";
+import path2 from "node:path";
+import crypto2 from "node:crypto";
+import { execFileSync as execFileSync2 } from "node:child_process";
 function safeName(value) {
   if (typeof value !== "string" || !value.trim()) throw new Error("Name must be a nonempty string");
-  const name = value.trim().replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 40);
+  const name = value.trim().replace(/[^A-Za-z0-9._-]/g, "_").slice(0, NAME_LIMIT);
   if (name === "." || name === "..") throw new Error("Name cannot be . or ..");
   return name;
 }
@@ -40,7 +112,7 @@ function pidAlive(pid) {
 }
 function readJson(file, fallback = null) {
   try {
-    const value = JSON.parse(fs.readFileSync(file, "utf8"));
+    const value = JSON.parse(fs2.readFileSync(file, "utf8"));
     return isObject(value) ? value : fallback;
   } catch {
     return fallback;
@@ -50,38 +122,38 @@ function atomicWrite(file, value) {
   return atomicWriteBytes(file, JSON.stringify(value) + "\n");
 }
 function atomicWriteBytes(file, bytes) {
-  const temp = `${file}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
+  const temp = `${file}.${process.pid}.${crypto2.randomBytes(6).toString("hex")}.tmp`;
   try {
-    fs.writeFileSync(temp, bytes, { flag: "wx", mode: 384 });
-    fs.renameSync(temp, file);
+    fs2.writeFileSync(temp, bytes, { flag: "wx", mode: 384 });
+    fs2.renameSync(temp, file);
   } finally {
-    fs.rmSync(temp, { force: true });
+    fs2.rmSync(temp, { force: true });
   }
 }
 function plainDir(dir) {
   try {
-    fs.mkdirSync(dir, { mode: 448 });
+    fs2.mkdirSync(dir, { mode: 448 });
   } catch (error) {
     if (error.code !== "EEXIST") throw error;
   }
-  if (!fs.lstatSync(dir).isDirectory() || fs.lstatSync(dir).isSymbolicLink()) throw new Error(`Unsafe mailbox directory: ${dir}`);
+  if (!fs2.lstatSync(dir).isDirectory() || fs2.lstatSync(dir).isSymbolicLink()) throw new Error(`Unsafe mailbox directory: ${dir}`);
 }
 function plainFile(file) {
   try {
-    if (!fs.lstatSync(file).isFile() || fs.lstatSync(file).isSymbolicLink()) throw new Error(`Unsafe mailbox file: ${file}`);
+    if (!fs2.lstatSync(file).isFile() || fs2.lstatSync(file).isSymbolicLink()) throw new Error(`Unsafe mailbox file: ${file}`);
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
   return file;
 }
-function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.homedir(), ".agent-chat"), cwd = process.cwd(), lockTimeoutMs = 5e3, peerAlive = (peer) => pidAlive(peer.pid), peerMetadata = () => ({}), retainRecentPeers = true, allowBroker = false } = {}) {
+function createMailbox({ home = process.env.AGENT_CHAT_HOME || path2.join(os.homedir(), ".agent-chat"), cwd = process.cwd(), lockTimeoutMs = 5e3, peerAlive = (peer) => pidAlive(peer.pid), peerMetadata = () => ({}), retainRecentPeers = true, allowBroker = false } = {}) {
   if (!Number.isFinite(lockTimeoutMs) || lockTimeoutMs < 1 || lockTimeoutMs > 3e4) throw new Error("Invalid lock timeout");
-  home = path.resolve(home);
-  if (!allowBroker && fs.existsSync(path.join(home, ".broker-mode"))) throw new Error("This mailbox belongs to a broker. Connect through the authenticated adapter.");
-  fs.mkdirSync(home, { recursive: true, mode: 448 });
-  const rooms = path.join(home, "rooms");
-  const locks = path.join(home, "locks");
-  const resourceLocks = path.join(home, "resource-locks");
+  home = path2.resolve(home);
+  if (!allowBroker && fs2.existsSync(path2.join(home, ".broker-mode"))) throw new Error("This mailbox belongs to a broker. Connect through the authenticated adapter.");
+  fs2.mkdirSync(home, { recursive: true, mode: 448 });
+  const rooms = path2.join(home, "rooms");
+  const locks = path2.join(home, "locks");
+  const resourceLocks = path2.join(home, "resource-locks");
   plainDir(rooms);
   plainDir(locks);
   plainDir(resourceLocks);
@@ -93,43 +165,43 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
       if (id === "." || id === ".." || id.length > 128) throw new Error("Room name must be 1 to 128 characters and cannot be . or ..");
       return { id, label: spec };
     }
-    let top = path.resolve(cwd, spec || cwd);
+    let top = path2.resolve(cwd, spec || cwd);
     try {
-      top = execFileSync("git", ["-C", top, "rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+      top = execFileSync2("git", ["-C", top, "rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
     } catch {
     }
-    top = path.resolve(top);
-    const base = path.basename(top).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120) || "root";
-    return { id: `${base}-${crypto.createHash("sha1").update(top).digest("hex").slice(0, 6)}`, label: top };
+    top = path2.resolve(top);
+    const base = path2.basename(top).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120) || "root";
+    return { id: `${base}-${crypto2.createHash("sha1").update(top).digest("hex").slice(0, 6)}`, label: top };
   }
   function roomPath(room) {
     if (!isObject(room) || typeof room.id !== "string" || room.id === "." || room.id === ".." || !/^[A-Za-z0-9._-]+$/.test(room.id)) throw new Error("Invalid room id");
-    const dir = path.resolve(rooms, room.id);
-    if (path.dirname(dir) !== rooms) throw new Error("Room escapes mailbox");
+    const dir = path2.resolve(rooms, room.id);
+    if (path2.dirname(dir) !== rooms) throw new Error("Room escapes mailbox");
     return dir;
   }
   function roomDir(room) {
     const dir = roomPath(room);
     plainDir(dir);
-    plainDir(path.join(dir, "peers"));
-    plainDir(path.join(dir, "cursors"));
-    plainDir(path.join(dir, "identities"));
-    plainDir(path.join(dir, "handles"));
-    plainDir(path.join(dir, "reply-waits"));
-    const file = plainFile(path.join(dir, "room.json"));
+    plainDir(path2.join(dir, "peers"));
+    plainDir(path2.join(dir, "cursors"));
+    plainDir(path2.join(dir, "identities"));
+    plainDir(path2.join(dir, "handles"));
+    plainDir(path2.join(dir, "reply-waits"));
+    const file = plainFile(path2.join(dir, "room.json"));
     try {
-      fs.writeFileSync(file, JSON.stringify({ id: room.id, label: room.label }) + "\n", { flag: "wx", mode: 384 });
+      fs2.writeFileSync(file, JSON.stringify({ id: room.id, label: room.label }) + "\n", { flag: "wx", mode: 384 });
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
     }
     return dir;
   }
   function withLock(room, fn) {
-    return withFileLock(path.basename(roomPath(room)), fn);
+    return withFileLock(path2.basename(roomPath(room)), fn);
   }
   const RESOURCE_LOCK_KEY = "#resources";
   function withFileLock(key, fn) {
-    const file = plainFile(path.join(locks, `${key}.lock`));
+    const file = plainFile(path2.join(locks, `${key}.lock`));
     const deadline = Date.now() + lockTimeoutMs;
     let fd;
     let permissionError;
@@ -139,7 +211,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
         throw new Error("Mailbox busy; retry shortly");
       }
       try {
-        fd = fs.openSync(file, "wx", 384);
+        fd = fs2.openSync(file, "wx", 384);
         break;
       } catch (error) {
         if (process.platform === "win32" && (error.code === "EPERM" || error.code === "EACCES")) {
@@ -152,7 +224,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
         const owner = readJson(file);
         let age = 0;
         try {
-          age = Date.now() - fs.statSync(file).mtimeMs;
+          age = Date.now() - fs2.statSync(file).mtimeMs;
         } catch {
           continue;
         }
@@ -160,20 +232,20 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
           const reclaim = `${file}.reclaim`;
           let reclaimFd;
           try {
-            reclaimFd = fs.openSync(reclaim, "wx", 384);
+            reclaimFd = fs2.openSync(reclaim, "wx", 384);
             const current = readJson(file);
             let currentAge = 0;
             try {
-              currentAge = Date.now() - fs.statSync(file).mtimeMs;
+              currentAge = Date.now() - fs2.statSync(file).mtimeMs;
             } catch {
             }
-            if (current && !pidAlive(current.pid) || !current && currentAge > 1e4) fs.rmSync(file, { force: true });
+            if (current && !pidAlive(current.pid) || !current && currentAge > 1e4) fs2.rmSync(file, { force: true });
           } catch (reclaimError) {
             if (reclaimError.code !== "EEXIST") throw reclaimError;
           } finally {
             if (reclaimFd !== void 0) {
-              fs.closeSync(reclaimFd);
-              fs.rmSync(reclaim, { force: true });
+              fs2.closeSync(reclaimFd);
+              fs2.rmSync(reclaim, { force: true });
             }
           }
           Atomics.wait(pause, 0, 0, 10);
@@ -184,19 +256,19 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
       }
     }
     try {
-      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid }));
+      fs2.writeFileSync(fd, JSON.stringify({ pid: process.pid }));
       return fn();
     } finally {
-      fs.closeSync(fd);
-      fs.rmSync(file, { force: true });
+      fs2.closeSync(fd);
+      fs2.rmSync(file, { force: true });
     }
   }
-  const readMeta = (room) => readJson(plainFile(path.join(roomDir(room), "room.json")), { id: room.id, label: room.label });
+  const readMeta = (room) => readJson(plainFile(path2.join(roomDir(room), "room.json")), { id: room.id, label: room.label });
   function listPeers(room, { includeStale = false } = {}) {
-    const dir = path.join(roomPath(room), "peers");
+    const dir = path2.join(roomPath(room), "peers");
     try {
-      if (fs.lstatSync(dir).isSymbolicLink()) return [];
-      return fs.readdirSync(dir).filter((name) => name.endsWith(".json")).map((name) => readJson(plainFile(path.join(dir, name)))).filter((p) => p && typeof p.name === "string" && (includeStale || peerAlive(p) || retainRecentPeers && Date.now() - Date.parse(p.lastSeen) < PEER_TTL));
+      if (fs2.lstatSync(dir).isSymbolicLink()) return [];
+      return fs2.readdirSync(dir).filter((name) => name.endsWith(".json")).map((name) => readJson(plainFile(path2.join(dir, name)))).filter((p) => p && typeof p.name === "string" && (includeStale || peerAlive(p) || retainRecentPeers && Date.now() - Date.parse(p.lastSeen) < PEER_TTL));
     } catch (error) {
       if (error.code === "ENOENT") return [];
       throw error;
@@ -206,13 +278,13 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
     return routingFile(room, "identities", safeSessionId(sessionId));
   }
   function routingFile(room, directory, name) {
-    const dir = path.join(roomPath(room), directory);
+    const dir = path2.join(roomPath(room), directory);
     try {
-      if (!fs.lstatSync(dir).isDirectory() || fs.lstatSync(dir).isSymbolicLink()) throw new Error(`Unsafe mailbox directory: ${dir}`);
+      if (!fs2.lstatSync(dir).isDirectory() || fs2.lstatSync(dir).isSymbolicLink()) throw new Error(`Unsafe mailbox directory: ${dir}`);
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
-    return plainFile(path.join(dir, `${name}.json`));
+    return plainFile(path2.join(dir, `${name}.json`));
   }
   function readIdentity(room, sessionId) {
     const record = readJson(identityFile(room, sessionId));
@@ -222,10 +294,10 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
     return (Array.isArray(record?.aliases) ? record.aliases : []).filter((alias) => isObject(alias) && typeof alias.name === "string" && Number.isFinite(alias.expiresAt) && alias.expiresAt > now).slice(-IDENTITY_LIMITS.aliases);
   }
   function identityRecords(room) {
-    const dir = path.join(roomPath(room), "identities");
+    const dir = path2.join(roomPath(room), "identities");
     try {
-      if (fs.lstatSync(dir).isSymbolicLink()) throw new Error(`Unsafe mailbox directory: ${dir}`);
-      return fs.readdirSync(dir).filter((name) => name.endsWith(".json")).map((name) => {
+      if (fs2.lstatSync(dir).isSymbolicLink()) throw new Error(`Unsafe mailbox directory: ${dir}`);
+      return fs2.readdirSync(dir).filter((name) => name.endsWith(".json")).map((name) => {
         const sessionId = name.slice(0, -5);
         try {
           safeSessionId(sessionId);
@@ -244,7 +316,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
     const snapshots = new Map([...writes.map(([file]) => file), ...removals].map((file) => {
       plainFile(file);
       try {
-        return [file, fs.readFileSync(file)];
+        return [file, fs2.readFileSync(file)];
       } catch (error) {
         if (error.code === "ENOENT") return [file, null];
         throw error;
@@ -256,14 +328,14 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
         changed.push(file);
       }
       for (const file of removals) {
-        fs.rmSync(file, { force: true });
+        fs2.rmSync(file, { force: true });
         changed.push(file);
       }
     } catch (error) {
       for (const file of changed.reverse()) {
         const bytes = snapshots.get(file);
         try {
-          if (bytes === null) fs.rmSync(file, { force: true });
+          if (bytes === null) fs2.rmSync(file, { force: true });
           else atomicWriteBytes(file, bytes);
         } catch (rollbackError) {
           error.message += `; identity rollback failed: ${rollbackError.message}`;
@@ -279,12 +351,16 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
     const priorPeer = peers.find((peer) => peer.sessionId === sessionId);
     const previous = readIdentity(room, sessionId) || (priorPeer ? { name: priorPeer.name, claimedAt: priorPeer.lastSeen, firstClaim: true } : null);
     const reserved = (name2) => peers.some((peer) => peer.name === name2 && peer.sessionId !== sessionId && peerAlive(peer)) || records.some((record2) => record2.sessionId !== sessionId && rememberedAliases(record2, now).some((alias) => alias.name === name2 && !alias.untilAt));
+    const nameLimit = !owner || owner.nameLimit === NAME_LIMIT ? NAME_LIMIT : LEGACY_NAME_LIMIT;
+    base = base.slice(0, nameLimit);
+    const parsedBase = parseSessionName(base);
+    const collisionBase = parsedBase ? `${parsedBase.agent}-${parsedBase.repo}-${titleBase(parsedBase.title)}` : base;
     let name = base;
     for (let i = 2; reserved(name); i++) {
       const suffix = `-${i}`;
-      name = `${base.slice(0, 40 - suffix.length)}${suffix}`;
+      name = `${collisionBase.slice(0, nameLimit - suffix.length)}${suffix}`;
     }
-    const handleFile = plainFile(path.join(dir, "handles", `${name}.json`));
+    const handleFile = plainFile(path2.join(dir, "handles", `${name}.json`));
     const priorHandle = readJson(handleFile);
     const returningAlias = rememberedAliases(previous, now).find((alias) => alias.name === name && !alias.untilAt);
     const claim = previous?.name === name && (!priorHandle || priorHandle.sessionId === sessionId) ? previous : returningAlias || { claimedAt: new Date(now).toISOString(), firstClaim: !priorHandle };
@@ -294,7 +370,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
       aliases.push({ name: previous.name, claimedAt: previous.claimedAt, firstClaim: previous.firstClaim, ...previous.untilAt ? { untilAt: previous.untilAt } : {}, expiresAt: now + IDENTITY_LIMITS.aliasTtlMs });
     }
     aliases = aliases.slice(-IDENTITY_LIMITS.aliases);
-    const identity = { ...priorPeer, room, name, sessionId, client, pid: owner?.pid ?? process.pid, cwd: owner?.cwd ?? cwd };
+    const identity = { ...priorPeer, room, name, nameLimit, repo: parseSessionName(name)?.repo || priorPeer?.repo, sessionId, client, pid: owner?.pid ?? process.pid, cwd: owner?.cwd ?? cwd };
     Object.assign(identity, peerMetadata(identity));
     for (const key of ["nameSource", "sessionTitle", "titleSource", "task", "availability", "model", "effort"]) if (typeof metadata[key] === "string") identity[key] = metadata[key];
     if (Number.isSafeInteger(metadata.context_remaining_percent)) identity.context_remaining_percent = metadata.context_remaining_percent;
@@ -307,8 +383,8 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
         previousOwner = { ...previousOwner, ...previousOwner.name === name ? { untilAt } : {}, aliases: rememberedAliases(previousOwner, now).map((alias) => alias.name === name ? { ...alias, untilAt } : alias) };
       }
     }
-    const peerFile = plainFile(path.join(dir, "peers", `${name}.json`));
-    const removals = fs.readdirSync(path.join(dir, "peers")).filter((entry) => entry.endsWith(".json") && entry !== `${name}.json`).map((entry) => plainFile(path.join(dir, "peers", entry))).filter((file) => readJson(file)?.sessionId === sessionId);
+    const peerFile = plainFile(path2.join(dir, "peers", `${name}.json`));
+    const removals = fs2.readdirSync(path2.join(dir, "peers")).filter((entry) => entry.endsWith(".json") && entry !== `${name}.json`).map((entry) => plainFile(path2.join(dir, "peers", entry))).filter((file) => readJson(file)?.sessionId === sessionId);
     mutateIdentityFiles([
       ...previousOwner ? [[identityFile(room, previousOwner.sessionId), previousOwner]] : [],
       [identityFile(room, sessionId), record],
@@ -317,7 +393,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
     ], removals);
     return identity;
   }
-  function claimIdentity(room, base, client = "unknown", sessionId = crypto.randomUUID(), metadata = {}) {
+  function claimIdentity(room, base, client = "unknown", sessionId = crypto2.randomUUID(), metadata = {}) {
     base = safeName(base);
     if (base === "all") throw new Error("The handle all is reserved for broadcasts");
     sessionId = safeSessionId(sessionId);
@@ -333,21 +409,25 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
     const peer = listPeers(identity.room, { includeStale: true }).find((peer2) => peer2.sessionId === safeSessionId(identity.sessionId));
     return peer ? { ...peer, room: identity.room } : null;
   }
-  function syncSessionTitle({ room, sessionId, title, client, cwd: expectedCwd, titleSource } = {}) {
+  function syncSessionTitle({ room, sessionId, title, client, cwd: expectedCwd, titleSource, replaceExplicitTitle = false } = {}) {
     safeSessionId(sessionId);
     if (typeof title !== "string" || !title.trim() || title.length > 256 || /[\x00-\x1f\x7f]/.test(title)) throw new Error("Session title must be 1 to 256 characters without controls");
     if (typeof expectedCwd !== "string" || typeof client !== "string") return null;
+    const current = getIdentity({ room, sessionId });
+    const repo = current?.repo || (current?.nameLimit === NAME_LIMIT ? parseSessionName(current?.name)?.repo : void 0) || sessionRepo(expectedCwd);
     return withLock(room, () => {
       const peers = listPeers(room, { includeStale: true });
-      const peer = peers.find((peer2) => peer2.sessionId === sessionId && peer2.client === client && typeof peer2.cwd === "string" && path.resolve(peer2.cwd) === path.resolve(expectedCwd));
+      const peer = peers.find((peer2) => peer2.sessionId === sessionId && peer2.client === client && typeof peer2.cwd === "string" && path2.resolve(peer2.cwd) === path2.resolve(expectedCwd));
       if (!peer) return null;
       const metadata = { sessionTitle: title.trim(), ...titleSource ? { titleSource } : {} };
-      const name = peer.nameSource === "explicit" ? peer.name : safeName(title.replace(/\s+/g, "-"));
+      const pinned = peer.nameSource === "explicit" && !replaceExplicitTitle;
+      const name = pinned && parseSessionName(peer.name) ? peer.name : sessionName({ client: peer.client, repo: peer.repo || repo, title: pinned ? peer.name : title, sessionId, limit: peer.nameLimit === NAME_LIMIT ? NAME_LIMIT : LEGACY_NAME_LIMIT });
       if (name === "all") return null;
       return writeIdentity(room, name, peer.client, sessionId, peers, metadata, peer);
     });
   }
   function resolveRecipient(room, target) {
+    const requestedTitle = typeof target === "string" ? slug(target) : "";
     try {
       target = safeSessionId(target);
     } catch {
@@ -362,11 +442,25 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
     if (!record) record = identityRecords(room).find((record2) => record2.sessionId === target);
     if (record && (record.name === target || record.sessionId === target || rememberedAliases(record).some((alias) => alias.name === target && !alias.untilAt))) return { name: record.name, sessionId: record.sessionId, alias: record.name !== target };
     const legacy = peers.find((peer2) => peer2.name === target);
-    return legacy ? { name: legacy.name, sessionId: legacy.sessionId, alias: false } : null;
+    if (legacy) return { name: legacy.name, sessionId: legacy.sessionId, alias: false };
+    const title = requestedTitle;
+    if (!title) return null;
+    const matchesTitle = (item) => {
+      const parsed = parseSessionName(item.name);
+      return parsed && slug(titleBase(parsed.title)) === title;
+    };
+    const live = peers.filter((item) => peerAlive(item) && matchesTitle(item));
+    const candidates = live.length ? live : identityRecords(room).filter((item) => !item.untilAt && matchesTitle(item));
+    const unique = new Map(candidates.map((item) => [item.sessionId, item]));
+    if (unique.size === 1) {
+      const item = [...unique.values()][0];
+      return { name: item.name, sessionId: item.sessionId, alias: true };
+    }
+    return null;
   }
   function touchPeer(identity, status) {
     return withLock(identity.room, () => {
-      const file = plainFile(path.join(roomDir(identity.room), "peers", `${safeName(identity.name)}.json`));
+      const file = plainFile(path2.join(roomDir(identity.room), "peers", `${safeName(identity.name)}.json`));
       const prev = readJson(file);
       if (prev?.sessionId !== identity.sessionId) return false;
       atomicWrite(file, { ...prev, ...peerMetadata(identity), status: status ?? prev.status ?? "", lastSeen: (/* @__PURE__ */ new Date()).toISOString() });
@@ -375,7 +469,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
   }
   function updatePeer(identity, changes) {
     return withLock(identity.room, () => {
-      const file = plainFile(path.join(roomDir(identity.room), "peers", `${safeName(identity.name)}.json`));
+      const file = plainFile(path2.join(roomDir(identity.room), "peers", `${safeName(identity.name)}.json`));
       const previous = readJson(file);
       if (previous?.sessionId !== identity.sessionId) return false;
       const allowed = ["task", "availability", "model", "effort", "context_remaining_percent"];
@@ -385,18 +479,18 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
     });
   }
   function releaseIdentity(identity) {
-    if (!identity || !fs.existsSync(roomPath(identity.room))) return;
+    if (!identity || !fs2.existsSync(roomPath(identity.room))) return;
     withLock(identity.room, () => {
-      const file = plainFile(path.join(roomPath(identity.room), "peers", `${safeName(identity.name)}.json`));
+      const file = plainFile(path2.join(roomPath(identity.room), "peers", `${safeName(identity.name)}.json`));
       if (readJson(file)?.sessionId === identity.sessionId) {
         const record = readIdentity(identity.room, safeSessionId(identity.sessionId));
         if (record?.name === identity.name) atomicWrite(identityFile(identity.room, identity.sessionId), { ...record, releasedAt: Date.now() });
-        fs.rmSync(file, { force: true });
+        fs2.rmSync(file, { force: true });
       }
     });
   }
   function replyWaitFile(identity) {
-    return plainFile(path.join(roomDir(identity.room), "reply-waits", `${safeSessionId(identity.sessionId)}.json`));
+    return plainFile(path2.join(roomDir(identity.room), "reply-waits", `${safeSessionId(identity.sessionId)}.json`));
   }
   function readReplyWait(identity) {
     const wait2 = readJson(replyWaitFile(identity));
@@ -410,16 +504,16 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
   }
   function beginReplyWaitLocked(identity, expectedSenderSessionId, minutes) {
     const now = Date.now();
-    const transcript = plainFile(path.join(roomDir(identity.room), "messages.jsonl"));
+    const transcript = plainFile(path2.join(roomDir(identity.room), "messages.jsonl"));
     let scanOffset = 0;
     try {
-      scanOffset = fs.statSync(transcript).size;
+      scanOffset = fs2.statSync(transcript).size;
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
     const wait2 = {
       version: 1,
-      id: crypto.randomUUID(),
+      id: crypto2.randomUUID(),
       roomId: identity.room.id,
       waiterSessionId: identity.sessionId,
       expectedSenderSessionId,
@@ -440,7 +534,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
     if (!wait2) return { state: "none" };
     if (Date.now() - wait2.deadlineAt >= EXPIRED_REPLY_WAIT_RETENTION) {
       withLock(identity.room, () => {
-        if (readReplyWait(identity)?.id === wait2.id) fs.rmSync(replyWaitFile(identity), { force: true });
+        if (readReplyWait(identity)?.id === wait2.id) fs2.rmSync(replyWaitFile(identity), { force: true });
       });
       return { state: "none" };
     }
@@ -493,7 +587,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
   function cancelReplyWait(identity) {
     return withLock(identity.room, () => {
       const existed = !!readReplyWait(identity);
-      if (existed) fs.rmSync(replyWaitFile(identity), { force: true });
+      if (existed) fs2.rmSync(replyWaitFile(identity), { force: true });
       return existed;
     });
   }
@@ -502,7 +596,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
     return withLock(identity.room, () => {
       const wait2 = readReplyWait(identity);
       if (!wait2 || !messages.some((message) => message.fromSessionId === wait2.expectedSenderSessionId && message.toSessionId === identity.sessionId && Date.parse(message.ts) >= wait2.startedAt && Date.parse(message.ts) <= wait2.deadlineAt)) return false;
-      fs.rmSync(replyWaitFile(identity), { force: true });
+      fs2.rmSync(replyWaitFile(identity), { force: true });
       return true;
     });
   }
@@ -513,10 +607,10 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
   function appendMessageLocked(room, from, to, text, fromSessionId, recipientSessionId) {
     const target = to ? safeName(to) : "all";
     const toSessionId = target === "all" ? void 0 : recipientSessionId ? safeSessionId(recipientSessionId) : resolveRecipient(room, target)?.sessionId;
-    const msg = { id: crypto.randomUUID(), ts: (/* @__PURE__ */ new Date()).toISOString(), from: safeName(from), to: target, text, ...fromSessionId ? { fromSessionId } : {}, ...toSessionId ? { toSessionId } : {} };
+    const msg = { id: crypto2.randomUUID(), ts: (/* @__PURE__ */ new Date()).toISOString(), from: safeName(from), to: target, text, ...fromSessionId ? { fromSessionId } : {}, ...toSessionId ? { toSessionId } : {} };
     const line = JSON.stringify(msg) + "\n";
     if (Buffer.byteLength(line) + 128 > LIMITS.pageBytes) throw new Error("Encoded message exceeds the default read page; shorten text");
-    fs.appendFileSync(plainFile(path.join(roomDir(room), "messages.jsonl")), line, { mode: 384 });
+    fs2.appendFileSync(plainFile(path2.join(roomDir(room), "messages.jsonl")), line, { mode: 384 });
     if (toSessionId && fromSessionId) {
       try {
         const recipient = { room, sessionId: toSessionId };
@@ -551,7 +645,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
       } catch (error) {
         try {
           if (previous) atomicWrite(replyWaitFile(identity), previous);
-          else fs.rmSync(replyWaitFile(identity), { force: true });
+          else fs2.rmSync(replyWaitFile(identity), { force: true });
         } catch (rollback) {
           error.message += `; reply watch rollback failed: ${rollback.message}`;
         }
@@ -564,10 +658,10 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
       const prev = readMeta(room);
       const changed = Object.fromEntries(Object.entries(changes).filter(([key, value]) => prev[key] !== value));
       if (!Object.keys(changed).length) return [];
-      atomicWrite(plainFile(path.join(roomDir(room), "room.json")), { ...prev, ...changed, updatedBy: by, updatedAt: (/* @__PURE__ */ new Date()).toISOString() });
+      atomicWrite(plainFile(path2.join(roomDir(room), "room.json")), { ...prev, ...changed, updatedBy: by, updatedAt: (/* @__PURE__ */ new Date()).toISOString() });
       const text = `[updated ${Object.entries(changed).map(([key, value]) => `room ${key}: ${value}`).join("; ")}]`;
-      const msg = { id: crypto.randomUUID(), ts: (/* @__PURE__ */ new Date()).toISOString(), from: by, to: "all", text, ...sessionId ? { fromSessionId: sessionId } : {} };
-      fs.appendFileSync(plainFile(path.join(roomDir(room), "messages.jsonl")), JSON.stringify(msg) + "\n", { mode: 384 });
+      const msg = { id: crypto2.randomUUID(), ts: (/* @__PURE__ */ new Date()).toISOString(), from: by, to: "all", text, ...sessionId ? { fromSessionId: sessionId } : {} };
+      fs2.appendFileSync(plainFile(path2.join(roomDir(room), "messages.jsonl")), JSON.stringify(msg) + "\n", { mode: 384 });
       return Object.keys(changed);
     });
   }
@@ -576,7 +670,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
     return value;
   }
   function resourceFile(resource) {
-    return plainFile(path.join(resourceLocks, `${safeResource(resource)}.json`));
+    return plainFile(path2.join(resourceLocks, `${safeResource(resource)}.json`));
   }
   function lockHolderAlive(record) {
     if (!isObject(record?.room) || typeof record.sessionId !== "string") return false;
@@ -589,10 +683,11 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
   function heldLock(resource, now = Date.now()) {
     const record = readJson(resourceFile(resource));
     if (!record || !Number.isSafeInteger(record.expiresAt) || record.expiresAt <= now || !lockHolderAlive(record)) return null;
-    return record;
+    const owner = getIdentity({ room: record.room, sessionId: record.sessionId });
+    return owner ? { ...record, name: owner.name } : record;
   }
   function listLocks() {
-    return fs.readdirSync(resourceLocks).filter((name) => name.endsWith(".json")).map((name) => {
+    return fs2.readdirSync(resourceLocks).filter((name) => name.endsWith(".json")).map((name) => {
       try {
         return heldLock(name.slice(0, -5));
       } catch {
@@ -647,7 +742,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
       if (!stored) return { released: false };
       const current = heldLock(resource);
       if (current && current.sessionId !== identity.sessionId) throw Object.assign(new Error(`Not unlocked. ${describeLock(current)}. Only the holder can unlock it.`), { holder: current });
-      fs.rmSync(file, { force: true });
+      fs2.rmSync(file, { force: true });
       const stale = !current ? ` (cleared an ended lock from ${typeof stored.name === "string" ? stored.name : "an unknown session"})` : "";
       const announceError = announce(identity, `UNLOCK ${resource}${note ? `: ${note}` : ""}${stale}`);
       return { released: true, stale: !current, record: stored, ...announceError ? { announceError } : {} };
@@ -656,26 +751,26 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
   function inspectNotifications({ room, name, sessionId, afterOffset, unreadOnly = false, limit = LIMITS.messages, maxBytes = LIMITS.pageBytes } = {}) {
     roomPath(room);
     if (unreadOnly && sessionId) {
-      const cursor = readJson(plainFile(path.join(roomPath(room), "cursors", `${safeSessionId(sessionId)}.json`)));
+      const cursor = readJson(plainFile(path2.join(roomPath(room), "cursors", `${safeSessionId(sessionId)}.json`)));
       if (Number.isSafeInteger(cursor?.offset) && cursor.offset >= 0) afterOffset = Math.max(afterOffset ?? 0, cursor.offset);
     }
     if (afterOffset !== void 0 && (!Number.isSafeInteger(afterOffset) || afterOffset < 0)) throw new Error("afterOffset must be a nonnegative integer");
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > LIMITS.maxMessages) throw new Error(`limit must be 1 to ${LIMITS.maxMessages}`);
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1024 || maxBytes > LIMITS.scanBytes) throw new Error(`maxBytes must be 1024 to ${LIMITS.scanBytes}`);
-    const file = plainFile(path.join(roomPath(room), "messages.jsonl"));
+    const file = plainFile(path2.join(roomPath(room), "messages.jsonl"));
     let fd;
     try {
-      fd = fs.openSync(file, "r");
+      fd = fs2.openSync(file, "r");
     } catch (error) {
       if (error.code === "ENOENT") return { messages: [], nextOffset: 0, hasMore: false, size: 0, earliestOffset: 0 };
       throw error;
     }
     try {
-      const size = fs.fstatSync(fd).size;
+      const size = fs2.fstatSync(fd).size;
       const first = afterOffset === void 0 || afterOffset > size;
       let start = first ? Math.max(0, size - LIMITS.scanBytes) : afterOffset;
       const buf = Buffer.alloc(Math.min(LIMITS.scanBytes, size - start));
-      const bytesRead = fs.readSync(fd, buf, 0, buf.length, start);
+      const bytesRead = fs2.readSync(fd, buf, 0, buf.length, start);
       const data = buf.subarray(0, bytesRead);
       let pos = 0;
       if (first && start > 0) {
@@ -727,16 +822,16 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
       const blocked = !lines.length && data.length === LIMITS.scanBytes ? "Next line exceeds the scan limit; inspect or repair the transcript before continuing." : void 0;
       return { messages, nextOffset: offset, hasMore: offset < size && bytesRead === LIMITS.scanBytes, size, earliestOffset, ...blocked ? { blocked } : {} };
     } finally {
-      fs.closeSync(fd);
+      fs2.closeSync(fd);
     }
   }
   function commitCursor(identity, offset) {
     if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Invalid cursor offset");
-    const file = plainFile(path.join(roomDir(identity.room), "cursors", `${safeSessionId(identity.sessionId)}.json`));
+    const file = plainFile(path2.join(roomDir(identity.room), "cursors", `${safeSessionId(identity.sessionId)}.json`));
     atomicWrite(file, { offset, sessionId: identity.sessionId });
   }
   function takeUnread(identity, { commit = true, ...options } = {}) {
-    const file = plainFile(path.join(roomDir(identity.room), "cursors", `${safeSessionId(identity.sessionId)}.json`));
+    const file = plainFile(path2.join(roomDir(identity.room), "cursors", `${safeSessionId(identity.sessionId)}.json`));
     const cursor = readJson(file);
     const result = inspectNotifications({ room: identity.room, name: identity.name, sessionId: identity.sessionId, afterOffset: cursor?.offset, ...options });
     if (commit) {
@@ -751,12 +846,12 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
   function roomInfo(id) {
     const room = { id, label: id };
     const dir = roomPath(room);
-    const meta = readJson(plainFile(path.join(dir, "room.json")), {});
+    const meta = readJson(plainFile(path2.join(dir, "room.json")), {});
     let last = 0;
     let bytes = 0;
     for (const name of ["room.json", "messages.jsonl"]) {
       try {
-        const stat = fs.statSync(plainFile(path.join(dir, name)));
+        const stat = fs2.statSync(plainFile(path2.join(dir, name)));
         last = Math.max(last, stat.mtimeMs);
         if (name === "messages.jsonl") bytes = stat.size;
       } catch (error) {
@@ -766,7 +861,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
     return { id, label: meta.label || id, last, bytes, summary: meta.summary || "", status: meta.status || "" };
   }
   function listRooms() {
-    return fs.readdirSync(rooms, { withFileTypes: true }).filter((entry) => entry.isDirectory() && !entry.isSymbolicLink()).map((entry) => {
+    return fs2.readdirSync(rooms, { withFileTypes: true }).filter((entry) => entry.isDirectory() && !entry.isSymbolicLink()).map((entry) => {
       try {
         return roomInfo(entry.name);
       } catch (error) {
@@ -783,20 +878,20 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
       const file = identityFile(room, record.sessionId);
       let lastActivity;
       try {
-        lastActivity = Math.max(fs.statSync(file).mtimeMs, record.releasedAt || 0, lastSeen.get(record.sessionId) || 0);
+        lastActivity = Math.max(fs2.statSync(file).mtimeMs, record.releasedAt || 0, lastSeen.get(record.sessionId) || 0);
       } catch (error) {
         if (error.code === "ENOENT") continue;
         throw error;
       }
       if (now - lastActivity < identityTtlMs) continue;
-      fs.rmSync(file, { force: true });
+      fs2.rmSync(file, { force: true });
     }
   }
   function tidyRooms({ force = false, ttlDays = 7, pruneOnly = false, identityTtlMs = IDENTITY_LIMITS.aliasTtlMs } = {}) {
     if (!Number.isSafeInteger(identityTtlMs) || identityTtlMs < IDENTITY_LIMITS.aliasTtlMs) throw new Error("identityTtlMs must be at least the alias retention window");
-    const stamp = path.join(home, ".last-tidy");
+    const stamp = path2.join(home, ".last-tidy");
     try {
-      if (!force && Date.now() - fs.statSync(stamp).mtimeMs < 36e5) return [];
+      if (!force && Date.now() - fs2.statSync(stamp).mtimeMs < 36e5) return [];
     } catch {
     }
     atomicWrite(stamp, { at: (/* @__PURE__ */ new Date()).toISOString() });
@@ -818,7 +913,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
           return;
         }
         if (!pruneOnly && info.last && info.last < cutoff) {
-          fs.rmSync(roomPath(room), { recursive: true, force: true });
+          fs2.rmSync(roomPath(room), { recursive: true, force: true });
           removed.push(info.label);
         } else pruneReleasedIdentities(room, peers, now, identityTtlMs);
       });
@@ -830,6 +925,7 @@ function createMailbox({ home = process.env.AGENT_CHAT_HOME || path.join(os.home
 var LIMITS, IDENTITY_LIMITS, LOCK_LIMITS, PEER_TTL, EXPIRED_REPLY_WAIT_RETENTION, pause, isObject;
 var init_mailbox = __esm({
   "lib/mailbox.mjs"() {
+    init_session_name();
     LIMITS = Object.freeze({ messages: 20, maxMessages: 100, pageBytes: 32 * 1024, scanBytes: 128 * 1024, textBytes: 16 * 1024 });
     IDENTITY_LIMITS = Object.freeze({ aliases: 8, aliasTtlMs: 24 * 60 * 60 * 1e3 });
     LOCK_LIMITS = Object.freeze({ defaultMinutes: 120, maxMinutes: 480, noteChars: 200 });
@@ -845,36 +941,22 @@ var presence_exports = {};
 __export(presence_exports, {
   createPresence: () => createPresence
 });
-import fs2 from "node:fs";
-import path2 from "node:path";
-import crypto2 from "node:crypto";
-import { execFileSync as execFileSync2 } from "node:child_process";
-function provisionalRepo(cwd) {
-  try {
-    return execFileSync2("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8", timeout: 1e3, stdio: ["ignore", "pipe", "ignore"] }).trim();
-  } catch {
-    return path2.resolve(cwd);
-  }
-}
-function provisionalName(client, repo, id) {
-  const family = String(client).toLowerCase().includes("claude") ? "claude" : String(client).toLowerCase().includes("codex") ? "codex" : String(client).toLowerCase().includes("opencode") ? "opencode" : "agent";
-  const suffix = id.slice(-6);
-  const base = safeName(path2.basename(repo) || "root").slice(0, 40 - family.length - suffix.length - 2);
-  return `${family}-${base}-${suffix}`;
-}
+import fs3 from "node:fs";
+import path3 from "node:path";
+import crypto3 from "node:crypto";
 function createPresence({ home = process.env.AGENT_CHAT_HOME } = {}) {
   if (!home) throw new Error("Presence requires a mailbox home");
-  home = path2.resolve(home);
-  fs2.mkdirSync(home, { recursive: true, mode: 448 });
-  const dir = path2.join(home, "presence");
-  fs2.mkdirSync(dir, { mode: 448, recursive: true });
-  if (fs2.lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe presence directory");
-  const file = path2.join(dir, "registry.json");
-  const lock = path2.join(dir, "registry.lock");
+  home = path3.resolve(home);
+  fs3.mkdirSync(home, { recursive: true, mode: 448 });
+  const dir = path3.join(home, "presence");
+  fs3.mkdirSync(dir, { mode: 448, recursive: true });
+  if (fs3.lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe presence directory");
+  const file = path3.join(dir, "registry.json");
+  const lock = path3.join(dir, "registry.lock");
   function read() {
     try {
-      if (fs2.lstatSync(file).isSymbolicLink()) throw new Error("Unsafe presence registry");
-      const data = JSON.parse(fs2.readFileSync(file, "utf8"));
+      if (fs3.lstatSync(file).isSymbolicLink()) throw new Error("Unsafe presence registry");
+      const data = JSON.parse(fs3.readFileSync(file, "utf8"));
       return plain(data) ? { hosts: Array.isArray(data.hosts) ? data.hosts : [], invites: Array.isArray(data.invites) ? data.invites : [] } : { hosts: [], invites: [] };
     } catch (error) {
       if (error.code === "ENOENT") return { hosts: [], invites: [] };
@@ -892,19 +974,19 @@ function createPresence({ home = process.env.AGENT_CHAT_HOME } = {}) {
     let fd;
     for (; ; ) {
       try {
-        fd = fs2.openSync(lock, "wx", 384);
+        fd = fs3.openSync(lock, "wx", 384);
         break;
       } catch (error) {
         if (error.code !== "EEXIST") throw error;
         const age = (() => {
           try {
-            return Date.now() - fs2.statSync(lock).mtimeMs;
+            return Date.now() - fs3.statSync(lock).mtimeMs;
           } catch {
             return 0;
           }
         })();
         if (age > 1e4) {
-          fs2.rmSync(lock, { force: true });
+          fs3.rmSync(lock, { force: true });
           continue;
         }
         if (Date.now() >= deadline) throw new Error("Presence registry busy; retry shortly");
@@ -914,33 +996,33 @@ function createPresence({ home = process.env.AGENT_CHAT_HOME } = {}) {
     try {
       const data = trim(read());
       const result = fn(data);
-      const temp = `${file}.${process.pid}.${crypto2.randomBytes(4).toString("hex")}.tmp`;
+      const temp = `${file}.${process.pid}.${crypto3.randomBytes(4).toString("hex")}.tmp`;
       try {
-        fs2.writeFileSync(temp, JSON.stringify(trim(data)) + "\n", { flag: "wx", mode: 384 });
-        fs2.renameSync(temp, file);
+        fs3.writeFileSync(temp, JSON.stringify(trim(data)) + "\n", { flag: "wx", mode: 384 });
+        fs3.renameSync(temp, file);
       } finally {
-        fs2.rmSync(temp, { force: true });
+        fs3.rmSync(temp, { force: true });
       }
       return result;
     } finally {
-      fs2.closeSync(fd);
-      fs2.rmSync(lock, { force: true });
+      fs3.closeSync(fd);
+      fs3.rmSync(lock, { force: true });
     }
   }
   function registerHost({ client, hostSessionId, cwd, title, model, variant, activity } = {}) {
     if (typeof client !== "string" || !client.trim() || client.length > 80 || typeof hostSessionId !== "string" || !hostSessionId.trim() || hostSessionId.length > 256 || typeof cwd !== "string" || !cwd.trim()) return null;
     const id = hostId(client, hostSessionId);
-    const resolvedCwd = path2.resolve(cwd);
+    const resolvedCwd = path3.resolve(cwd);
     const known = trim(read()).hosts.find((x) => x.id === id);
-    const candidateRepo = known?.cwd === resolvedCwd && known.repo ? known.repo : provisionalRepo(cwd);
+    const candidateRepo = known?.namingVersion === 1 && known?.cwd === resolvedCwd && known.repo ? known.repo : sessionRepo(cwd);
     return mutate((data) => {
       const prior = data.hosts.find((x) => x.id === id);
-      const repo = prior?.cwd === resolvedCwd && prior.repo ? prior.repo : candidateRepo;
-      const next = { ...prior, id, client, hostSessionId, cwd: resolvedCwd, repo, seenAt: Date.now() };
+      const repo = prior?.namingVersion === 1 && prior?.cwd === resolvedCwd && prior.repo ? prior.repo : candidateRepo;
+      const next = { ...prior, namingVersion: 1, id, client, hostSessionId, cwd: resolvedCwd, repo, seenAt: Date.now() };
       if (typeof title === "string" && title.trim()) {
         next.title = title.trim().slice(0, 256);
-        next.name = safeName(next.title.replace(/\s+/g, "-"));
-      } else if (!next.name) next.name = provisionalName(client, repo, id);
+        next.name = sessionName({ client, repo, title: next.title, sessionId: id });
+      } else if (!next.name || prior?.namingVersion !== 1) next.name = sessionName({ client, repo, title: next.title, sessionId: id });
       if (typeof model === "string" && model.trim() && model.length <= 80 && !/[\x00-\x1f\x7f]/.test(model)) next.model = model;
       if (typeof variant === "string" && variant.trim() && variant.length <= 40 && !/[\x00-\x1f\x7f]/.test(variant)) next.variant = variant;
       if (["idle", "working"].includes(activity)) next.activity = activity;
@@ -993,7 +1075,7 @@ function createPresence({ home = process.env.AGENT_CHAT_HOME } = {}) {
     if (!target) throw new Error("Session is not present; refresh chat_presence");
     if (target.sessionId === from.sessionId && target.roomId === from.room.id) throw new Error("Cannot invite yourself");
     return mutate((data) => {
-      const entry = { id: crypto2.randomUUID(), toId, from: from.name, fromSessionId: from.sessionId, room: { id: room.id, label: room.label }, note: note?.trim() || "", createdAt: Date.now(), expiresAt: Date.now() + INVITE_MS };
+      const entry = { id: crypto3.randomUUID(), toId, from: from.name, fromSessionId: from.sessionId, room: { id: room.id, label: room.label }, note: note?.trim() || "", createdAt: Date.now(), expiresAt: Date.now() + INVITE_MS };
       data.invites.push(entry);
       return entry;
     });
@@ -1020,13 +1102,14 @@ function createPresence({ home = process.env.AGENT_CHAT_HOME } = {}) {
 var MAX_HOSTS, MAX_INVITES, ACTIVE_MS, INVITE_MS, wait, hash, hostId, peerId, plain;
 var init_presence = __esm({
   "lib/presence.mjs"() {
+    init_session_name();
     init_mailbox();
     MAX_HOSTS = 256;
     MAX_INVITES = 128;
     ACTIVE_MS = 30 * 60 * 1e3;
     INVITE_MS = 24 * 60 * 60 * 1e3;
     wait = new Int32Array(new SharedArrayBuffer(4));
-    hash = (value) => crypto2.createHash("sha256").update(value).digest("hex").slice(0, 24);
+    hash = (value) => crypto3.createHash("sha256").update(value).digest("hex").slice(0, 24);
     hostId = (client, session) => `host-${hash(`${client}\0${session}`)}`;
     peerId = (room, session) => `peer-${hash(`${room}\0${session}`)}`;
     plain = (value) => value && typeof value === "object" && !Array.isArray(value);
@@ -1060,10 +1143,10 @@ __export(broker_client_exports, {
   runProxy: () => runProxy,
   validateRemoteRoom: () => validateRemoteRoom
 });
-import fs3 from "node:fs";
+import fs4 from "node:fs";
 import os2 from "node:os";
-import path3 from "node:path";
-import crypto3 from "node:crypto";
+import path4 from "node:path";
+import crypto4 from "node:crypto";
 function canonicalBrokerUrl(value) {
   let url;
   try {
@@ -1079,15 +1162,15 @@ function validateRemoteRoom(room) {
   return room;
 }
 function readBrokerToken(tokenFile) {
-  if (typeof tokenFile !== "string" || !path3.isAbsolute(tokenFile)) throw new Error("An absolute broker token file path is required");
+  if (typeof tokenFile !== "string" || !path4.isAbsolute(tokenFile)) throw new Error("An absolute broker token file path is required");
   let fd;
   try {
-    if (fs3.lstatSync(tokenFile).isSymbolicLink()) throw new Error("Broker token file cannot be a symlink");
-    fd = fs3.openSync(tokenFile, fs3.constants.O_RDONLY | (fs3.constants.O_NOFOLLOW || 0));
-    const stat = fs3.fstatSync(fd);
+    if (fs4.lstatSync(tokenFile).isSymbolicLink()) throw new Error("Broker token file cannot be a symlink");
+    fd = fs4.openSync(tokenFile, fs4.constants.O_RDONLY | (fs4.constants.O_NOFOLLOW || 0));
+    const stat = fs4.fstatSync(fd);
     if (!stat.isFile() || stat.size > 4096) throw new Error("Broker token file must be a small regular file");
     const buffer = Buffer.alloc(4097);
-    const length = fs3.readSync(fd, buffer, 0, buffer.length, 0);
+    const length = fs4.readSync(fd, buffer, 0, buffer.length, 0);
     const token = buffer.subarray(0, length).toString("utf8").trim();
     if (length > 4096 || !/^[A-Za-z0-9._~+\/-]{32,512}={0,2}$/.test(token)) throw new Error("Broker token must contain 32 to 512 non-whitespace safe ASCII characters");
     return token;
@@ -1095,53 +1178,53 @@ function readBrokerToken(tokenFile) {
     if (error.code) throw new Error("Broker token file is missing or unreadable");
     throw error;
   } finally {
-    if (fd !== void 0) fs3.closeSync(fd);
+    if (fd !== void 0) fs4.closeSync(fd);
   }
 }
 function brokerSessionDirectory({ sessionDir, home } = {}) {
-  const dir = sessionDir || process.env.AGENT_CHAT_BROKER_SESSION_DIR || path3.join(home || process.env.AGENT_CHAT_HOME || path3.join(os2.homedir(), ".agent-chat"), "broker-sessions");
-  if (!path3.isAbsolute(dir)) throw new Error("Broker session directory must be absolute");
-  return path3.resolve(dir);
+  const dir = sessionDir || process.env.AGENT_CHAT_BROKER_SESSION_DIR || path4.join(home || process.env.AGENT_CHAT_HOME || path4.join(os2.homedir(), ".agent-chat"), "broker-sessions");
+  if (!path4.isAbsolute(dir)) throw new Error("Broker session directory must be absolute");
+  return path4.resolve(dir);
 }
 function sessionFile(dir, id) {
   if (typeof id !== "string" || !/^[a-f0-9-]{36}$/.test(id)) throw new Error("Invalid broker session ID");
-  return path3.join(dir, `${id}.json`);
+  return path4.join(dir, `${id}.json`);
 }
 function privateDir(dir) {
-  fs3.mkdirSync(dir, { recursive: true, mode: 448 });
-  if (fs3.lstatSync(dir).isSymbolicLink() || !fs3.statSync(dir).isDirectory()) throw new Error("Unsafe broker session directory");
+  fs4.mkdirSync(dir, { recursive: true, mode: 448 });
+  if (fs4.lstatSync(dir).isSymbolicLink() || !fs4.statSync(dir).isDirectory()) throw new Error("Unsafe broker session directory");
 }
 function saveSession(session, { sessionDir, home, tokenFile, sessionFile: explicitFile } = {}) {
   const dir = brokerSessionDirectory({ sessionDir, home });
   privateDir(dir);
   const file = sessionFile(dir, session.sessionId);
-  const temporary = `${file}.${crypto3.randomUUID()}.tmp`;
+  const temporary = `${file}.${crypto4.randomUUID()}.tmp`;
   try {
-    fs3.writeFileSync(temporary, JSON.stringify({ ...session, bootstrapHash: tokenHash(readBrokerToken(tokenFile)) }) + "\n", { mode: 384, flag: "wx" });
-    fs3.renameSync(temporary, file);
+    fs4.writeFileSync(temporary, JSON.stringify({ ...session, bootstrapHash: tokenHash(readBrokerToken(tokenFile)) }) + "\n", { mode: 384, flag: "wx" });
+    fs4.renameSync(temporary, file);
   } finally {
-    fs3.rmSync(temporary, { force: true });
+    fs4.rmSync(temporary, { force: true });
   }
   if (explicitFile) {
-    if (!path3.isAbsolute(explicitFile)) throw new Error("Broker session file must be absolute");
-    privateDir(path3.dirname(explicitFile));
-    if (fs3.existsSync(explicitFile) && fs3.lstatSync(explicitFile).isSymbolicLink()) throw new Error("Unsafe broker session file");
-    const temp = `${explicitFile}.${crypto3.randomUUID()}.tmp`;
+    if (!path4.isAbsolute(explicitFile)) throw new Error("Broker session file must be absolute");
+    privateDir(path4.dirname(explicitFile));
+    if (fs4.existsSync(explicitFile) && fs4.lstatSync(explicitFile).isSymbolicLink()) throw new Error("Unsafe broker session file");
+    const temp = `${explicitFile}.${crypto4.randomUUID()}.tmp`;
     try {
-      fs3.writeFileSync(temp, fs3.readFileSync(file), { flag: "wx", mode: 384 });
-      fs3.renameSync(temp, explicitFile);
+      fs4.writeFileSync(temp, fs4.readFileSync(file), { flag: "wx", mode: 384 });
+      fs4.renameSync(temp, explicitFile);
     } finally {
-      fs3.rmSync(temp, { force: true });
+      fs4.rmSync(temp, { force: true });
     }
   }
   return file;
 }
 function loadSession({ url, tokenFile, sessionId, sessionDir, home }) {
   const dir = brokerSessionDirectory({ sessionDir, home });
-  if (fs3.lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe broker session directory");
+  if (fs4.lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe broker session directory");
   const file = sessionFile(dir, sessionId);
-  if (fs3.lstatSync(file).isSymbolicLink() || fs3.statSync(file).size > 8192) throw new Error("Unsafe broker session credential file");
-  const session = JSON.parse(fs3.readFileSync(file, "utf8"));
+  if (fs4.lstatSync(file).isSymbolicLink() || fs4.statSync(file).size > 8192) throw new Error("Unsafe broker session credential file");
+  const session = JSON.parse(fs4.readFileSync(file, "utf8"));
   if (session.sessionId !== sessionId || session.url !== canonicalBrokerUrl(url) || session.bootstrapHash !== tokenHash(readBrokerToken(tokenFile)) || typeof session.sessionToken !== "string" || !/^[a-f0-9]{64}$/.test(session.sessionToken)) throw new Error("Broker session credentials do not match this endpoint and token file");
   return session;
 }
@@ -1178,6 +1261,7 @@ async function request(url, endpoint, { token, method = "POST", body, timeoutMs 
   }
   if (!response.ok) throw Object.assign(new Error(`Broker request failed (HTTP ${response.status})`), {
     status: response.status,
+    brokerError: typeof result?.error === "string" ? result.error.slice(0, 512) : void 0,
     ...response.status === 429 && result?.execution === "not-started" && typeof result.requestId === "string" ? { rejectedBeforeExecution: true, requestId: result.requestId } : {}
   });
   return result;
@@ -1185,8 +1269,8 @@ async function request(url, endpoint, { token, method = "POST", body, timeoutMs 
 function processInstance(pid) {
   if (process.platform !== "linux") return null;
   try {
-    const namespace = fs3.readlinkSync(`/proc/${pid}/ns/pid`);
-    const stat = fs3.readFileSync(`/proc/${pid}/stat`, "utf8");
+    const namespace = fs4.readlinkSync(`/proc/${pid}/ns/pid`);
+    const stat = fs4.readFileSync(`/proc/${pid}/stat`, "utf8");
     const started = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[19];
     return `${namespace}:${started}`;
   } catch {
@@ -1195,26 +1279,26 @@ function processInstance(pid) {
 }
 function prepareSessionStorage({ sessionDir, home, sessionFile: explicitFile }) {
   const dir = brokerSessionDirectory({ sessionDir, home });
-  if (explicitFile !== void 0 && (typeof explicitFile !== "string" || !path3.isAbsolute(explicitFile))) throw new Error("Broker session file must be absolute");
+  if (explicitFile !== void 0 && (typeof explicitFile !== "string" || !path4.isAbsolute(explicitFile))) throw new Error("Broker session file must be absolute");
   privateDir(dir);
   let release = () => {
   };
   if (explicitFile) {
-    privateDir(path3.dirname(explicitFile));
-    if (fs3.existsSync(explicitFile) && (fs3.lstatSync(explicitFile).isSymbolicLink() || !fs3.statSync(explicitFile).isFile() || fs3.statSync(explicitFile).size > 8192)) throw new Error("Unsafe broker session file");
+    privateDir(path4.dirname(explicitFile));
+    if (fs4.existsSync(explicitFile) && (fs4.lstatSync(explicitFile).isSymbolicLink() || !fs4.statSync(explicitFile).isFile() || fs4.statSync(explicitFile).size > 8192)) throw new Error("Unsafe broker session file");
     const lock = `${explicitFile}.lock`;
-    const nonce = crypto3.randomUUID();
+    const nonce = crypto4.randomUUID();
     let fd;
     try {
-      fd = fs3.openSync(lock, "wx", 384);
+      fd = fs4.openSync(lock, "wx", 384);
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
       let reclaimFd;
       const reclaim = `${lock}.reclaim`;
       try {
-        reclaimFd = fs3.openSync(reclaim, "wx", 384);
-        if (fs3.lstatSync(lock).isSymbolicLink() || fs3.statSync(lock).size > 1024) throw new Error();
-        const owner = JSON.parse(fs3.readFileSync(lock, "utf8"));
+        reclaimFd = fs4.openSync(reclaim, "wx", 384);
+        if (fs4.lstatSync(lock).isSymbolicLink() || fs4.statSync(lock).size > 1024) throw new Error();
+        const owner = JSON.parse(fs4.readFileSync(lock, "utf8"));
         if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0) throw new Error();
         let alive = true;
         try {
@@ -1224,53 +1308,63 @@ function prepareSessionStorage({ sessionDir, home, sessionFile: explicitFile }) 
         }
         const instance = processInstance(owner.pid);
         if (alive && !(owner.instance && instance && owner.instance !== instance)) throw new Error();
-        fs3.unlinkSync(lock);
-        fd = fs3.openSync(lock, "wx", 384);
+        fs4.unlinkSync(lock);
+        fd = fs4.openSync(lock, "wx", 384);
       } catch {
         throw Object.assign(new Error("This private broker session file is already in use; stop its adapter before reconnecting"), { status: 409 });
       } finally {
         if (reclaimFd !== void 0) {
-          fs3.closeSync(reclaimFd);
-          fs3.rmSync(reclaim, { force: true });
+          fs4.closeSync(reclaimFd);
+          fs4.rmSync(reclaim, { force: true });
         }
       }
     }
     try {
-      fs3.writeFileSync(fd, JSON.stringify({ pid: process.pid, nonce, instance: processInstance(process.pid) }));
+      fs4.writeFileSync(fd, JSON.stringify({ pid: process.pid, nonce, instance: processInstance(process.pid) }));
     } finally {
-      fs3.closeSync(fd);
+      fs4.closeSync(fd);
     }
     release = () => {
       try {
-        if (JSON.parse(fs3.readFileSync(lock, "utf8")).nonce === nonce) fs3.unlinkSync(lock);
+        if (JSON.parse(fs4.readFileSync(lock, "utf8")).nonce === nonce) fs4.unlinkSync(lock);
       } catch {
       }
     };
   }
   return { dir, release };
 }
-async function createRemoteSession({ url, tokenFile, room, name, client = "unknown", clientCwd = process.cwd(), sessionDir, home, sessionFile: explicitFile, resumable = Boolean(explicitFile) } = {}) {
+async function createRemoteSession({ url, tokenFile, room, name, client = "unknown", clientCwd = process.cwd(), repo, sessionDir, home, sessionFile: explicitFile, resumable = Boolean(explicitFile) } = {}) {
   url = canonicalBrokerUrl(url);
   validateRemoteRoom(room);
+  if (repo !== void 0 && (typeof repo !== "string" || !/^[a-z0-9]{1,32}$/.test(repo))) throw new Error("Invalid repository slug");
   const bootstrapHash = tokenHash(readBrokerToken(tokenFile));
   const storage = prepareSessionStorage({ sessionDir, home, sessionFile: explicitFile });
   let session;
   try {
-    if (explicitFile && fs3.existsSync(explicitFile)) {
-      const previous = JSON.parse(fs3.readFileSync(explicitFile, "utf8"));
+    if (explicitFile && fs4.existsSync(explicitFile)) {
+      const previous = JSON.parse(fs4.readFileSync(explicitFile, "utf8"));
       if (previous.url !== url || previous.bootstrapHash !== bootstrapHash || previous.clientCwd !== clientCwd || previous.room !== room || typeof previous.sessionToken !== "string") throw new Error("Stored broker session does not match this endpoint, room, token file and client directory");
       let resumed;
       try {
-        resumed = await resumeRemoteSession(previous);
+        resumed = await resumeRemoteSession({ ...previous, repo: repo ?? remoteRepo(sessionRepo(clientCwd)) });
       } catch (error) {
         if (error.status === 404 || error.status === 410) throw Object.assign(new Error("Saved broker session expired or is no longer available. Stop adapters using this file, then remove the obsolete AGENT_CHAT_BROKER_SESSION_FILE or choose a fresh absolute path and restart. The saved credentials have been preserved."), { status: error.status });
         throw error;
       }
-      session = { ...previous, leaseMs: resumed.leaseMs };
+      session = { ...previous, repo: repo ?? remoteRepo(sessionRepo(clientCwd)), leaseMs: resumed.leaseMs, ...resumed.peer ? { peer: resumed.peer } : {} };
       if (resumed.peer?.room !== room) throw new Error("Resumed broker room does not match");
     } else {
-      const result = await request(url, "/v1/sessions", { token: readBrokerToken(tokenFile), body: { room, ...name === void 0 ? {} : { name }, client, clientCwd, resumable }, timeoutMs: 1e4 });
-      session = { ...result, url, clientCwd, resumable };
+      const body = { room, ...name === void 0 ? {} : { name }, repo: repo ?? remoteRepo(sessionRepo(clientCwd)), client, clientCwd, resumable };
+      const options = { token: readBrokerToken(tokenFile), body, timeoutMs: 1e4 };
+      let result;
+      try {
+        result = await request(url, "/v1/sessions", options);
+      } catch (error) {
+        if (error.status !== 400 || error.brokerError !== "Unexpected request field") throw error;
+        const { repo: ignoredRepo, ...legacyBody } = body;
+        result = await request(url, "/v1/sessions", { ...options, body: legacyBody });
+      }
+      session = { ...result, url, clientCwd, repo: body.repo, resumable };
     }
     const credentialFile = saveSession(session, { sessionDir, home, tokenFile, sessionFile: explicitFile });
     Object.defineProperty(session, localResources, { value: { release: storage.release, credentialFile, ephemeral: !resumable } });
@@ -1282,13 +1376,23 @@ async function createRemoteSession({ url, tokenFile, room, name, client = "unkno
       } catch {
       }
     }
-    if (session && !resumable) fs3.rmSync(sessionFile(storage.dir, session.sessionId), { force: true });
+    if (session && !resumable) fs4.rmSync(sessionFile(storage.dir, session.sessionId), { force: true });
     storage.release();
     throw error;
   }
 }
 async function resumeRemoteSession(session) {
-  return request(session.url, `/v1/sessions/${session.sessionId}/resume`, { token: session.sessionToken, body: {}, timeoutMs: 1e4 });
+  let body = {};
+  if (session.repo !== void 0) {
+    if (typeof session.repo !== "string" || !/^[a-z0-9]{1,32}$/.test(session.repo)) throw new Error("Invalid repository slug");
+    let health;
+    try {
+      health = await request(session.url, "/health", { method: "GET", token: session.sessionToken, timeoutMs: 3e3 });
+    } catch {
+    }
+    if (health?.capabilities?.resumeRepo === true) body = { repo: session.repo };
+  }
+  return request(session.url, `/v1/sessions/${session.sessionId}/resume`, { token: session.sessionToken, body, timeoutMs: 1e4 });
 }
 async function heartbeatRemoteSession(session) {
   return request(session.url, `/v1/sessions/${session.sessionId}/heartbeat`, { token: session.sessionToken, body: {}, timeoutMs: 1e4 });
@@ -1298,13 +1402,13 @@ async function closeRemoteSession(session) {
     return await request(session.url, `/v1/sessions/${session.sessionId}`, { token: session.sessionToken, method: "DELETE", timeoutMs: 1e4 });
   } finally {
     const local = session[localResources];
-    if (local?.ephemeral) fs3.rmSync(local.credentialFile, { force: true });
+    if (local?.ephemeral) fs4.rmSync(local.credentialFile, { force: true });
     local?.release();
   }
 }
 async function remoteRpc(session, rpc, { requestId: suppliedRequestId, signal, timeoutMs = 6e4 } = {}) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 2 || timeoutMs > 6e4) throw new Error("RPC timeout must be 2 to 60000 milliseconds");
-  const requestId = suppliedRequestId === void 0 ? crypto3.randomUUID() : suppliedRequestId;
+  const requestId = suppliedRequestId === void 0 ? crypto4.randomUUID() : suppliedRequestId;
   const body = JSON.parse(JSON.stringify({ requestId, rpc }));
   const deadline = performance.now() + timeoutMs;
   const recoveryMs = Math.min(5e3, Math.max(1, Math.floor(timeoutMs / 4)));
@@ -1371,11 +1475,9 @@ async function runProxy({ env = process.env, input = process.stdin, output = pro
   const controllers = /* @__PURE__ */ new Set();
   const jobs = /* @__PURE__ */ new Set();
   const write = (value) => new Promise((resolve, reject) => output.write(JSON.stringify(value) + "\n", (error) => error ? reject(error) : resolve()));
-  const clientName = env.AGENT_CHAT_CLIENT || env.AGENT_CHAT_NAME || "unknown";
-  const family = clientName.toLowerCase().includes("claude") ? "claude" : clientName.toLowerCase().includes("codex") ? "codex" : clientName.toLowerCase().includes("opencode") ? "opencode" : "agent";
-  const suffix = crypto3.randomBytes(3).toString("hex");
-  const project = (path3.basename(clientCwd) || "root").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 40 - family.length - suffix.length - 2);
-  const startup = createRemoteSession({ url, tokenFile, room, name: env.AGENT_CHAT_NAME || `${family}-${project}-${suffix}`, client: clientName, clientCwd, sessionDir: env.AGENT_CHAT_BROKER_SESSION_DIR, home: env.AGENT_CHAT_HOME, sessionFile: env.AGENT_CHAT_BROKER_SESSION_FILE }).then((result) => {
+  const clientName = env.AGENT_CHAT_CLIENT || "unknown";
+  const repo = remoteRepo(sessionRepo(clientCwd));
+  const startup = createRemoteSession({ url, tokenFile, room, name: sessionName({ client: clientName, repo, title: env.AGENT_CHAT_NAME, sessionId: crypto4.randomUUID() }), client: clientName, clientCwd, repo, sessionDir: env.AGENT_CHAT_BROKER_SESSION_DIR, home: env.AGENT_CHAT_HOME, sessionFile: env.AGENT_CHAT_BROKER_SESSION_FILE }).then((result) => {
     session = result;
     return result;
   });
@@ -1485,37 +1587,38 @@ async function runProxy({ env = process.env, input = process.stdin, output = pro
 var MAX_RESPONSE, localResources, tokenHash;
 var init_broker_client = __esm({
   "lib/broker-client.mjs"() {
+    init_session_name();
     MAX_RESPONSE = 512 * 1024;
     localResources = /* @__PURE__ */ Symbol("local broker resources");
-    tokenHash = (token) => crypto3.createHash("sha256").update(token).digest("hex");
+    tokenHash = (token) => crypto4.createHash("sha256").update(token).digest("hex");
   }
 });
 
 // hooks/notifications.mjs
-import fs4 from "node:fs";
+import fs5 from "node:fs";
 import os3 from "node:os";
-import path4 from "node:path";
-import crypto4 from "node:crypto";
+import path5 from "node:path";
+import crypto5 from "node:crypto";
 function supportedSessionTitle(value) {
   return typeof value === "string" && value.trim() && ![".", ".."].includes(value.trim()) && value.length <= 256 && !/[\x00-\x1f\x7f]/.test(value) ? value.trim() : null;
 }
 function readJson2(file, maxBytes) {
-  const fd = fs4.openSync(file, fs4.constants.O_RDONLY | fs4.constants.O_NOFOLLOW);
+  const fd = fs5.openSync(file, fs5.constants.O_RDONLY | fs5.constants.O_NOFOLLOW);
   try {
-    const stat = fs4.fstatSync(fd);
+    const stat = fs5.fstatSync(fd);
     if (!stat.isFile() || stat.size > maxBytes) throw new Error("JSON file is too large or is not a regular file");
     const buffer = Buffer.alloc(maxBytes + 1);
-    const length = fs4.readSync(fd, buffer, 0, buffer.length, 0);
+    const length = fs5.readSync(fd, buffer, 0, buffer.length, 0);
     if (length > maxBytes) throw new Error("JSON file is too large");
     return JSON.parse(buffer.subarray(0, length).toString("utf8"));
   } finally {
-    fs4.closeSync(fd);
+    fs5.closeSync(fd);
   }
 }
 function canonicalCwd(cwd) {
-  if (typeof cwd !== "string" || !path4.isAbsolute(cwd)) return null;
+  if (typeof cwd !== "string" || !path5.isAbsolute(cwd)) return null;
   try {
-    return fs4.statSync(cwd).isDirectory() ? ["win32", "darwin"].includes(process.platform) ? fs4.realpathSync.native(cwd) : fs4.realpathSync(cwd) : null;
+    return fs5.statSync(cwd).isDirectory() ? ["win32", "darwin"].includes(process.platform) ? fs5.realpathSync.native(cwd) : fs5.realpathSync(cwd) : null;
   } catch {
     return null;
   }
@@ -1525,15 +1628,15 @@ function sameBindingCwd(left, right) {
   if (left === right) return true;
   if (!["win32", "darwin"].includes(process.platform)) return false;
   const linkFree = (cwd) => {
-    if (!path4.isAbsolute(cwd)) return false;
-    const normalized = path4.normalize(cwd);
-    const root = path4.parse(normalized).root;
+    if (!path5.isAbsolute(cwd)) return false;
+    const normalized = path5.normalize(cwd);
+    const root = path5.parse(normalized).root;
     let current = root;
     try {
-      if (fs4.lstatSync(current).isSymbolicLink()) return false;
-      for (const part of normalized.slice(root.length).split(path4.sep).filter(Boolean)) {
-        current = path4.join(current, part);
-        if (fs4.lstatSync(current).isSymbolicLink()) return false;
+      if (fs5.lstatSync(current).isSymbolicLink()) return false;
+      for (const part of normalized.slice(root.length).split(path5.sep).filter(Boolean)) {
+        current = path5.join(current, part);
+        if (fs5.lstatSync(current).isSymbolicLink()) return false;
       }
       return true;
     } catch {
@@ -1562,7 +1665,7 @@ function validateStoredBinding(binding) {
   if (typeof binding.hostSessionId !== "string" || !binding.hostSessionId.trim() || binding.hostSessionId.length > 256) {
     throw new Error("hostSessionId is required (maximum 256 characters)");
   }
-  if (typeof binding.cwd !== "string" || !path4.isAbsolute(binding.cwd) || binding.cwd.includes("\0")) throw new Error("stored cwd must be an absolute directory path");
+  if (typeof binding.cwd !== "string" || !path5.isAbsolute(binding.cwd) || binding.cwd.includes("\0")) throw new Error("stored cwd must be an absolute directory path");
   if (typeof binding.room !== "string" || !/^[A-Za-z0-9._-]+$/.test(binding.room) || [".", ".."].includes(binding.room) || binding.room.length > 128) throw new Error("room must be the exact Room id from chat_who");
   safeSessionId(binding.mailboxSessionId);
   if (binding.boundAt !== void 0 && (!Number.isSafeInteger(binding.boundAt) || binding.boundAt < 0)) throw new Error("boundAt must be a nonnegative integer timestamp");
@@ -1572,7 +1675,7 @@ function validateStoredBinding(binding) {
   return {
     client: binding.client,
     hostSessionId: binding.hostSessionId,
-    cwd: path4.normalize(binding.cwd),
+    cwd: path5.normalize(binding.cwd),
     room: binding.room,
     mailboxSessionId: binding.mailboxSessionId,
     ...binding.brokerUrl === void 0 ? {} : { brokerUrl: brokerUrl(binding.brokerUrl) },
@@ -1617,7 +1720,7 @@ async function inspectRemote(binding, env, afterOffset, remoteInspector) {
   return result;
 }
 function readConfig(file) {
-  if (!path4.isAbsolute(file)) throw new Error("AGENT_CHAT_NOTIFY_CONFIG must be an absolute path");
+  if (!path5.isAbsolute(file)) throw new Error("AGENT_CHAT_NOTIFY_CONFIG must be an absolute path");
   const config = readJson2(file, NOTIFICATION_LIMITS.configBytes);
   if (config?.version !== 1 || !Array.isArray(config.bindings) || config.bindings.length > NOTIFICATION_LIMITS.bindings) {
     throw new Error("notification config requires version 1 and at most 100 bindings");
@@ -1661,7 +1764,7 @@ async function syncBoundSessionTitle({
     peer = (await inspectRemote(binding, env, void 0, remoteInspector))?.peer;
     if (!peer) return { synced: false, reason: "wrong-remote-identity" };
   } else {
-    mailbox ??= createMailbox({ home: env.AGENT_CHAT_HOME || path4.join(os3.homedir(), ".agent-chat"), cwd });
+    mailbox ??= createMailbox({ home: env.AGENT_CHAT_HOME || path5.join(os3.homedir(), ".agent-chat"), cwd });
     const matches = mailbox.listPeers(room).filter((item) => item.sessionId === binding.mailboxSessionId && sameBindingCwd(canonicalCwd(item.cwd), binding.cwd));
     if (matches.length !== 1) return { synced: false, reason: "wrong-local-identity" };
     peer = matches[0];
@@ -1689,11 +1792,11 @@ async function registerHostPresence({ client, hostSessionId, cwd, title, model, 
   if (!env.AGENT_CHAT_NOTIFY_CONFIG || env.AGENT_CHAT_BROKER_URL || env.AGENT_CHAT_BROKER_TOKEN_FILE) return null;
   try {
     const { createPresence: createPresence2 } = await Promise.resolve().then(() => (init_presence(), presence_exports));
-    const presence = createPresence2({ home: mailbox?.home || env.AGENT_CHAT_HOME || path4.join(os3.homedir(), ".agent-chat") });
+    const presence = createPresence2({ home: mailbox?.home || env.AGENT_CHAT_HOME || path5.join(os3.homedir(), ".agent-chat") });
     const host = presence.registerHost({ client, hostSessionId, cwd, ...supportedSessionTitle(title) ? { title: title.trim() } : {}, model, variant, activity });
     const binding = findBinding({ client, hostSessionId, cwd, env });
     if (binding && !binding.brokerUrl) {
-      mailbox ??= createMailbox({ home: env.AGENT_CHAT_HOME || path4.join(os3.homedir(), ".agent-chat"), cwd });
+      mailbox ??= createMailbox({ home: env.AGENT_CHAT_HOME || path5.join(os3.homedir(), ".agent-chat"), cwd });
       const room = { id: binding.room, label: binding.room };
       const peers = mailbox.listPeers(room).filter((peer) => peer.sessionId === binding.mailboxSessionId && sameBindingCwd(canonicalCwd(peer.cwd), binding.cwd));
       if (peers.length === 1) presence.linkHost({
@@ -1725,11 +1828,11 @@ async function notifyHostInvitations({
   const result = await registerHostPresence({ client, hostSessionId, cwd, title, model, activity, env, mailbox });
   const ids = result?.invitations?.map((invitation) => invitation.id).filter((id) => typeof id === "string").slice(0, 100) ?? [];
   if (!ids.length) return { delivered: false };
-  const dir = path4.join(mailbox?.home || env.AGENT_CHAT_HOME || path4.join(os3.homedir(), ".agent-chat"), "notifications");
-  fs4.mkdirSync(dir, { recursive: true, mode: 448 });
-  if (fs4.lstatSync(dir).isSymbolicLink() || !fs4.lstatSync(dir).isDirectory()) throw new Error("Unsafe notification directory");
-  const key = crypto4.createHash("sha256").update(JSON.stringify([client, hostSessionId, canonicalCwd(cwd), channel])).digest("hex");
-  const file = path4.join(dir, `invitations-${key}.json`);
+  const dir = path5.join(mailbox?.home || env.AGENT_CHAT_HOME || path5.join(os3.homedir(), ".agent-chat"), "notifications");
+  fs5.mkdirSync(dir, { recursive: true, mode: 448 });
+  if (fs5.lstatSync(dir).isSymbolicLink() || !fs5.lstatSync(dir).isDirectory()) throw new Error("Unsafe notification directory");
+  const key = crypto5.createHash("sha256").update(JSON.stringify([client, hostSessionId, canonicalCwd(cwd), channel])).digest("hex");
+  const file = path5.join(dir, `invitations-${key}.json`);
   const lock = `${file}.lock`;
   if (!acquireLock(lock)) return { delivered: false };
   try {
@@ -1744,26 +1847,26 @@ async function notifyHostInvitations({
     await deliver(`${CHAT_LABEL}: ${fresh.length} new room invitation${fresh.length === 1 ? "" : "s"}. ` + (channel === "toast" ? "Ask your agent to call chat_who, then check Agent Chat invitations when you continue." : "Use chat_invitations to inspect. If none appear, bind this session with chat_who and retry. Invitations do not move your session or authorize work."));
     const temporary = `${file}.${process.pid}.tmp`;
     try {
-      fs4.writeFileSync(temporary, JSON.stringify({ ids: [.../* @__PURE__ */ new Set([...previous, ...fresh])].slice(-RECENT_IDS) }) + "\n", { flag: "wx", mode: 384 });
-      fs4.renameSync(temporary, file);
+      fs5.writeFileSync(temporary, JSON.stringify({ ids: [.../* @__PURE__ */ new Set([...previous, ...fresh])].slice(-RECENT_IDS) }) + "\n", { flag: "wx", mode: 384 });
+      fs5.renameSync(temporary, file);
     } finally {
-      fs4.rmSync(temporary, { force: true });
+      fs5.rmSync(temporary, { force: true });
     }
     return { delivered: true, count: fresh.length };
   } finally {
-    fs4.rmSync(lock, { force: true });
+    fs5.rmSync(lock, { force: true });
   }
 }
 function acquireLock(file) {
   try {
-    const fd = fs4.openSync(file, "wx", 384);
-    fs4.writeFileSync(fd, JSON.stringify({ pid: process.pid }));
-    fs4.closeSync(fd);
+    const fd = fs5.openSync(file, "wx", 384);
+    fs5.writeFileSync(fd, JSON.stringify({ pid: process.pid }));
+    fs5.closeSync(fd);
     return true;
   } catch (error) {
     if (error.code !== "EEXIST") throw error;
     try {
-      const before = fs4.statSync(file);
+      const before = fs5.statSync(file);
       const owner = readJson2(file, 1024);
       if (!Number.isInteger(owner.pid) || owner.pid <= 0) return false;
       try {
@@ -1772,28 +1875,28 @@ function acquireLock(file) {
       } catch (e) {
         if (e.code !== "ESRCH") return false;
       }
-      const after = fs4.statSync(file);
+      const after = fs5.statSync(file);
       if (before.ino !== after.ino || before.dev !== after.dev) return false;
       const reclaim = `${file}.reclaim`;
       let fd;
       try {
-        fd = fs4.openSync(reclaim, "wx", 384);
-        const current = fs4.statSync(file);
+        fd = fs5.openSync(reclaim, "wx", 384);
+        const current = fs5.statSync(file);
         if (current.ino !== before.ino || current.dev !== before.dev) return false;
-        fs4.unlinkSync(file);
+        fs5.unlinkSync(file);
       } finally {
         if (fd !== void 0) {
-          fs4.closeSync(fd);
-          fs4.rmSync(reclaim, { force: true });
+          fs5.closeSync(fd);
+          fs5.rmSync(reclaim, { force: true });
         }
       }
     } catch {
       return false;
     }
     try {
-      const fd = fs4.openSync(file, "wx", 384);
-      fs4.writeFileSync(fd, JSON.stringify({ pid: process.pid }));
-      fs4.closeSync(fd);
+      const fd = fs5.openSync(file, "wx", 384);
+      fs5.writeFileSync(fd, JSON.stringify({ pid: process.pid }));
+      fs5.closeSync(fd);
       return true;
     } catch (e) {
       if (e.code === "EEXIST") return false;
@@ -1820,14 +1923,14 @@ async function notifySession({
   const room = { id: binding.room, label: binding.room };
   let peer;
   if (!remote) {
-    mailbox ??= createMailbox({ home: env.AGENT_CHAT_HOME || path4.join(os3.homedir(), ".agent-chat"), cwd });
+    mailbox ??= createMailbox({ home: env.AGENT_CHAT_HOME || path5.join(os3.homedir(), ".agent-chat"), cwd });
     mailbox.roomPath(room);
     const peers = mailbox.listPeers(room).filter((item) => item.sessionId === binding.mailboxSessionId);
     if (peers.length !== 1) return { delivered: false, reason: "no-peer" };
     peer = peers[0];
     if (!sameBindingCwd(canonicalCwd(peer.cwd), binding.cwd)) return { delivered: false, reason: "wrong-worktree" };
   }
-  const key = crypto4.createHash("sha256").update(JSON.stringify([
+  const key = crypto5.createHash("sha256").update(JSON.stringify([
     client,
     hostSessionId,
     binding.cwd,
@@ -1836,10 +1939,10 @@ async function notifySession({
     channel,
     ...remote ? [binding.brokerUrl] : []
   ])).digest("hex");
-  const dir = remote ? path4.join(path4.dirname(env.AGENT_CHAT_NOTIFY_CONFIG), "notification-state") : path4.join(mailbox.home, "notifications");
-  fs4.mkdirSync(dir, { recursive: true, mode: 448 });
-  if (fs4.lstatSync(dir).isSymbolicLink() || !fs4.lstatSync(dir).isDirectory()) throw new Error("Unsafe notification directory");
-  const file = path4.join(dir, `${key}.json`);
+  const dir = remote ? path5.join(path5.dirname(env.AGENT_CHAT_NOTIFY_CONFIG), "notification-state") : path5.join(mailbox.home, "notifications");
+  fs5.mkdirSync(dir, { recursive: true, mode: 448 });
+  if (fs5.lstatSync(dir).isSymbolicLink() || !fs5.lstatSync(dir).isDirectory()) throw new Error("Unsafe notification directory");
+  const file = path5.join(dir, `${key}.json`);
   const lock = `${file}.lock`;
   if (!acquireLock(lock)) return { delivered: false, reason: "busy" };
   try {
@@ -1882,14 +1985,14 @@ async function notifySession({
     }
     const temporary = `${file}.${process.pid}.tmp`;
     try {
-      fs4.writeFileSync(temporary, JSON.stringify(next) + "\n", { flag: "wx", mode: 384 });
-      fs4.renameSync(temporary, file);
+      fs5.writeFileSync(temporary, JSON.stringify(next) + "\n", { flag: "wx", mode: 384 });
+      fs5.renameSync(temporary, file);
     } finally {
-      fs4.rmSync(temporary, { force: true });
+      fs5.rmSync(temporary, { force: true });
     }
     return { delivered: fresh.length > 0, count: fresh.length, hasMore: result.hasMore };
   } finally {
-    fs4.rmSync(lock, { force: true });
+    fs5.rmSync(lock, { force: true });
   }
 }
 var CLIENTS, NOTIFICATION_LIMITS, SCAN_BYTES, RECENT_IDS, STOP_WAIT_SLICE_MS, STOP_WAIT_POLL_MS, STOP_REPLY_REASON, STOP_PENDING_REASON, STOP_EXPIRED_REASON, IDLE_WATCH_MS, IDLE_POLL_MS, WAKE_SCAN_PAGES, WAKE_INSTRUCTIONS, TITLE_SOURCES, directedMessage;
@@ -1926,13 +2029,13 @@ var bind_exports = {};
 __export(bind_exports, {
   bindNotification: () => bindNotification
 });
-import fs5 from "node:fs";
-import path5 from "node:path";
+import fs6 from "node:fs";
+import path6 from "node:path";
 import { fileURLToPath } from "node:url";
 function bindNotification({ configFile, binding }) {
-  if (!configFile || !path5.isAbsolute(configFile)) throw new Error("--config must be an absolute path");
+  if (!configFile || !path6.isAbsolute(configFile)) throw new Error("--config must be an absolute path");
   const valid = { ...validateBinding(binding), boundAt: Date.now() };
-  fs5.mkdirSync(path5.dirname(configFile), { recursive: true, mode: 448 });
+  fs6.mkdirSync(path6.dirname(configFile), { recursive: true, mode: 448 });
   const lock = `${configFile}.lock`;
   if (!acquireLock(lock)) throw new Error("Notification configuration is busy; retry shortly");
   try {
@@ -1954,14 +2057,14 @@ function bindNotification({ configFile, binding }) {
     }
     const temporary = `${configFile}.${process.pid}.tmp`;
     try {
-      fs5.writeFileSync(temporary, serialized, { flag: "wx", mode: 384 });
-      fs5.renameSync(temporary, configFile);
+      fs6.writeFileSync(temporary, serialized, { flag: "wx", mode: 384 });
+      fs6.renameSync(temporary, configFile);
     } finally {
-      fs5.rmSync(temporary, { force: true });
+      fs6.rmSync(temporary, { force: true });
     }
     return valid;
   } finally {
-    fs5.rmSync(lock, { force: true });
+    fs6.rmSync(lock, { force: true });
   }
 }
 var invokedScript;
@@ -1971,7 +2074,7 @@ var init_bind = __esm({
     invokedScript = (() => {
       if (!process.argv[1]) return null;
       try {
-        return fs5.realpathSync(process.argv[1]);
+        return fs6.realpathSync(process.argv[1]);
       } catch {
         return null;
       }
@@ -2004,82 +2107,82 @@ Usage: node hooks/bind.mjs --config /absolute/notifications.json --client codex|
 
 // integrations/opencode/agent-chat.src.mjs
 import os5 from "node:os";
-import path8 from "node:path";
+import path9 from "node:path";
 
 // integrations/opencode/agent-chat.mjs
 init_mailbox();
 init_presence();
 init_bind();
-import fs7 from "node:fs";
+import fs8 from "node:fs";
 import os4 from "node:os";
-import path7 from "node:path";
+import path8 from "node:path";
 
 // lib/bind-hint.mjs
-import fs6 from "node:fs";
-import path6 from "node:path";
+import fs7 from "node:fs";
+import path7 from "node:path";
 var BIND_HINT_DIRECTORY = "bind-hints";
 var BIND_HINT_MAX_BYTES = 4096;
 var BIND_HINT_MAX_AGE_MS = 15 * 60 * 1e3;
 var BIND_HINT_MAX_SCAN = 500;
 var PID_PATTERN = /^(?:0|[1-9][0-9]{0,9})$/;
 var HINT_FILE_PATTERN = /^mcp-([0-9]{1,10})\.json$/;
-var hintDirectory = (home) => path6.join(home, BIND_HINT_DIRECTORY);
+var hintDirectory = (home) => path7.join(home, BIND_HINT_DIRECTORY);
 var positivePid = (value) => Number.isSafeInteger(value) && value > 0;
 function canonical(value) {
   try {
-    return typeof fs6.realpathSync.native === "function" ? fs6.realpathSync.native(value) : fs6.realpathSync(value);
+    return typeof fs7.realpathSync.native === "function" ? fs7.realpathSync.native(value) : fs7.realpathSync(value);
   } catch {
     return null;
   }
 }
 function sameDirectory(left, right) {
-  if (typeof left !== "string" || !path6.isAbsolute(left)) return false;
+  if (typeof left !== "string" || !path7.isAbsolute(left)) return false;
   if (left === right) return true;
   const canonicalLeft = canonical(left);
   return canonicalLeft !== null && canonicalLeft === canonical(right);
 }
 function hintFile(home, mcpPid) {
   if (!positivePid(mcpPid)) throw new Error("mcpPid must be a positive integer");
-  return path6.join(hintDirectory(home), `mcp-${mcpPid}.json`);
+  return path7.join(hintDirectory(home), `mcp-${mcpPid}.json`);
 }
 function readBoundedJson(file) {
   let fd;
   try {
-    fd = fs6.openSync(file, fs6.constants.O_RDONLY | (fs6.constants.O_NOFOLLOW || 0));
-    const stat = fs6.fstatSync(fd);
+    fd = fs7.openSync(file, fs7.constants.O_RDONLY | (fs7.constants.O_NOFOLLOW || 0));
+    const stat = fs7.fstatSync(fd);
     if (!stat.isFile() || stat.size > BIND_HINT_MAX_BYTES) return null;
     const buffer = Buffer.alloc(stat.size);
-    if (stat.size > 0) fs6.readSync(fd, buffer, 0, stat.size, 0);
+    if (stat.size > 0) fs7.readSync(fd, buffer, 0, stat.size, 0);
     return JSON.parse(buffer.toString("utf8"));
   } catch {
     return null;
   } finally {
-    if (fd !== void 0) fs6.closeSync(fd);
+    if (fd !== void 0) fs7.closeSync(fd);
   }
 }
 function removeHint(file) {
   try {
-    fs6.rmSync(file, { force: true });
+    fs7.rmSync(file, { force: true });
   } catch {
   }
 }
 function scanBindHints({ home, hostPid, cwd, now = Date.now(), maxAgeMs = BIND_HINT_MAX_AGE_MS }) {
   if (!positivePid(hostPid)) return [];
-  if (typeof cwd !== "string" || !path6.isAbsolute(cwd)) return [];
+  if (typeof cwd !== "string" || !path7.isAbsolute(cwd)) return [];
   const directory = hintDirectory(home);
   let entries;
   try {
-    entries = fs6.readdirSync(directory);
+    entries = fs7.readdirSync(directory);
   } catch {
     return [];
   }
   const candidates = [];
   for (const entry of entries) {
     if (!HINT_FILE_PATTERN.test(entry)) continue;
-    const file = path6.join(directory, entry);
+    const file = path7.join(directory, entry);
     let mtime = 0;
     try {
-      mtime = fs6.statSync(file).mtimeMs;
+      mtime = fs7.statSync(file).mtimeMs;
     } catch {
       continue;
     }
@@ -2107,7 +2210,7 @@ function scanBindHints({ home, hostPid, cwd, now = Date.now(), maxAgeMs = BIND_H
 }
 function claimBindHint({ home, mcpPid }) {
   try {
-    fs6.rmSync(hintFile(home, mcpPid), { force: true });
+    fs7.rmSync(hintFile(home, mcpPid), { force: true });
     return true;
   } catch {
     return false;
@@ -2174,7 +2277,7 @@ var AgentChatPlugin = async ({ client, directory }, options = {}) => {
       if (result?.peer?.sessionId !== binding.mailboxSessionId || result.peer.room !== binding.room || canonicalCwd(result.peer.clientCwd) !== canonicalCwd(binding.cwd)) return { state: "none" };
       return result.wait || { state: "none" };
     }
-    const store = mailbox || createMailbox({ home: env.AGENT_CHAT_HOME || path7.join(os4.homedir(), ".agent-chat"), cwd: directory });
+    const store = mailbox || createMailbox({ home: env.AGENT_CHAT_HOME || path8.join(os4.homedir(), ".agent-chat"), cwd: directory });
     const room = { id: binding.room, label: binding.room };
     const matches = store.listPeers(room).filter((peer) => peer.sessionId === binding.mailboxSessionId && canonicalCwd(peer.cwd) === canonicalCwd(binding.cwd) && peer.client.toLowerCase().includes("opencode") && store.isPeerAlive(peer));
     if (matches.length !== 1) return { state: "none" };
@@ -2376,7 +2479,7 @@ var AgentChatPlugin = async ({ client, directory }, options = {}) => {
     if (findBinding({ client: "opencode", hostSessionId: sessionID, cwd: directory, env })) return "bound";
     const currentCwd = canonicalCwd(directory);
     if (!currentCwd) return "directory-invalid";
-    const home = env.AGENT_CHAT_HOME || path7.join(os4.homedir(), ".agent-chat");
+    const home = env.AGENT_CHAT_HOME || path8.join(os4.homedir(), ".agent-chat");
     const hints = scanBindHints({ home, hostPid: process.pid, cwd: directory });
     if (hints.length !== 1) return hints.length ? "ambiguous" : "none";
     const hint = hints[0];
@@ -2406,7 +2509,7 @@ var AgentChatPlugin = async ({ client, directory }, options = {}) => {
     const sessionId = sessionLine?.match(/^Session: ([A-Za-z0-9._-]+)$/)?.[1];
     const roomId = roomLine?.match(/^Room id: ([A-Za-z0-9._-]+)$/)?.[1];
     if (!peerName || !sessionId || !roomId) return "output-unparsed";
-    const store = mailbox || createMailbox({ home: env.AGENT_CHAT_HOME || path7.join(os4.homedir(), ".agent-chat"), cwd: directory });
+    const store = mailbox || createMailbox({ home: env.AGENT_CHAT_HOME || path8.join(os4.homedir(), ".agent-chat"), cwd: directory });
     const room = { id: roomId, label: roomId };
     const currentCwd = canonicalCwd(directory);
     if (!currentCwd) return "directory-invalid";
@@ -2441,9 +2544,9 @@ var AgentChatPlugin = async ({ client, directory }, options = {}) => {
       reason = `error: ${String(error?.message).slice(0, 200)}`;
     }
     try {
-      const dir = path7.join(path7.dirname(env.AGENT_CHAT_NOTIFY_CONFIG), "notification-state");
-      fs7.mkdirSync(dir, { recursive: true, mode: 448 });
-      fs7.writeFileSync(path7.join(dir, "opencode-link.json"), JSON.stringify({
+      const dir = path8.join(path8.dirname(env.AGENT_CHAT_NOTIFY_CONFIG), "notification-state");
+      fs8.mkdirSync(dir, { recursive: true, mode: 448 });
+      fs8.writeFileSync(path8.join(dir, "opencode-link.json"), JSON.stringify({
         at: (/* @__PURE__ */ new Date()).toISOString(),
         tool: input.tool,
         hostSessionId: input.sessionID,
@@ -2587,7 +2690,7 @@ var AgentChatPlugin = async ({ client, directory }, options = {}) => {
         const confirm = wakeConfirmTimers.get(event.properties.info.id);
         if (confirm) clearTimeout(confirm);
         wakeConfirmTimers.delete(event.properties.info.id);
-        if (env.AGENT_CHAT_NOTIFY_CONFIG && !env.AGENT_CHAT_BROKER_URL) await safely(() => createPresence({ home: mailbox?.home || env.AGENT_CHAT_HOME || path7.join(os4.homedir(), ".agent-chat") }).endHost({ client: "opencode", hostSessionId: event.properties.info.id }));
+        if (env.AGENT_CHAT_NOTIFY_CONFIG && !env.AGENT_CHAT_BROKER_URL) await safely(() => createPresence({ home: mailbox?.home || env.AGENT_CHAT_HOME || path8.join(os4.homedir(), ".agent-chat") }).endHost({ client: "opencode", hostSessionId: event.properties.info.id }));
         return;
       }
       if (event?.type !== "session.idle" || typeof event.properties?.sessionID !== "string" || childSessions.has(event.properties.sessionID) || closedSessions.has(event.properties.sessionID)) return;
@@ -2694,7 +2797,7 @@ var embeddedNotifyConfig = "__AGENT_CHAT_NOTIFY_CONFIG__";
 var embeddedEnv = "__AGENT_CHAT_EMBEDDED_ENV__";
 function resolvedEnv() {
   const configured = process.env.AGENT_CHAT_NOTIFY_CONFIG;
-  const notifyConfig = configured && configured.trim() ? configured : embeddedNotifyConfig.startsWith("__") ? path8.join(os5.homedir(), ".agent-chat", "notifications.json") : embeddedNotifyConfig;
+  const notifyConfig = configured && configured.trim() ? configured : embeddedNotifyConfig.startsWith("__") ? path9.join(os5.homedir(), ".agent-chat", "notifications.json") : embeddedNotifyConfig;
   const extra = embeddedEnv.startsWith("__") ? {} : JSON.parse(embeddedEnv);
   return { ...process.env, ...extra, AGENT_CHAT_NOTIFY_CONFIG: notifyConfig };
 }

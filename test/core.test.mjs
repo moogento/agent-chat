@@ -7,8 +7,11 @@ import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
+import { remoteRepo, sessionRepo } from '../lib/session-name.mjs';
 import { createMailbox, LIMITS } from '../lib/mailbox.mjs';
 import { createServer } from '../agent-chat.mjs';
+
+const testRepo = remoteRepo(sessionRepo(process.cwd()));
 
 function fixture(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-chat-core-'));
@@ -69,10 +72,10 @@ test('directed reply watches match exact sessions without reading the inbox', as
   await alice.server.callTool('chat_who'); await bob.server.callTool('chat_who'); await impostor.server.callTool('chat_who');
   await assert.rejects(alice.server.callTool('chat_send', { text: 'request', await_reply_minutes: 5 }), /resolved directed peer/);
   await assert.rejects(alice.server.callTool('chat_send', { to: 'missing', text: 'request', await_reply_minutes: 5 }), /resolved directed peer/);
-  await assert.rejects(alice.server.callTool('chat_send', { to: 'bob', text: 'request', await_reply_minutes: 121 }), /out of range/);
-  await assert.rejects(alice.server.callTool('chat_send', { to: 'bob', text: '', await_reply_minutes: 5 }), /text is required/);
+  await assert.rejects(alice.server.callTool('chat_send', { to: bob.server.state.identity.name, text: 'request', await_reply_minutes: 121 }), /out of range/);
+  await assert.rejects(alice.server.callTool('chat_send', { to: bob.server.state.identity.name, text: '', await_reply_minutes: 5 }), /text is required/);
   assert.equal(await alice.server.callTool('chat_wait_status'), 'No active reply watch.');
-  assert.match(await alice.server.callTool('chat_send', { to: 'bob', text: 'request', await_reply_minutes: 5 }), /Watching for a reply/);
+  assert.match(await alice.server.callTool('chat_send', { to: bob.server.state.identity.name, text: 'request', await_reply_minutes: 5 }), /Watching for a reply/);
   assert.match(await alice.server.callTool('chat_wait_status'), /No matching reply yet/);
   await impostor.server.callTool('chat_send', { to: 'alice', text: 'wrong sender' });
   await bob.server.callTool('chat_send', { to: 'all', text: 'broadcast' });
@@ -155,12 +158,13 @@ test('watched sends require an active peer and preserve an earlier watch', async
   const gone = serverFor(t, mailbox, { roomSpec: room.id, nameSpec: 'gone', sessionId: 'inactive-gone' });
   await bob.server.callTool('chat_who');
   await gone.server.callTool('chat_who');
+  const goneName = gone.server.state.identity.name;
   gone.server.stop();
   await alice.server.callTool('chat_send', { to: 'bob', text: 'first request', await_reply_minutes: 10 });
   const previous = mailbox.replyWaitStatus(alice.server.state.identity);
-  await assert.rejects(alice.server.callTool('chat_send', { to: 'gone', text: 'unreachable request', await_reply_minutes: 120 }), /active directed peer/);
+  await assert.rejects(alice.server.callTool('chat_send', { to: goneName, text: 'unreachable request', await_reply_minutes: 120 }), /active directed peer/);
   assert.equal(mailbox.replyWaitStatus(alice.server.state.identity).watchId, previous.watchId);
-  assert.match(await alice.server.callTool('chat_send', { to: 'gone', text: 'ordinary send' }), /not active/);
+  assert.match(await alice.server.callTool('chat_send', { to: goneName, text: 'ordinary send' }), /not active/);
   bob.server.stop();
   assert.equal(mailbox.replyWaitStatus(alice.server.state.identity).state, 'waiting', 'a later disconnect does not cancel an existing watch');
 });
@@ -227,10 +231,10 @@ test('default Git worktree rooms preserve the version 0.2 native-path hash and e
 
 test('new identities use fresh cursors; long handles preserve suffix ownership', (t) => {
   const { mailbox, room } = fixture(t);
-  const base = 'x'.repeat(40);
+  const base = 'x'.repeat(120);
   const first = mailbox.claimIdentity(room, base);
   const second = mailbox.claimIdentity(room, base);
-  assert.equal(second.name.length, 40);
+  assert.equal(second.name.length, 120);
   assert.notEqual(first.name, second.name);
   mailbox.touchPeer(second, 'second');
   assert.equal(mailbox.listPeers(room).find((p) => p.name === first.name).status, '');
@@ -456,7 +460,7 @@ test('empty and whitespace local environment settings retain default startup his
     const read = responses.find(response => response.id === 2).result.tools.find(tool => tool.name === 'chat_read');
     assert.equal(read.inputSchema.properties.wait_seconds.maximum, 50); assert.match(read.description, /within 300s session budget/);
     assert.equal(responses.find(response => response.id === 3).result.structuredContent.agentChatIdentity.room, room.id);
-    assert.match(responses.find(response => response.id === 3).result.structuredContent.agentChatIdentity.name, /^agent-[A-Za-z0-9._-]+-[a-f0-9]{6}$/);
+    assert.match(responses.find(response => response.id === 3).result.structuredContent.agentChatIdentity.name, /^unknown-[A-Za-z0-9._-]+-untitled-[a-f0-9]{6}$/);
     for (const id of [4, 5]) { const rejected = responses.find(response => response.id === id).result; assert.equal(rejected.isError, true); assert.match(rejected.content[0].text, /Room must be a nonempty string/); }
     for (const id of [6, 7]) { const rejected = responses.find(response => response.id === id).result; assert.equal(rejected.isError, true); assert.match(rejected.content[0].text, /Name must be a nonempty string/); }
     assert.equal(fs.readFileSync(transcript, 'utf8'), history); assert.equal(client.stderr(), '');
@@ -516,9 +520,9 @@ test('pending reads retain old identity and stop safely on rename and join', asy
 
 test('repeated joins preserve a suffixed identity, status and pending read', async (t) => {
   const { mailbox, room } = fixture(t); const { server } = serverFor(t, mailbox);
-  const builder = mailbox.claimIdentity(room, 'builder');
+  const builder = mailbox.claimIdentity(room, `unknown-${testRepo}-builder`);
   await server.callTool('chat_join', { name: 'builder', room: room.id });
-  const identity = server.state.identity; assert.equal(identity.name, 'builder-2');
+  const identity = server.state.identity; assert.equal(identity.name, `unknown-${testRepo}-builder-2`);
   await server.callTool('chat_status', { mine: 'working' });
   const pending = server.callTool('chat_read', { wait_seconds: 2 });
   await server.callTool('chat_join', { name: 'builder', room: room.id });
@@ -541,7 +545,7 @@ test('explicitly joining with the current handle pins it against later title cha
   await server.callTool('chat_join', { name: 'claude' });
   assert.equal(server.state.identity.nameSource, 'explicit');
   mailbox.syncSessionTitle({ room, sessionId: server.state.identity.sessionId, title: 'New host title', client: server.state.client, cwd: server.state.identity.cwd });
-  assert.match(await server.callTool('chat_who'), /You are "claude"/);
+  assert.match(await server.callTool('chat_who'), new RegExp(`You are "claude-${testRepo}-claude"`));
 });
 
 test('stopping after a host title rename removes the current peer record', async t => {
@@ -571,8 +575,8 @@ test('chat_join refreshes the current handle after a hook title rename', async t
   server.state.client = 'claude-mcp-client';
   await server.callTool('chat_who');
   mailbox.syncSessionTitle({ room, sessionId: server.state.identity.sessionId, title: 'renamed-title', client: server.state.client, cwd: server.state.identity.cwd });
-  assert.match(await server.callTool('chat_join', {}), /You are "renamed-title"/);
-  assert.equal(server.state.identity.name, 'renamed-title');
+  assert.match(await server.callTool('chat_join', {}), new RegExp(`You are "claude-${testRepo}-renamedtitle"`));
+  assert.equal(server.state.identity.name, `claude-${testRepo}-renamedtitle`);
 });
 
 test('cancelled pending read does not consume messages', async (t) => {
@@ -733,12 +737,13 @@ test('chat_rename changes only the handle, keeps the room and session, and route
   const renamed = serverFor(t, mailbox, { sessionId: 'rename-session', roomSpec: 'rename-room', nameSpec: 'opencode-m2-moo-3dc651' });
   const sender = serverFor(t, mailbox, { sessionId: 'rename-sender', roomSpec: 'rename-room', nameSpec: 'sender' });
   for (const item of [renamed, sender]) await item.server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'opencode' } } });
+  const originalName = renamed.server.state.identity.name;
   await renamed.server.handle({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'chat_rename', arguments: { name: 'deepseek' } } });
   const result = renamed.responses.find(response => response.id === 2).result;
-  assert.match(result.content[0].text, /^You are "deepseek" in room rename-room/);
-  assert.equal(result.structuredContent.agentChatIdentity.name, 'deepseek');
+  assert.match(result.content[0].text, new RegExp(`^You are "opencode-${testRepo}-deepseek" in room rename-room`));
+  assert.equal(result.structuredContent.agentChatIdentity.name, `opencode-${testRepo}-deepseek`);
   assert.equal(result.structuredContent.agentChatIdentity.sessionId, 'rename-session');
-  await sender.server.callTool('chat_send', { to: 'opencode-m2-moo-3dc651', text: 'to the old handle' });
+  await sender.server.callTool('chat_send', { to: originalName, text: 'to the old handle' });
   assert.match(await renamed.server.callTool('chat_read'), /to the old handle/);
   await renamed.server.handle({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'chat_rename', arguments: {} } });
   assert.equal(renamed.responses.find(response => response.id === 3).error.code, -32602);
