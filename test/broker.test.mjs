@@ -557,13 +557,13 @@ test('old proxy provisional handles migrate on creation without a duplicated pre
 
 test('updated clients retry session creation once without repo for an older broker', async t => {
   const f=await fixture(t),http=await import('node:http');
-  const requests=[];
+  const requests=[]; let errorText='Unexpected request field';
   const server=http.createServer(async(req,res)=>{
     const chunks=[];for await(const chunk of req)chunks.push(chunk);
     const body=JSON.parse(Buffer.concat(chunks).toString()||'{}');
     if(req.url!=='/v1/sessions'){res.writeHead(200,{'Content-Type':'application/json'});res.end('{}');return;}
     requests.push(body);
-    if('repo' in body){res.writeHead(400,{'Content-Type':'application/json'});res.end('{"error":"Unexpected request field"}');return;}
+    if('repo' in body){res.writeHead(400,{'Content-Type':'application/json'});res.end(JSON.stringify({error:errorText}));return;}
     res.writeHead(201,{'Content-Type':'application/json'});res.end(JSON.stringify({sessionId:crypto.randomUUID(),sessionToken:crypto.randomBytes(32).toString('hex'),leaseMs:30000,room:body.room}));
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -571,4 +571,16 @@ test('updated clients retry session creation once without repo for an older brok
   const session=await createRemoteSession({url:`http://127.0.0.1:${server.address().port}`,tokenFile:f.tokenFile,room:'shared',client:'codex',clientCwd:f.base,sessionDir:f.creds});
   assert.equal(requests.length,2);assert.ok(requests[0].repo);assert.equal(requests[1].repo,undefined);
   await closeRemoteSession(session);
+  errorText='Invalid broker request';
+  await assert.rejects(createRemoteSession({url:`http://127.0.0.1:${server.address().port}`,tokenFile:f.tokenFile,room:'shared',client:'codex',clientCwd:f.base,sessionDir:f.creds}),error=>error.status===400);
+  assert.equal(requests.length,3,'unrelated 400 errors are not retried');
+});
+
+test('untitled names saved by an older broker retain their canonical repository on resume', async t => {
+  const f=await fixture(t);
+  const session=await f.make('codex-m2moo-untitled-a1b2c3','shared',{repo:'m2moo',client:'codex',resumable:true});
+  await closeRemoteSession(session);
+  const file=path.join(f.home,'.broker-sessions',`${session.sessionId}.json`),record=JSON.parse(fs.readFileSync(file));
+  delete record.repo;fs.writeFileSync(file,JSON.stringify(record));
+  assert.equal((await resumeRemoteSession(session)).peer.name,'codex-m2moo-untitled-a1b2c3');
 });

@@ -31,22 +31,30 @@ function titleBase(title) {
 function remoteRepo(cwd) {
   return (slug(String(cwd).replace(/\\/g, "/").split("/").filter(Boolean).at(-1) || "root") || "root").slice(0, 32);
 }
-function sessionRepo(cwd = process.cwd()) {
+function sessionRepo(cwd = process.cwd(), runGit = execFileSync) {
   try {
     const real = fs.realpathSync.native(cwd);
     const options = { encoding: "utf8", timeout: 1e3, stdio: ["ignore", "pipe", "ignore"] };
-    const dirs = execFileSync("git", ["-C", real, "rev-parse", "--git-dir", "--git-common-dir"], options).trim().split(/\r?\n/).map((dir) => fs.realpathSync.native(path.resolve(real, dir)));
+    const dirs = runGit("git", ["-C", real, "rev-parse", "--git-dir", "--git-common-dir"], options).trim().split(/\r?\n/).map((dir) => fs.realpathSync.native(path.resolve(real, dir)));
     if (dirs[0] === dirs[1]) {
       try {
-        return path.resolve(execFileSync("git", ["-C", real, "rev-parse", "--show-toplevel"], options).trim());
+        return path.resolve(runGit("git", ["-C", real, "rev-parse", "--show-toplevel"], options).trim());
       } catch {
       }
     }
-    const output = execFileSync("git", ["-C", real, "worktree", "list", "--porcelain", "-z"], options);
-    const fields = output.split("\0");
+    let output, separator;
+    try {
+      output = runGit("git", ["-C", real, "worktree", "list", "--porcelain", "-z"], options);
+      separator = "\0";
+    } catch {
+      output = runGit("git", ["-C", real, "-c", "core.quotePath=false", "worktree", "list", "--porcelain"], options);
+      separator = /\r?\n/;
+    }
+    const fields = output.split(separator);
     const first = fields.slice(0, fields.indexOf(""));
     if (!first[0]?.startsWith("worktree ")) throw new Error("Missing primary worktree");
-    const root = path.resolve(first[0].slice(9));
+    const printedPath = first[0].slice(9);
+    const root = path.resolve(printedPath.startsWith('"') ? JSON.parse(printedPath) : printedPath);
     if (!first.includes("bare")) return root;
     if ([".git", ".bare"].includes(path.basename(root))) return path.dirname(root);
     return root.endsWith(".git") ? root.slice(0, -4) : root;
@@ -57,12 +65,13 @@ function sessionRepo(cwd = process.cwd()) {
 function sessionName({ client, cwd, repo = sessionRepo(cwd), title, sessionId = "", limit = NAME_LIMIT } = {}) {
   const family = agentType(client);
   const repoLimit = Math.min(32, limit - family.length - 2 - 15);
-  const prefix = `${family}-${(slug(path.basename(repo)) || "root").slice(0, repoLimit)}-`;
+  const repository = (slug(path.basename(repo)) || "root").slice(0, 32);
+  const prefix = `${family}-${repository.slice(0, repoLimit)}-`;
   let supplied = typeof title === "string" ? title.trim().toLowerCase() : "";
-  const qualified = /^(codex|claude|opencode|unknown)-[a-z0-9]{1,32}-(.*)$/.exec(supplied);
-  if (qualified) {
-    if (parseSessionName(supplied)) return (prefix + qualified[2]).slice(0, limit).replace(/-+$/, "");
-    supplied = qualified[2];
+  const qualified = /^(codex|claude|opencode|unknown)-([a-z0-9]{1,32})-(.*)$/.exec(supplied);
+  if (qualified && qualified[2] === repository) {
+    if (parseSessionName(supplied)) return (prefix + qualified[3]).slice(0, limit).replace(/-+$/, "");
+    supplied = qualified[3];
   }
   const suffix = slug(supplied) || `untitled-${crypto.createHash("sha256").update(sessionId).digest("hex").slice(0, 6)}`;
   return prefix + suffix.slice(0, limit - prefix.length);
@@ -1251,6 +1260,7 @@ async function request(url, endpoint, { token, method = "POST", body, timeoutMs 
   }
   if (!response.ok) throw Object.assign(new Error(`Broker request failed (HTTP ${response.status})`), {
     status: response.status,
+    brokerError: typeof result?.error === "string" ? result.error.slice(0, 512) : void 0,
     ...response.status === 429 && result?.execution === "not-started" && typeof result.requestId === "string" ? { rejectedBeforeExecution: true, requestId: result.requestId } : {}
   });
   return result;
@@ -1349,7 +1359,7 @@ async function createRemoteSession({ url, tokenFile, room, name, client = "unkno
       try {
         result = await request(url, "/v1/sessions", options);
       } catch (error) {
-        if (error.status !== 400) throw error;
+        if (error.status !== 400 || error.brokerError !== "Unexpected request field") throw error;
         const { repo: ignoredRepo, ...legacyBody } = body;
         result = await request(url, "/v1/sessions", { ...options, body: legacyBody });
       }

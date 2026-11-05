@@ -229,3 +229,19 @@ test('separate Git metadata directories do not become the repository name', t =>
   assert.equal(sessionName({client:'codex',cwd,title:'Review'}),'codex-m2moo-review');
   assert.equal(sessionName({client:'unknown',repo:'m2moo',title:'claude-m2moo-review'}),'unknown-m2moo-review');
 });
+
+test('agent-prefixed task titles are only interpreted as identifiers for this repository', () => {
+  assert.equal(sessionName({client:'claude',repo:'agent-chat',title:'codex-wake-fix'}),'claude-agentchat-codexwakefix');
+  assert.equal(sessionName({client:'claude',repo:'agent-chat',title:'claude-hook-payload-quirks'}),'claude-agentchat-claudehookpayloadquirks');
+  assert.equal(sessionName({client:'unknown',repo:'m2moo',title:'claude-m2moo-review'}),'unknown-m2moo-review');
+});
+
+test('linked worktree repository discovery works when Git rejects NUL porcelain output', t => {
+  const {directory,cwd}=fixture(t);
+  const git=(...args)=>execFileSync('git',['-C',cwd,...args],{encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
+  git('init','-q');git('-c','user.name=Test','-c','user.email=test@example.invalid','-c','commit.gpgsign=false','commit','--allow-empty','-qm','fixture');
+  const worktree=path.join(directory,'pr28');git('worktree','add','--detach',worktree);
+  let fallback=false;
+  const run=(command,args,options)=>{if(args.includes('-z'))throw new Error('Unsupported flag');if(args.includes('core.quotePath=false'))fallback=true;return execFileSync(command,args,options);};
+  assert.equal(path.basename(sessionRepo(worktree,run)),'m2-moo');assert.equal(fallback,true);
+});
