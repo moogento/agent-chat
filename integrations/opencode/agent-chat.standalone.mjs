@@ -1351,7 +1351,7 @@ async function createRemoteSession({ url, tokenFile, room, name, client = "unkno
         if (error.status === 404 || error.status === 410) throw Object.assign(new Error("Saved broker session expired or is no longer available. Stop adapters using this file, then remove the obsolete AGENT_CHAT_BROKER_SESSION_FILE or choose a fresh absolute path and restart. The saved credentials have been preserved."), { status: error.status });
         throw error;
       }
-      session = { ...previous, repo: repo ?? remoteRepo(sessionRepo(clientCwd)), leaseMs: resumed.leaseMs };
+      session = { ...previous, repo: repo ?? remoteRepo(sessionRepo(clientCwd)), leaseMs: resumed.leaseMs, ...resumed.peer ? { peer: resumed.peer } : {} };
       if (resumed.peer?.room !== room) throw new Error("Resumed broker room does not match");
     } else {
       const body = { room, ...name === void 0 ? {} : { name }, repo: repo ?? remoteRepo(sessionRepo(clientCwd)), client, clientCwd, resumable };
