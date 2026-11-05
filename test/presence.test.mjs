@@ -34,11 +34,11 @@ test('a filesystem-root working directory still gets a usable provisional handle
   const root = path.parse(process.cwd()).root;
   const mailbox = createMailbox({ home, cwd: root });
   const host = presence.registerHost({ client: 'codex', hostSessionId: 'root-host', cwd: root });
-  assert.match(host.name, /^codex-root-[a-f0-9]{6}$/);
+  assert.match(host.name, /^codex-root-untitled-[a-f0-9]{6}$/);
   const server = createServer({ mailbox, sessionId: 'root-mcp' });
   t.after(() => server.stop());
   await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'codex' } } });
-  assert.match(server.state.identity.name, /^codex-root-[a-f0-9]{6}$/);
+  assert.match(server.state.identity.name, /^codex-root-untitled-[a-f0-9]{6}$/);
 });
 
 test('a failed eager claim does not break MCP initialization', async t => {
@@ -65,10 +65,10 @@ test('same-repo unlinked MCP peers are grouped without guessing host identity', 
   first.state.client = 'codex-mcp-client'; second.state.client = 'codex-mcp-client';
   await first.callTool('chat_who'); await second.callTool('chat_who');
   const output = await first.callTool('chat_presence');
-  assert.match(output, /first-task.*host not linked/);
-  assert.match(output, /second-task.*host not linked/);
+  assert.match(output, /codex-agentchat-firsttask.*host not linked/);
+  assert.match(output, /codex-agentchat-secondtask.*host not linked/);
   assert.equal((output.match(/Unlinked MCP connections/g) || []).length, 1);
-  assert.match(output, /peer-first|peer-second|codex-agent-chat/);
+  assert.match(output, /peer-first|peer-second|codex-agentchat/);
   assert.equal(presence.linkedHostIds(first.state.identity.room, first.state.identity.sessionId).length, 0);
 });
 

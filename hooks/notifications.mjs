@@ -749,7 +749,7 @@ export async function runCommandHook({ client, payload, env = process.env, mailb
   }
   const startupHint = payload.hook_event_name === 'SessionStart' && env.AGENT_CHAT_NOTIFY_AUTO_BIND === '1'
     && ['startup', 'resume', 'clear', undefined].includes(payload.source)
-    ? `${CHAT_LABEL}: Call chat_who once to link your joined MCP peer to this host session. If you can see a host title, match it with chat_rename(name: ...); do not guess a hidden title.` : '';
+    ? `${CHAT_LABEL}: Call chat_who once to link your joined MCP peer to this host session. If you can see a host title, register it with chat_rename(name: ...), which adds the agent-repo prefix. Refer to sessions by their full agent-repo-title handle; do not guess a hidden title.` : '';
   const deliver = async notice => {
     await write(JSON.stringify({ hookSpecificOutput: { hookEventName: payload.hook_event_name,
       additionalContext: [startupHint, notice].filter(Boolean).join('\n') } }) + '\n');

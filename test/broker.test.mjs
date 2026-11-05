@@ -90,7 +90,7 @@ test('broker reply watch inspection is session authenticated and clears after re
     room: 'shared', sessionId: alice.sessionId, sessionDir: f.creds })).cancelled, true);
   assert.equal((await inspect()).wait.state, 'none');
   await closeRemoteSession(bob);
-  const inactive = await call(alice, 'chat_send', { to: 'bob', text: 'cannot await a departed peer', await_reply_minutes: 120 });
+  const inactive = await call(alice, 'chat_send', { to: bob.sessionId, text: 'cannot await a departed peer', await_reply_minutes: 120 });
   assert.equal(inactive.response.result.isError, true);
   assert.match(inactive.text, /active directed peer/);
   assert.equal((await inspect()).wait.state, 'none');
@@ -138,7 +138,7 @@ test('leases expire independently despite a shared live broker PID', async t => 
     now += 750; await heartbeatRemoteSession(bob);
     now += 500;
     await assert.rejects(call(alice, 'chat_who'), error => error.status === 410);
-    const next = await f.make('same'); assert.match((await call(next, 'chat_who')).text, /"same"/);
+    const next = await f.make('same'); assert.match((await call(next, 'chat_who')).text, /unknown-[a-z0-9]+-same"/);
     assert.match((await call(bob, 'chat_who')).text, /same-2/);
     assert.equal(f.broker.stats().activeSessions, 2);
     const inspect = { url: f.broker.url, tokenFile: f.tokenFile, room: 'shared', sessionId: alice.sessionId, sessionDir: f.creds };

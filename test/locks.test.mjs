@@ -84,9 +84,9 @@ test('chat_lock and chat_unlock work through MCP and chat_who lists held locks',
     return server;
   });
   assert.match(await servers[0].callTool('chat_lock', { lock: 'publish', note: 'productcontent 2.9.118' }), /^Locked publish until .* and announced it in release-room/);
-  await assert.rejects(servers[1].callTool('chat_lock', { lock: 'publish', note: 'pulse' }), /publish is held by releaser/);
-  assert.match(await servers[1].callTool('chat_who'), /Held locks:\n- publish: releaser in release-room until .*: productcontent 2\.9\.118/);
-  assert.match(await servers[0].callTool('chat_who'), /- publish: releaser \[you\]/);
+  await assert.rejects(servers[1].callTool('chat_lock', { lock: 'publish', note: 'pulse' }), /publish is held by unknown-project-releaser/);
+  assert.match(await servers[1].callTool('chat_who'), /Held locks:\n- publish: unknown-project-releaser in release-room until .*: productcontent 2\.9\.118/);
+  assert.match(await servers[0].callTool('chat_who'), /- publish: unknown-project-releaser \[you\]/);
   assert.match(await servers[1].callTool('chat_read'), /releaser -> all: LOCK publish: productcontent 2\.9\.118/);
   assert.match(await servers[0].callTool('chat_unlock', { lock: 'publish', note: 'released' }), /^Unlocked publish and announced/);
   assert.match(await servers[0].callTool('chat_unlock', { lock: 'publish' }), /was not locked/);
