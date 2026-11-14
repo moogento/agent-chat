@@ -176,6 +176,18 @@ export function findBinding({ client, hostSessionId, cwd, env = process.env }) {
   return matches[0];
 }
 
+/** Finds one configured host conversation without treating the command directory as its mailbox directory. */
+export function findConversationBinding({ client, hostSessionId, env = process.env }) {
+  if (!env.AGENT_CHAT_NOTIFY_CONFIG || !CLIENTS.has(client) || !hostSessionId) return null;
+  let config;
+  try { config = readConfig(env.AGENT_CHAT_NOTIFY_CONFIG); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  const endpoint = env.AGENT_CHAT_BROKER_URL ? brokerUrl(env.AGENT_CHAT_BROKER_URL) : undefined;
+  const matches = config.bindings.filter(binding => binding.client === client && binding.hostSessionId === hostSessionId
+    && binding.brokerUrl === endpoint);
+  if (matches.length !== 1 || !sameBindingCwd(matches[0].cwd, canonicalCwd(matches[0].cwd))) return null;
+  return matches[0];
+}
+
 /** Read a bound watch without advancing the chat_read cursor. */
 async function boundReplyWatch({ binding, cwd, env, mailbox, remoteInspector }) {
   const remote = remoteMode(binding, env);

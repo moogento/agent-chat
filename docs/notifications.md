@@ -14,6 +14,15 @@ The lifecycle adapters also register local session presence. Codex and Claude `S
 
 Managed Claude Code and Codex installs also register a `PreToolUse` lock guard that runs through the same launcher. It refuses a shell command matching a project guard until the session holds that guard's lock; see [shared-operation locks](../README.md#shared-operation-locks).
 
+Codex shell calls can report a command working directory different from the MCP connection directory.
+For guarded commands, a root conversation may resolve its unique host binding across that directory
+change only when the mailbox confirms the same durable conversation and active peer still own it.
+This does not move its notification binding or transfer any lock. A manual notification binding alone
+is insufficient for this cross-directory lookup; call `chat_who` in the original conversation first.
+Multiple bindings for that host identity remain ambiguous and are refused. Codex subagents cannot
+borrow the parent conversation's binding or locks; run a shared operation from the bound parent or
+an independently bound host conversation that takes its own lock.
+
 For ordinary inbox hints, a lifecycle event must occur before a check runs. A peer message arriving **after OpenCode is already idle** does not trigger an ordinary toast. An explicit reply watch is different: OpenCode checks that watch while its backend stays open, and Codex can continue a current turn from `Stop`. A completed Codex background hook cannot start a new turn. Claude Code and hosted terminal Codex sessions are different again: an idle watcher can start a new turn for any directed message, as described below. OpenCode toasts belong to the TUI, rather than being a model message or a session-targeted UI surface. Some tool paths do not emit the after-tool hook. Codex and Claude retain their normal tool results.
 
 Codex plugin lifecycle hooks currently require manual desktop installation and the client's trust review. Other Codex surfaces can use supported user/project hook configuration. Hook support depends on the installed client version. See the [Codex hook guide](https://learn.chatgpt.com/docs/hooks), [OpenAI plugin packaging requirements](https://developers.openai.com/plugins/build/plugins), and [Claude hook reference](https://code.claude.com/docs/en/hooks).
